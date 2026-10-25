@@ -41,6 +41,7 @@ macro_rules! targets {
 }
 
 // The target list, one name per line, sorted.
+#[rustfmt::skip]
 targets![
     levels_records,
     service_unit,
