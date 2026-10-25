@@ -15,12 +15,12 @@
     reason = "test code: a panic is a test failure"
 )]
 
-mod common;
+mod http_stub;
 
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use common::{RawRequest, RawResponse};
+use http_stub::{RawRequest, RawResponse};
 use seaworthy::s3::{PutOptions, PutOutcome, S3Backend, S3Config, StorageError, StoragePath};
 
 fn b64_sha256(bytes: &[u8]) -> String {
@@ -60,10 +60,10 @@ type Seen = Arc<Mutex<Vec<RawRequest>>>;
 
 async fn stub(
     respond: impl Fn(&RawRequest) -> RawResponse + Send + Sync + 'static,
-) -> (common::StubServer, Seen) {
+) -> (http_stub::StubServer, Seen) {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
-    let server = common::spawn(move |request: RawRequest| {
+    let server = http_stub::spawn(move |request: RawRequest| {
         let response = respond(&request);
         log.lock().expect("log").push(request);
         response
@@ -183,7 +183,7 @@ async fn a_precondition_failure_is_already_exists_never_an_overwrite() {
     server.stop().await;
 }
 
-async fn backend_put(server: &common::StubServer) -> Result<PutOutcome, StorageError> {
+async fn backend_put(server: &http_stub::StubServer) -> Result<PutOutcome, StorageError> {
     backend(&server.url())
         .put_object(
             &spath("a"),

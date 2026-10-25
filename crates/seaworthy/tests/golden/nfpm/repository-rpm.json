@@ -1,0 +1,50 @@
+{
+  "arch": "all",
+  "contents": [
+    {
+      "dst": "/etc/pki/rpm-gpg/RPM-GPG-KEY-acme",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/rpm/files/000-RPM-GPG-KEY-acme"
+    },
+    {
+      "dst": "/etc/yum.repos.d/acme.repo",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/rpm/files/001-acme.repo",
+      "type": "config|noreplace"
+    }
+  ],
+  "deb": {
+    "compression": "xz"
+  },
+  "description": "Sets dnf up for Acme's packages: their repository and signing keys",
+  "disable_globbing": true,
+  "homepage": "https://acme.test",
+  "license": "MIT",
+  "maintainer": "Acme Packaging <pkg@acme.test>",
+  "mtime": "2023-11-14T22:13:20Z",
+  "name": "acme-repository",
+  "platform": "linux",
+  "priority": "optional",
+  "release": "812",
+  "rpm": {
+    "buildhost": "seaworthy",
+    "compression": "xz",
+    "packager": "Acme Packaging <pkg@acme.test>",
+    "summary": "Sets dnf up for Acme's packages: their repository and signing keys"
+  },
+  "section": "misc",
+  "umask": 18,
+  "vendor": "Acme",
+  "version": "1.4.0~rc.2",
+  "version_schema": "none"
+}

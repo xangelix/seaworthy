@@ -1,0 +1,178 @@
+{
+  "arch": "amd64",
+  "archlinux": {
+    "packager": "Acme Packaging <pkg@acme.test>"
+  },
+  "contents": [
+    {
+      "dst": "/opt/acme",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "type": "dir"
+    },
+    {
+      "dst": "/opt/acme/agent",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "type": "dir"
+    },
+    {
+      "dst": "/opt/acme/agent/lib",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "type": "dir"
+    },
+    {
+      "dst": "/opt/acme/agent/libexec",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "type": "dir"
+    },
+    {
+      "dst": "/opt/acme/agent/AcmeTool",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/dist/agent/x86_64-unknown-linux-gnu/tree/opt/acme/agent/AcmeTool"
+    },
+    {
+      "dst": "/opt/acme/agent/lib/libacme_core_x86-64-v3.so",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/dist/agent/x86_64-unknown-linux-gnu/tree/opt/acme/agent/lib/libacme_core_x86-64-v3.so"
+    },
+    {
+      "dst": "/opt/acme/agent/lib/libacme_core_x86-64-v2.so",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/dist/agent/x86_64-unknown-linux-gnu/tree/opt/acme/agent/lib/libacme_core_x86-64-v2.so"
+    },
+    {
+      "dst": "/opt/acme/agent/libexec/acme-agent-update",
+      "file_info": {
+        "group": "root",
+        "mode": 493,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/dist/agent/x86_64-unknown-linux-gnu/tree/opt/acme/agent/libexec/acme-agent-update"
+    },
+    {
+      "dst": "/usr/lib/systemd/system/AcmeAgent.service",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/004-AcmeAgent.service"
+    },
+    {
+      "dst": "/usr/lib/systemd/system/AcmeAgent-update.path",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/005-AcmeAgent-update.path"
+    },
+    {
+      "dst": "/usr/lib/systemd/system/AcmeAgent-update.service",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/006-AcmeAgent-update.service"
+    },
+    {
+      "dst": "/usr/lib/sysusers.d/AcmeAgent.conf",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/007-AcmeAgent.conf"
+    },
+    {
+      "dst": "/usr/lib/systemd/system-preset/80-acme-agent.preset",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/008-80-acme-agent.preset"
+    }
+  ],
+  "deb": {
+    "compression": "xz"
+  },
+  "depends": [
+    "libc6 (>= 2.36)",
+    "systemd",
+    "ca-certificates"
+  ],
+  "description": "Collects things for Acme.",
+  "disable_globbing": true,
+  "homepage": "https://acme.test",
+  "license": "MIT",
+  "maintainer": "Acme Packaging <pkg@acme.test>",
+  "mtime": "2023-11-14T22:13:20Z",
+  "name": "acme-agent",
+  "platform": "linux",
+  "priority": "optional",
+  "release": "812",
+  "rpm": {
+    "buildhost": "seaworthy",
+    "compression": "xz",
+    "packager": "Acme Packaging <pkg@acme.test>",
+    "requires": {
+      "post": [
+        "systemd"
+      ]
+    },
+    "summary": "Collects things for Acme."
+  },
+  "scripts": {
+    "postinstall": "<tmp>/work/deb/scripts/postinstall.sh",
+    "postremove": "<tmp>/work/deb/scripts/postremove.sh",
+    "preinstall": "<tmp>/work/deb/scripts/preinstall.sh",
+    "preremove": "<tmp>/work/deb/scripts/preremove.sh"
+  },
+  "section": "misc",
+  "umask": 18,
+  "vendor": "Acme",
+  "version": "1.4.0~rc.2",
+  "version_schema": "none"
+}

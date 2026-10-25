@@ -25,13 +25,13 @@
     reason = "test code: a panic is a test failure"
 )]
 
-mod common;
+mod http_stub;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use common::{RawRequest, RawResponse, StubServer, percent_decode};
+use http_stub::{RawRequest, RawResponse, StubServer, percent_decode};
 use futures_util::StreamExt as _;
 use seaworthy::s3::sigv4::{Credentials, Payload, SignRequest, Signer};
 use seaworthy::s3::{PutOptions, PutOutcome, S3Backend, S3Config, StorageError, StoragePath};
@@ -369,7 +369,7 @@ fn list_objects_v2(state: &Arc<Mutex<StubState>>, query: &[(String, String)]) ->
 }
 
 async fn spawn_stub_with_state(state: Arc<Mutex<StubState>>) -> StubServer {
-    common::spawn(move |request| handle(&state, request)).await
+    http_stub::spawn(move |request| handle(&state, request)).await
 }
 
 async fn spawn_stub() -> (StubServer, Arc<Mutex<StubState>>) {
@@ -727,7 +727,7 @@ async fn listing_pages_and_refuses_a_dead_end() {
     assert_eq!(listed, ["plans/a.json", "plans/b&c.json", "plans/c.json"]);
     server.stop().await;
 
-    let server = common::spawn(|_| {
+    let server = http_stub::spawn(|_| {
         RawResponse::new(
             200,
             "<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>",
@@ -754,7 +754,7 @@ fn backend_on(server: &StubServer) -> S3Backend {
 
 #[tokio::test]
 async fn management_calls_are_bounded_by_the_configured_timeout() {
-    let server = common::spawn_hanging().await;
+    let server = http_stub::spawn_hanging().await;
     let backend = S3Backend::new(
         config(&server.addr).with_management_timeout(std::time::Duration::from_millis(200)),
     )
@@ -785,7 +785,7 @@ async fn management_calls_are_bounded_by_the_configured_timeout() {
 
 #[tokio::test]
 async fn list_is_bounded_by_the_management_timeout() {
-    let server = common::spawn_hanging().await;
+    let server = http_stub::spawn_hanging().await;
     let backend = S3Backend::new(
         config(&server.addr).with_management_timeout(std::time::Duration::from_millis(200)),
     )
@@ -808,7 +808,7 @@ async fn list_is_bounded_by_the_management_timeout() {
 
 #[tokio::test]
 async fn management_xml_bodies_are_capped() {
-    let server = common::spawn(move |_request: RawRequest| {
+    let server = http_stub::spawn(move |_request: RawRequest| {
         RawResponse::new(200, vec![b'x'; 9 * 1024 * 1024]) // 9 MiB > the 8 MiB XML cap
     })
     .await;
@@ -834,13 +834,13 @@ async fn management_xml_bodies_are_capped() {
 async fn redirects_are_never_followed() {
     let elsewhere = Arc::new(Mutex::new(0_usize));
     let hits = elsewhere.clone();
-    let target = common::spawn(move |_request: RawRequest| {
+    let target = http_stub::spawn(move |_request: RawRequest| {
         *hits.lock().expect("hits") += 1;
         RawResponse::new(200, Vec::new())
     })
     .await;
     let location = format!("{}/{BUCKET}/stolen", target.url());
-    let redirector = common::spawn(move |_request: RawRequest| {
+    let redirector = http_stub::spawn(move |_request: RawRequest| {
         RawResponse::new(307, Vec::new()).with_header("location", &location)
     })
     .await;
@@ -955,7 +955,7 @@ fn endpoints_are_https_only_except_loopback() {
 
 #[tokio::test]
 async fn endpoint_controlled_error_strings_are_line_safe() {
-    let server = common::spawn(move |_request: RawRequest| {
+    let server = http_stub::spawn(move |_request: RawRequest| {
         RawResponse::s3_error(403, "AccessDenied", "forged\r\nTRUSTED: all good")
     })
     .await;
@@ -974,7 +974,7 @@ async fn endpoint_controlled_error_strings_are_line_safe() {
     server.stop().await;
 
     // The raw-body (non-XML) path too.
-    let server = common::spawn(move |_request: RawRequest| {
+    let server = http_stub::spawn(move |_request: RawRequest| {
         RawResponse::new(500, b"raw\r\nFORGED-LINE\x1b[2J".to_vec())
     })
     .await;

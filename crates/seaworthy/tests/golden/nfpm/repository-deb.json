@@ -1,0 +1,50 @@
+{
+  "arch": "all",
+  "contents": [
+    {
+      "dst": "/usr/share/keyrings/acme-archive-keyring.asc",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/000-acme-archive-keyring.asc"
+    },
+    {
+      "dst": "/etc/apt/sources.list.d/acme.sources",
+      "file_info": {
+        "group": "root",
+        "mode": 420,
+        "mtime": "2023-11-14T22:13:20Z",
+        "owner": "root"
+      },
+      "src": "<tmp>/work/deb/files/001-acme.sources",
+      "type": "config|noreplace"
+    }
+  ],
+  "deb": {
+    "compression": "xz"
+  },
+  "description": "Sets apt up for Acme's packages: their repository and signing keys",
+  "disable_globbing": true,
+  "homepage": "https://acme.test",
+  "license": "MIT",
+  "maintainer": "Acme Packaging <pkg@acme.test>",
+  "mtime": "2023-11-14T22:13:20Z",
+  "name": "acme-repository",
+  "platform": "linux",
+  "priority": "optional",
+  "release": "812",
+  "rpm": {
+    "buildhost": "seaworthy",
+    "compression": "xz",
+    "packager": "Acme Packaging <pkg@acme.test>",
+    "summary": "Sets apt up for Acme's packages: their repository and signing keys"
+  },
+  "section": "misc",
+  "umask": 18,
+  "vendor": "Acme",
+  "version": "1.4.0~rc.2",
+  "version_schema": "none"
+}
