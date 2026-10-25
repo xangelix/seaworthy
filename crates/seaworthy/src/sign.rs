@@ -284,8 +284,8 @@ pub enum Output {
 
 /// An external signing program: the statement on stdin, the signature on
 /// stdout. It runs with the build's environment (credentials for a KMS or
-/// a secret store come from there), no shell, a deadline, and a cap on what it may
-/// print.
+/// a secret store come from there), no shell, a deadline, and a cap on what
+/// it may print.
 #[derive(Debug)]
 pub struct CommandSigner {
     algorithm: SignatureAlgorithm,

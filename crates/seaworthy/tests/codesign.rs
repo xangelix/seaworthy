@@ -458,7 +458,7 @@ fn repository_indexes_get_armored_and_clear_signatures_the_pins_check() {
 
 #[test]
 fn pinned_keys_must_be_ones_every_client_accepts() {
-    // Gpg signs and verifies with any of these; Debian 13's apt
+    // gpg signs and verifies with any of these; Debian 13's apt
     // (sqv) refuses RSA below 2048, DSA and SHA-1 binding signatures, and
     // RHEL's crypto policies refuse them for rpm.
     if !have("gpg", &["--version"]) {

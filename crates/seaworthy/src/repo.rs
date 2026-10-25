@@ -1,7 +1,7 @@
-//! Package repositories on object storage: every product's current release, as `seaworthy
-//! package` listed it (`packages.json`), laid out as the static files of
-//! an APT, a DNF and a pacman repository, the releases the update helper
-//! fetches, and the repositories' OpenPGP key — plus the publish plan
+//! Package repositories on object storage: every product's current
+//! release, as `seaworthy package` listed it (`packages.json`), laid out
+//! as the static files of an APT, a DNF and a pacman repository, the
+//! releases the update helper fetches, and the repositories' OpenPGP key — plus the publish plan
 //! that names every file with its hash, size and cache class, immutable
 //! files first and indexes last.
 //!
@@ -39,8 +39,8 @@
 //!   own signature (`gpgcheck=1`).
 //! - **pacman**: `repo-add` writes the `<repo>.db.tar.zst` and
 //!   `<repo>.files.tar.zst` databases; the names pacman reads (`<repo>.db`,
-//!   `<repo>.files`) are copies, not links (object storage has none), and every
-//!   database gets its detached signature. Each package's `.sig` sits
+//!   `<repo>.files`) are copies, not links (object storage has none), and
+//!   every database gets its detached signature. Each package's `.sig` sits
 //!   beside it, where pacman fetches it (pacman 6.1's `repo-add` stopped
 //!   embedding signatures in the database).
 //! - **Releases**: each installable artifact (deb, rpm, pacman, tar, zip,
@@ -1282,7 +1282,8 @@ fn pacman(
         let archive_path = root.join(&archive);
         let alias_path = root.join(&alias);
         let bytes = std::fs::read(&archive_path).map_err(|e| DistError::io(&archive_path, e))?;
-        // repo-add links the alias; object storage has no links: the same bytes.
+        // repo-add links the alias; object storage has no links: the same
+        // bytes.
         match std::fs::symlink_metadata(&alias_path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 std::fs::remove_file(&alias_path).map_err(|e| DistError::io(&alias_path, e))?;

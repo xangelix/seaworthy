@@ -499,7 +499,7 @@ fn a_linux_unit_runs_as_root_only_by_choice() {
 
 #[test]
 fn text_that_reaches_package_metadata_has_no_dollar() {
-    // NFPM expands $VAR in metadata, with no escape.
+    // nFPM expands $VAR in metadata, with no escape.
     for (from, to) in [
         (
             "description = \"Collects forensic data for Acme.\"",

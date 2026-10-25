@@ -84,9 +84,9 @@ pub struct Defaults {
     /// The release channel (`stable`).
     pub channel: String,
     /// The algorithms release manifests are signed with; must match the
-    /// products' `AlgorithmPolicy` (for example `ml-dsa-87` only). Empty (or left
-    /// out): no release manifests at all — only when no product ships an
-    /// update helper, the one client that verifies them. Packages
+    /// products' `AlgorithmPolicy` (for example `ml-dsa-87` only). Empty
+    /// (or left out): no release manifests at all — only when no product
+    /// ships an update helper, the one client that verifies them. Packages
     /// keep their own signatures (OpenPGP, Authenticode) either way.
     #[serde(default)]
     pub release_signatures: Vec<SignatureAlgorithm>,

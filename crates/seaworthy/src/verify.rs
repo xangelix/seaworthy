@@ -295,7 +295,7 @@ impl Run {
                     Err(e) => self.finding(path, format!("its dynamic section doesn't parse: {e}")),
                 }
             }
-            // Glibc versions past the product's floor.
+            // glibc versions past the product's floor.
             let floor = product.linux.glibc_floor();
             match elf_glibc_needs(bytes) {
                 Ok(needs) => {
@@ -317,7 +317,7 @@ impl Run {
                         })
                         .collect();
                     if !beyond.is_empty() {
-                        // Libm's hypot and hypotf, versioned anew in
+                        // libm's hypot and hypotf, versioned anew in
                         // glibc 2.35, have a fix that keeps the builder.
                         let libm = needs
                             .iter()

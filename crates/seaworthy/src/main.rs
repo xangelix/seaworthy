@@ -40,8 +40,8 @@
 //! `--artifacts` needed). The environment it reads, all conventional
 //! build-tool settings:
 //!
-//! - `NFPM`: the nFPM binary (default `nfpm`; `scripts/ci/install-nfpm.sh` installs
-//!   the pinned release);
+//! - `NFPM`: the nFPM binary (default `nfpm`; `scripts/ci/install-nfpm.sh`
+//!   installs the pinned release);
 //! - `SEAWORTHY_WIX`: the WiX binary. Unset, an `msi` output writes the
 //!   `.wxs` for the Windows runner to build. (Not `WIX`: WiX v3's installer
 //!   sets that, machine-wide, to its install folder.)

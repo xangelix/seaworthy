@@ -19,8 +19,8 @@
 //!
 //! - **Files:** the tree under `%ProgramFiles%\<Vendor>\<Directory>`, one
 //!   component per file (Rust binaries carry no version resource until
-//!   [`crate::pe_version`] stamps one, and WiX derives a stable component GUID only for a
-//!   single-file component). The directories have mixed-case ids, so they
+//!   [`crate::pe_version`] stamps one, and WiX derives a stable component
+//!   GUID only for a single-file component). The directories have mixed-case ids, so they
 //!   are private properties: the install location can't be moved from the
 //!   command line.
 //! - **Program directory DACL** (service products): `MsiLockPermissionsEx`
