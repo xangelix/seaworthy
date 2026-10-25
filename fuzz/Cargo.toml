@@ -1,0 +1,53 @@
+# seaworthy fuzz targets (cargo-fuzz layout). A STANDALONE workspace with its
+# own Cargo.lock, excluded from the root workspace (`exclude = ["fuzz"]`
+# there): libfuzzer-sys, arbitrary and the nightly sanitizer builds never
+# touch the stable build, `cargo test --workspace`, clippy or cargo-deny's
+# graph. Drive it through `scripts/fuzz.sh`; see fuzz/README.md.
+#
+# The target LOGIC lives in the library (`src/targets/<name>.rs`, one
+# `pub fn run(data: &[u8])` each, listed once in `src/lib.rs`), so
+# `cargo test --manifest-path fuzz/Cargo.toml` replays every committed seed
+# and regression input on STABLE, without libFuzzer (tests/replay.rs). The
+# `fuzz_targets/<name>.rs` binaries are one-line libFuzzer wrappers.
+
+[package]
+name = "seaworthy-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+# The fuzzed crates, as path dependencies. A crate that reaches private
+# parsers exposes them behind its own `fuzzing` feature (off by default, no
+# extra dependencies); enable it here, e.g.:
+#
+#   seaworthy-levels = { path = "../crates/seaworthy-levels" }
+#   seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing"] }
+
+[profile.release]
+debug = 1
+
+# One [[bin]] per target, in sync with the `targets!` list in src/lib.rs
+# (tests/replay.rs fails when they disagree). Each entry is exactly:
+#
+#   [[bin]]
+#   name = "<target>"
+#   path = "fuzz_targets/<target>.rs"
+#   test = false
+#   doc = false
+#   bench = false

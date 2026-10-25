@@ -2,3 +2,6 @@
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+/fuzz/logs
+/fuzz/work
+/fuzz/corpus-nightly

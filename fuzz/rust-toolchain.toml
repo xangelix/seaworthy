@@ -1,0 +1,8 @@
+# The fuzz crate's pinned nightly (cargo-fuzz needs nightly for the
+# sanitizer and coverage flags). scripts/fuzz.sh reads this channel; the
+# stable replay (`cargo test --manifest-path fuzz/Cargo.toml`, run from the
+# repository root) uses the root rust-toolchain.toml instead. A date-stamped
+# nightly, never the floating `nightly`: Dependabot proposes newer ones.
+[toolchain]
+channel = "nightly-2026-10-10"
+profile = "minimal"
