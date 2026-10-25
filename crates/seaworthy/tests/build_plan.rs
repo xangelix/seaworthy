@@ -366,8 +366,8 @@ fn the_helper_builds_from_its_crate_when_dist_toml_names_it() {
 /// `seaworthy.toml`'s crate paths are relative to the workspace root, the
 /// workspace manifest's directory, and the plan names them through it: the
 /// builds run where that manifest is named from: a template built from
-/// its repository's root (`templates/getting-started/Cargo.toml`) misses a
-/// bare `crates/gs-device`.
+/// its repository's root (`templates/acme/Cargo.toml`) misses a bare
+/// `crates/acme-device`.
 #[test]
 fn crate_paths_are_relative_to_the_workspace_manifest_s_directory() {
     let config = Config::parse(&CONFIG.replacen(
@@ -393,10 +393,7 @@ fn crate_paths_are_relative_to_the_workspace_manifest_s_directory() {
     for (manifest, root) in [
         ("Cargo.toml", ""),
         ("./Cargo.toml", ""),
-        (
-            "templates/getting-started/Cargo.toml",
-            "templates/getting-started/",
-        ),
+        ("templates/acme/Cargo.toml", "templates/acme/"),
         ("../product/Cargo.toml", "../product/"),
         ("/builds/acme/product/Cargo.toml", "/builds/acme/product/"),
         ("/Cargo.toml", "/"),

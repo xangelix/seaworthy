@@ -14,8 +14,7 @@
 //! working directory before unnamed bind paths). It uses the WiX v4 schema,
 //! which WiX v5, v6 and v7 all read.
 //!
-//! What the package does, following the shapes the distribution spike
-//! checks on the Windows runner (`tools/windows-spike`):
+//! What the package does:
 //!
 //! - **Files:** the tree under `%ProgramFiles%\<Vendor>\<Directory>`, one
 //!   component per file (Rust binaries carry no version resource until

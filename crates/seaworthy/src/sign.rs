@@ -696,7 +696,7 @@ pub fn manifest_for_bytes(
 /// [[manifest]]                       # one per release-signatures algorithm
 /// algorithm = "ml-dsa-87"
 /// public-key = "release-mldsa87.pub" # hex; must be one of seaworthy.toml's release-keys
-/// command = ["bao-sign", "release"]  # statement on stdin, signature on stdout
+/// command = ["kms-sign", "release"]  # statement on stdin, signature on stdout
 /// output = "hex"                     # or "raw"
 /// timeout-seconds = 120
 ///

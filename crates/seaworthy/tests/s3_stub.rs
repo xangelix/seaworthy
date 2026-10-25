@@ -31,8 +31,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use http_stub::{RawRequest, RawResponse, StubServer, percent_decode};
 use futures_util::StreamExt as _;
+use http_stub::{RawRequest, RawResponse, StubServer, percent_decode};
 use seaworthy::s3::sigv4::{Credentials, Payload, SignRequest, Signer};
 use seaworthy::s3::{PutOptions, PutOutcome, S3Backend, S3Config, StorageError, StoragePath};
 use seaworthy_crypto::digest::sha256_hex;
