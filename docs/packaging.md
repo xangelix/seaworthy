@@ -1,0 +1,393 @@
+# Packaging
+
+How the `seaworthy` command turns built artifacts into verified install trees, signed packages,
+repositories and a publication. The tool never compiles: a build (the GitLab templates, or your own
+CI following `seaworthy build-plan`) leaves the binaries in an artifact directory, and every step
+below reads from there. The configuration it reads is described in
+[configuration.md](configuration.md); the CI templates in [ci-gitlab.md](ci-gitlab.md).
+
+```text
+artifacts ──▶ verify ──▶ layout ──▶ package ──▶ repo ──▶ publish
+                │           │          │          │         │
+           every finding  install   packages,   APT, DNF,  S3-compatible
+           at once        trees     manifests,  pacman,    store, checked
+                          (stripped) SBOMs      release    through the
+                                                tree, plan public URL
+```
+
+## The artifact directory
+
+```text
+<artifacts>/<triple>/launcher/<executable>[.exe]
+<artifacts>/<triple>/helper/<helper>[.exe]          when the update helper ships
+<artifacts>/<triple>/cores/<cpu>/lib<core>.so       Linux (x86_64-unknown-linux-gnu)
+<artifacts>/<triple>/cores/<cpu>/<core>.dll         Windows (x86_64-pc-windows-msvc), with the sidecars
+<artifacts>/<triple>/cores/<cpu>/lib<core>.dylib    macOS (aarch64-apple-darwin)
+```
+
+Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
+the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
+the launcher and helper once, the core once per CPU target in its own target directory, the per-CPU
+flags as `target.<triple>.rustflags`. It refuses a product whose cargo configuration sets
+`build.rustflags`, which cargo would ignore once target flags are set.
+
+## Verify
+
+`seaworthy verify` runs every check and reports every finding together, so one run names everything
+wrong:
+
+1. **Presence and kind.** The launcher, the helper (when shipped) and one core per CPU target, on
+   every platform the outputs need; each a regular file of the platform's format: ELF64 x86-64
+   executables and shared libraries on Linux, PE32+ AMD64 executables and DLLs on Windows, thin
+   arm64 Mach-O executables and dylibs on macOS.
+2. **Core records.** Each core's `.cpureq` parses, names this platform's triple and this
+   directory's CPU, and lists only feature names `seaworthy-levels` knows.
+3. **The launcher's `.cpulist`** names the product's core and exactly the configured targets, in
+   order.
+4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build,
+   and the copies are byte-identical: a difference means an accidental per-target FIPS build.
+5. **FIPS** (`defaults.fips`). Every Linux core passes the static-link checks of
+   `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no second
+   libcrypto, no other module version. On Windows and macOS every core loads the pinned module's
+   library, and the sidecars ship it.
+6. **Runtime dependencies.** Windows binaries link the C runtime statically. Linux binaries need
+   only the base system's libraries plus those the product declares in `linux.needed`, and no glibc
+   newer than the floor (`linux.glibc`, default 2.34): every entry of the version-needs table counts,
+   as glibc's loader reads it, a weakly referenced symbol's version included. A Linux core with
+   initial-exec TLS (`DF_STATIC_TLS`) is refused: the launcher loads cores with `dlopen`, and glibc
+   then has only a small static TLS surplus to give. macOS binaries link the system's libraries
+   alone and need no macOS newer than `defaults.macos-minimum`.
+
+An import table, dynamic section or version table that doesn't parse, and a stripped Linux binary,
+are findings, never a pass: the checks would otherwise pass vacuously. `verify` also warns about a
+core no CPU would ever choose (its features include every feature of a more preferred core).
+
+`seaworthy fips-check FILE…` and `seaworthy glibc-check [--floor X.Y] FILE…` apply the FIPS and glibc
+rules to single files, for binaries built outside a product (a separate FIPS builder, for example).
+
+**Building for the glibc floor.** A build on a current distribution picks up symbol versions the
+package's `glibc` dependency says nothing about (glibc 2.38's `__isoc23_*`, std's weakly referenced
+`pidfd_spawnp` at 2.39): the package installs on the oldest supported system and then fails to
+start. Build release binaries on a system whose glibc is at or below the floor (the GitLab template's
+default build image is Debian 12, glibc 2.36, whose builds need nothing past 2.34 except libm's
+`hypot` and `hypotf`, which `seaworthy_launcher::glibc_floor!` binds to the baseline), or raise the
+floor and the packages' dependency together.
+
+## Layout
+
+`seaworthy layout` stages each platform's install tree from verified artifacts, under
+`<out>/<product>/<triple>/tree/`, exactly as it installs:
+
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` |
+| Launcher | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
+| Cores | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
+| Sidecars | — | beside the cores, one copy | `Contents/Frameworks` |
+| Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS` (pkg only) |
+| Data files | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>` |
+
+Linux binaries are stripped (`strip --strip-all`, `$STRIP` overrides the tool) and each stripped
+core's record is read back, so stripping can never cost a core its `.cpureq`. `layout.json` beside
+each tree lists every file with its install path, role, mode and SHA-256. A staging directory is
+replaced only if it carries `layout`'s marker file, and a file that changed since `verify` read it
+is refused.
+
+**Data files are data.** `[[product.<id>.files]]` are read once from `seaworthy.toml`'s directory,
+without following links, and `layout` refuses links and special files, anything resolving outside
+that directory, names Windows or the package tools refuse, native binary images (ELF, PE, Mach-O,
+Java class files), on Windows anything Windows would run or act on (scripts, shortcuts, installers,
+`.reg`, `desktop.ini`, a manifest beside a binary), hidden files below a directory source unless the
+entry sets `hidden = true`, and version-control directories always. Code ships as the launcher, a
+core, a sidecar or the helper: the files `verify` checks.
+
+## Package
+
+`seaworthy package` runs `verify` and `layout`, then builds every output `seaworthy.toml` names,
+under `<out>/<product>/`:
+
+| Path | What |
+|---|---|
+| `packages/<package>_<deb version>_amd64.deb` | Debian package |
+| `packages/<package>-<version>-<release>.x86_64.rpm` | RPM package |
+| `packages/<package>-<pkgver>-<pkgrel>-x86_64.pkg.tar.zst` | Arch Linux package |
+| `packages/<stem>-linux-x86_64.tar.zst` | the Linux tree under one `<stem>/` directory |
+| `packages/<stem>-windows-x86_64.zip` | the Windows tree under one `<stem>/` directory |
+| `packages/<stem>-windows-x86_64.wxs` (and `.msi` with `SEAWORTHY_WIX`) | the MSI's source, and the MSI |
+| `packages/<stem>-policy-templates.zip` | the Group Policy templates: `<Vendor>.<Directory>.admx` and `en-US/….adml` |
+| `packages/<stem>-macos-arm64.dmg` | a desktop product's app bundle in a disk image |
+| `packages/<stem>-macos-arm64.pkg` | a service product's bundle and LaunchDaemons |
+| `packages/<artifact>.manifest` | with `--signing`: the artifact's signed release manifest |
+| `packages/<pacman package>.sig` | with OpenPGP signing: the detached signature pacman checks |
+| `packages/<artifact>.cdx.json` | the artifact's SBOM |
+| `packages.json` | every artifact with its kind and SHA-256, and how it was signed |
+
+`<package>` is `<vendor>-<product>` in lowercase; `<stem>` is `<package>-<version>-<sequence>`.
+
+### Linux packages
+
+nFPM 2.47.0 (`$NFPM`; `scripts/ci/install-nfpm.sh` installs the pinned release, verified by SHA-256)
+builds the deb, rpm and pacman packages from the Linux tree. A service's packages carry its systemd
+unit, a `sysusers.d` entry for its sandbox user, a vendor preset and, with the update helper, the
+helper's path and service units. A desktop product's carry its menu entry, hicolor icons and an
+optional `/usr/bin/<command>` link to the launcher, and, with the helper, the helper's unit and a
+polkit rule letting an active local session start exactly that unit
+([updates.md](updates.md)).
+
+One package-script lifecycle, spelled for each format:
+
+- a fresh install creates the sandbox user, applies the host's systemd preset policy to the service
+  and the update path unit through the vendor preset file, and starts what the policy enabled;
+- an upgrade `try-restart`s the service and applies presets only to units new in that version; the
+  update units are never restarted, because the helper may be running the upgrade;
+- removal stops and disables; state and the sandbox user stay.
+
+A masked unit is never touched, and a site preset that sorts before the vendor's keeps a unit off.
+Without a running systemd (an image build) units are enabled but not started; a failed `systemctl`
+call warns and the transaction goes on; deb honours `policy-rc.d` and `DPKG_ROOT`.
+
+### Windows
+
+Each Windows binary (the launcher, every core, the helper; never a sidecar) gets a version resource
+stamped after linking, then every Windows binary is Authenticode-signed, then the zip and the MSI's
+`.wxs` are written over the signed tree. The MSI:
+
+- installs to a fixed `%ProgramFiles%\<Vendor>\<Directory>` (no command-line relocation);
+- applies the service renderers' DACLs with `MsiLockPermissionsEx`, registers the service and the
+  update helper with `ServiceInstall`, and grants the service's account only the right to start the
+  helper (a desktop product grants that to interactive users);
+- creates its `%ProgramData%` directories owned by SYSTEM;
+- runs the system's `sc.exe` for the recovery settings, on a first install or an upgrade, never in a
+  repair a standard user can start (`MsiServiceConfigFailureActions` is documented as broken);
+- writes the installed release (in deb's spelling) and, with `UPDATES=` and `SERVER=`, the update
+  policy default and the machine's update server under `HKLM\SOFTWARE\<Vendor>\<Directory>`;
+- allows two builds of one version (the sequence orders them) and refuses downgrades. Its
+  UpgradeCode is `upgrade-code`, else derived from the vendor and the product id: pin it before
+  renaming either.
+
+With `SEAWORTHY_WIX` naming WiX v5.0.2, `package` builds the MSI itself. Otherwise a Windows runner
+builds it from the `.wxs` (`wix build -arch x64 -bindpath tree=<tree> -o <name>.msi <name>.wxs`, then
+`wix msi validate`), and **`seaworthy adopt-msi`** takes it back: the MSI must carry exactly the
+signed Windows tree, byte for byte, at the release's ProductVersion and the product's UpgradeCode;
+then it's signed with the same signers, its manifest and SBOM are written, and it joins
+`packages.json`. The check catches an MSI that isn't the release's; the Windows runner, which builds
+the binaries that are signed, is trusted for the MSI's tables.
+
+The Group Policy templates define two machine policies under `HKLM\SOFTWARE\Policies\<Vendor>\…`:
+`UpdatePolicy` (`auto`, `notify`, `off`), which overrides the MSI's default, and `Server`, the
+machine's update server.
+
+### macOS
+
+`layout` stages `<Display Name>.app`; `package` writes `Contents/Info.plist` (the bundle id, the
+executable, `CFBundleShortVersionString` = `MAJOR.MINOR.PATCH`, `CFBundleVersion` = the sequence,
+`LSMinimumSystemVersion`), signs the bundle ad hoc from the inside out, and builds:
+
+- for a desktop product, a **dmg** with `hdiutil` (the app beside a link to `/Applications`). It
+  carries no update helper: on macOS a helper is a LaunchDaemon, which only a pkg installs;
+- for a service, a **pkg** with `pkgbuild` and `productbuild`: the bundle in `/Applications`, the
+  service's LaunchDaemon and, with the helper, an on-demand helper daemon watching the update request
+  file, scripts that stop the service before an install and load the daemons after it, and an
+  uninstaller at `Contents/Resources/uninstall`.
+
+Both tools are macOS's own, so macOS outputs package on a Mac (`--platforms macos`). The signature
+is ad hoc until Developer ID signing and notarization: Gatekeeper refuses a downloaded copy until a
+tester clears the quarantine (`xattr -dr com.apple.quarantine "/Applications/<name>.app"`), and the
+GitLab template keeps macOS outputs out of releases. A dmg isn't byte-reproducible (`hdiutil`
+writes timestamps and a UUID).
+
+### Release versions
+
+A release is a version and a sequence (the pipeline's counter). The version is `MAJOR.MINOR.PATCH`,
+optionally followed by `-alpha`, `-beta` or `-rc`, each optionally followed by `.N`; anything wider
+(`-rc1`, `-pre`, `+build`) is refused, because some package manager would order it differently from
+the update helper. `seaworthy version` prints every spelling:
+
+| Format | `1.4.0-rc.2`, sequence 812 | `1.4.0`, sequence 813 |
+|---|---|---|
+| deb | `1.4.0~rc.2-812` | `1.4.0-813` |
+| rpm | `1.4.0~rc.2-812` | `1.4.0-813` |
+| pacman | `1.4.0rc.2-812` | `1.4.0-813` |
+| MSI ProductVersion | `1.4.0` | `1.4.0` |
+
+The MSI's ProductVersion holds neither the pre-release nor the sequence; same-version upgrades are
+allowed, and the installed release is recorded in the registry for the update helper. `--build`
+names the version token's build metadata (often the commit): the manifests' `build` field, so a
+manifest matches only the exact build the product's server names.
+
+### SBOMs
+
+Beside every installable artifact, `<artifact>.cdx.json` (CycloneDX 1.6): the artifact (package
+name, version, vendor, SHA-512, format, target and sequence), every file it installs with its
+SHA-256, generated files included, and every Rust crate compiled into its binaries when they were
+built with `cargo auditable`. The document is byte-reproducible (its serial number derives from the
+artifact's SHA-512, its timestamp is `SOURCE_DATE_EPOCH`).
+
+### Reproducibility
+
+Every timestamp in every archive and package is `SOURCE_DATE_EPOCH` (default 1980-01-01, at most
+2106-02-07), entries are sorted, owners are root, and the rpm build host is fixed. With the pinned
+nFPM a rebuild is byte-identical; the tests build everything twice to prove it. `seaworthy.toml`
+refuses `$` in every text that reaches a package, because nFPM expands `$VAR` and WiX `$(…)` with no
+escape.
+
+## Signing
+
+`signing.toml` names the signers; `seaworthy.toml` pins whose signatures count. Neither holds a
+secret unless you sign with a local key file. The full schema is in
+[configuration.md](configuration.md#signingtoml).
+
+- **Release manifests** (`[[manifest]]`, one per `release-signatures` algorithm): a
+  `seaworthy-release-manifest:1` beside every installable artifact, naming its product, channel,
+  version, build, sequence, target, format, size and SHA-512. A signer is a local key file (tests,
+  throwaway CI keys), a key in an environment variable (`key-env`), or a command that reads the
+  statement on stdin and writes the signature on stdout (a KMS or a secret store's signer). Before
+  anything is signed, the signers must cover exactly `release-signatures`, each key must be one of
+  `release-keys` (the keys the clients embed) and pass the update helper's key intake; every
+  signature is verified before it's written. A product without an update helper may list no
+  `release-signatures`: then no manifest is signed.
+- **Authenticode** (`[authenticode]`): osslsigncode with a local certificate and key, or a command
+  (`{file}`, `{description}`), such as `scripts/ci/azure-sign.sh` for Azure Artifact Signing. Every
+  signature, and its timestamp, must verify to `[defaults.authenticode]`'s subject and trust
+  anchors. A signed release with Windows outputs refuses to run without an Authenticode signer:
+  unsigned executables under signed manifests are what SmartScreen, AppLocker and WDAC refuse.
+- **OpenPGP** (`[openpgp]`): an embedded signature on every rpm and a detached `.sig` on every
+  pacman package, by a key in a gpg home or an armored secret key handed over in the environment
+  (`secret-key-env`) and imported into a private throwaway gpg home for the run. Every signature
+  must verify against `openpgp-keys` alone. A deb carries no signature of its own: apt trusts the
+  repository's signed indexes.
+
+Secrets named by `key-env` and `secret-key-env` are taken out of the process environment before any
+tool runs, so nothing `seaworthy` starts (nFPM, strip, gpg, rpmsign, a signing command) inherits
+them, and on Linux the process is made non-dumpable first. Every signing program runs with no shell,
+under a deadline that covers draining its output (its whole process group is killed at the
+deadline), with its output capped.
+
+**Dev builds** (`--signing signing.toml --authenticode-only`): only `[authenticode]` signs, no
+manifest or OpenPGP key is read, and the listing says so. The update helper never installs such a
+build (no manifest) and `repo` refuses it.
+
+**CI test keys** (`--ci-test-signing FILE`, with `[defaults.ci-test-keys]`): a non-release build's
+manifests and rpm and pacman signatures by public test keys kept in the product's repository, which
+only the product's non-release builds trust. An installed dev build's helper can then update to a
+later one, and a release's never does. A test-key file holds no Authenticode signer and no secret
+from the environment; `--ci-test-signing` never joins a release's `--signing`, and `repo` refuses
+the result.
+
+`seaworthy keygen` writes a throwaway release key (secret hex, mode 0600, and public hex);
+`seaworthy sign-statement` is the reference command signer and a way to check a setup end to end. A
+production key is generated in its custody system.
+
+## Repositories
+
+`seaworthy repo --packages DIR --out DIR --signing signing.toml` publishes every product's release
+as `package` listed it into a new directory:
+
+| Path | Class | What |
+|---|---|---|
+| `releases/<package>/<channel>/<token>/<target>/<package>.<format>` (+ `.manifest`, `.cdx.json`, pacman `.sig`) | immutable | each installable artifact where the update helper's URL template points |
+| `apt/pool/main/<package>/*.deb`, `apt/dists/<channel>/main/binary-amd64/by-hash/SHA256/<sha256>` | immutable | the debs, and every index under its hash |
+| `apt/dists/<channel>/main/binary-amd64/Packages{,.gz}`, `apt/dists/<channel>/{Release,Release.gpg,InRelease}` | index | `dpkg-scanpackages`' stanzas and the signed `Release` |
+| `rpm/<channel>/x86_64/Packages/*.rpm`, `repodata/<sha256>-*.xml.gz` | immutable | the rpms and `createrepo_c`'s metadata |
+| `rpm/<channel>/x86_64/repodata/repomd.xml{,.asc}` | index | the metadata index and its signature |
+| `pacman/<channel>/x86_64/*.pkg.tar.zst{,.sig}` | immutable | the packages and their signatures |
+| `pacman/<channel>/x86_64/<repo>.{db,files}{.tar.zst,}{,.sig}` | index | `repo-add`'s databases, copies rather than links, each signed |
+| `keys/<repo>.asc` | index | the pinned OpenPGP keys |
+| `setup/<repo>-repository.{deb,deb.asc,rpm}` | index | with `[defaults.repository]`: the repository package under stable names |
+| `publish-plan.json` | — | every file with its SHA-256, size and class, in upload order |
+
+`<repo>` is the vendor in lowercase; `<token>` the version token (`1.4.0-rc.2+0a1b2c3`).
+
+Nothing is published that a client would refuse: each listed file is read once and checked as the
+clients will check it (every manifest against `release-keys`, every rpm and pacman signature against
+`openpgp-keys`, the pinned keys against what apt and RHEL accept), and every index signature is
+checked after signing. `repo` publishes signed releases only: an unsigned listing, a dev build and a
+CI test build are refused.
+
+- **`--previous publish-plan.json`**: the last publication's plan. No immutable path may get other
+  bytes (a retried pipeline that re-signed a published version token is refused), the indexes'
+  date must move forward (apt silently keeps a `Release` that's newer than the one it's offered),
+  and no release may be older than the last one's by sequence.
+- **`--allow-older`**: a deliberate rollback (the older release's packages published again, dated
+  now); the plan records it for `publish`.
+- **`--date`**: the indexes' date (default now; never in the future, which apt refuses).
+
+The repositories hold the latest release of each product only; an older one stays installable from
+its file in `releases/` for the retention period.
+
+**The repository package.** With `[defaults.repository]`, `package` also builds `<vendor>-repository`
+(deb `all`, rpm `noarch`): the pinned OpenPGP keys and a repository definition (a deb822 source whose
+`Signed-By:` is that keyring alone; a `.repo` with `gpgcheck=1` and `repo_gpgcheck=1`) as
+configuration files. An administrator installs it once from `setup/`; it upgrades through the
+repositories like any package, which is how a key rotation reaches machines. No product depends on
+it: on a mirrored or air-gapped host its definition would point at the public URL. Arch has no
+repository package: a `pacman.conf` section with `SigLevel = Required` and `pacman-key --lsign-key`
+are the administrator's.
+
+**Rotating the OpenPGP key:** pin the new key beside the current one and publish (machines'
+repository packages, `keys/<repo>.asc` and the update helper built from that `seaworthy.toml` now
+trust both); once machines have upgraded, switch `signing.toml`'s `[openpgp]` to the new key and
+publish; later drop the old key. Hosts set up by hand need the new key from their administrators
+before the switch, and rpm keeps an imported key until it's removed (`rpm -e gpg-pubkey-<keyid>`).
+
+## Publishing
+
+`seaworthy publish --repo DIR --target publish.toml` (feature `publish-s3`, on by default) uploads
+what `repo` built to an S3-compatible store, under `publish.toml`'s prefix. The credentials come from
+`SEAWORTHY_S3_ACCESS_KEY_ID`, `SEAWORTHY_S3_SECRET_ACCESS_KEY` and optionally
+`SEAWORTHY_S3_SESSION_TOKEN`, never from a file, and are never printed.
+
+1. **Before anything is uploaded**, everything that could refuse the publication is checked: every
+   file against the plan (nothing unplanned, every path under the repository's own directories), the
+   repository package's URL against `public-url`, the published plans (the current one and the
+   history in `plans/`) for this repository and an older date (an identical current plan means
+   already published), and every immutable path against the bucket by the SHA-256 `publish` stored
+   as its metadata (else the store's checksum, else its bytes): present with the same bytes, it's
+   skipped; with other bytes, the publication is refused.
+2. **Then, in order:** the missing immutable files, create-only (`If-None-Match: *`) with
+   `Cache-Control: public, max-age=31536000, immutable`; the plan into `plans/` (from here on it may
+   be live); the indexes in the plan's order with a short `max-age` (`index-max-age-seconds`,
+   default 60); and last `publish-plan.json`, after checking no other publication moved it meanwhile.
+   Every upload carries its SHA-256, which the store verifies, and is read back at once: its size,
+   SHA-256 metadata, `Content-Type` and `Cache-Control` must be what was sent.
+3. **Afterwards**, every index, every release manifest and the plan are fetched back through
+   `public-url` (with a cache-busting query) and compared byte for byte.
+4. **Pruning:** a file the current plan doesn't list is deleted once the retention period
+   (`retention-days`, default 30) has passed since the plan after the last one listing it went live;
+   a file no plan ever listed, since it was written. Only keys under the repository's own
+   directories are ever deleted, and `plans/` is kept. A pruning failure is reported apart (exit 1
+   after the publication is reported) and doesn't undo the publication; `--no-prune` skips it.
+
+`--dry-run` checks everything (the files, the store, the public URL) and reports what would be
+uploaded and deleted, uploading and deleting nothing. A failed publication is re-run as is: files
+already up are skipped, and the indexes and the pointer go up. Run one publication at a time (a CI
+resource group): create-only uploads stop two writers from overwriting each other's immutable files,
+but two plans racing for the indexes would interleave.
+
+The store and its CDN are the operator's: create a credential with object read, write and delete on
+the bucket alone (pruning deletes), serve the prefix through a domain whose cache honours the
+objects' `Cache-Control`, and set `public-url` so every publication is checked from there.
+
+## Setting machines up
+
+With `[defaults.repository]` (`url = "https://files.example.com/packages"`, the vendor `Acme`):
+
+```sh
+# Debian and Ubuntu
+curl -fsSLO https://files.example.com/packages/setup/acme-repository.deb
+sudo apt install ./acme-repository.deb && sudo apt update
+
+# RHEL, Rocky, Alma, Fedora
+sudo rpm --import https://files.example.com/packages/keys/acme.asc
+sudo dnf install https://files.example.com/packages/setup/acme-repository.rpm
+
+# Arch Linux
+curl -fsSL https://files.example.com/packages/keys/acme.asc | sudo pacman-key --add -
+sudo pacman-key --lsign-key <fingerprint>
+printf '\n[acme]\nSigLevel = Required\nServer = https://files.example.com/packages/pacman/stable/$arch\n' \
+  | sudo tee -a /etc/pacman.conf
+```
+
+Compare the key's fingerprint with one the vendor publishes elsewhere before trusting it; the setup
+deb's detached signature checks with `gpgv --keyring <dearmored key> acme-repository.deb.asc
+acme-repository.deb`.
