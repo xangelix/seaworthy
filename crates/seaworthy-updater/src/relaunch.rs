@@ -210,6 +210,10 @@ pub fn spawn_relaunch_watcher(
     windows::spawn_powershell(&script)
 }
 
+/// The characters besides `'` that PowerShell's tokenizer reads as a
+/// single quote (U+2018 to U+201B).
+const TYPOGRAPHIC_SINGLE_QUOTES: [char; 4] = ['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'];
+
 /// What the Windows watcher's script is built from.
 #[derive(Debug, Clone, Copy)]
 pub struct WatcherSpec<'a> {
@@ -230,9 +234,13 @@ pub struct WatcherSpec<'a> {
 /// Only cmdlets Constrained Language Mode allows (`Get-ItemProperty`,
 /// `Get-Process`, `Start-Sleep`, `Start-Process`, `$env:`).
 ///
+/// PowerShell also ends a single-quoted literal at the typographic single
+/// quotes U+2018 to U+201B, so a value holding one is refused rather than
+/// escaped: a launcher path with `’` in it must never become script.
+///
 /// # Errors
-/// [`RelaunchError::Refused`] when a value holds a control character, or
-/// the launcher isn't a file in a folder.
+/// [`RelaunchError::Refused`] when a value holds a control character or a
+/// typographic single quote, or the launcher isn't a file in a folder.
 pub fn watcher_script(spec: &WatcherSpec<'_>) -> Result<String, RelaunchError> {
     let launcher = spec.launcher;
     let (directory, file) = launcher
@@ -252,6 +260,12 @@ pub fn watcher_script(spec: &WatcherSpec<'_>) -> Result<String, RelaunchError> {
         if value.chars().any(char::is_control) {
             return Err(RelaunchError::Refused(format!(
                 "the relaunch watcher's {what} holds a control character"
+            )));
+        }
+        if value.contains(TYPOGRAPHIC_SINGLE_QUOTES) {
+            return Err(RelaunchError::Refused(format!(
+                "the relaunch watcher's {what} holds a typographic single quote, which \
+                 PowerShell reads as the end of a string"
             )));
         }
         Ok(format!("'{}'", value.replace('\'', "''")))
@@ -427,6 +441,19 @@ mod tests {
             watcher_script(&spec("Console.exe", "1")),
             Err(RelaunchError::Refused(_))
         ));
+        // Typographic single quotes end a PowerShell string as `'` does:
+        // refused wherever they appear.
+        for quote in TYPOGRAPHIC_SINGLE_QUOTES {
+            let path = format!(r"C:\Acme{quote} Tools\Console.exe");
+            assert!(matches!(
+                watcher_script(&spec(&path, "1")),
+                Err(RelaunchError::Refused(_))
+            ));
+            assert!(matches!(
+                watcher_script(&spec(launcher, &format!("1{quote}"))),
+                Err(RelaunchError::Refused(_))
+            ));
+        }
     }
 
     #[test]
