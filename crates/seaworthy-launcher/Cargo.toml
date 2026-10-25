@@ -1,0 +1,38 @@
+[package]
+name = "seaworthy-launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A thin launcher that loads the best per-CPU build of a product: reads each core's requirement record from the file, loads the first one the host fully supports, and runs it in-process — no code written to disk at runtime"
+readme = "README.md"
+keywords = ["cpu", "launcher", "simd", "x86-64", "aarch64"]
+categories = ["hardware-support", "development-tools::build-utils"]
+# The end-to-end fixture is its own workspace (scripts/launcher-e2e.sh).
+exclude = ["e2e"]
+
+# Native only (Linux and Windows on x86-64, macOS on Apple Silicon): no
+# wasm build.
+[dependencies]
+# The feature table, host detection and the record formats.
+seaworthy-levels.workspace = true
+
+[build-dependencies]
+# The build script renders the core's requirement record with the same
+# type the launcher parses it with.
+seaworthy-levels.workspace = true
+
+# dlopen/dlsym (the core), getauxval(AT_SECURE) and issetugid
+# (secure-execution mode), arch_prctl (the AMX permission), isatty (the
+# macOS failure alert).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# LoadLibraryExW with restricted search flags, GetProcAddress.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[lints]
+workspace = true
