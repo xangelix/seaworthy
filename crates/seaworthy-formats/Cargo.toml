@@ -1,0 +1,30 @@
+[package]
+name = "seaworthy-formats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The signed contract between seaworthy's release tooling and its update helper: release versions and their order, the signed release manifest (ML-DSA-87 / ECDSA P-256 / Ed25519 key sets), product names, artifact formats and their magic, the update-policy values and the size limits. Pure: no I/O."
+readme = "README.md"
+keywords = ["release", "manifest", "signature", "updater", "packaging"]
+categories = ["cryptography", "parser-implementations"]
+
+# No features: everything here is the contract both sides need. The FIPS
+# posture rides `seaworthy-crypto/fips`, which applications set.
+[dependencies]
+# Lowercase-hex rendering and parsing of digests, key ids and signatures.
+hex.workspace = true
+# Digests, signature verification, release-key validation (the facade's
+# intake checks are the only defense against degenerate keys) and the
+# algorithm-admission gate.
+seaworthy-crypto.workspace = true
+# The subset of `seaworthy.toml` that names a product
+# (`Product::from_config`), and the update-policy spelling in it.
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true
