@@ -1,0 +1,16 @@
+# Workspace-wide clippy configuration (every crate and the fuzz crate sit
+# below this file).
+
+# Tests may unwrap and index: a panic there is a test failure, not a bug in
+# shipped code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = false
+
+# Functions that must not spread: each is allowed only at its reasoned call
+# sites (`#[allow(clippy::disallowed_methods, reason = "…")]`).
+disallowed-methods = [
+    { path = "seaworthy_crypto::digest::sha1_for_identifiers", reason = "SHA-1 is only for identifiers whose definition fixes it (the Windows virtual-account SID); it gives no integrity or collision resistance" },
+]

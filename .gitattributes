@@ -1,0 +1,8 @@
+# LF in the repository and in every checkout (Git for Windows defaults to
+# core.autocrlf=true; fixture parsers split on "\n").
+* text=auto eol=lf
+
+# Byte-exact data is never converted: signed test vectors and fuzz inputs.
+**/tests/vectors/** -text
+fuzz/corpus/** -text
+fuzz/regressions/** -text
