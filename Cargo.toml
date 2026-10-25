@@ -45,6 +45,7 @@ hex = "0.4.3"
 libc = "0.2.189"
 miniz_oxide = "0.8.9"
 object = { version = "0.37.3", default-features = false }
+quick-xml = "0.42.0"
 reqwest = { version = "0.13.5", default-features = false }
 rustls = { version = "0.23.46", default-features = false }
 rustls-platform-verifier = "0.7.1"

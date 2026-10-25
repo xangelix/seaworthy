@@ -9,3 +9,5 @@
 #
 site crates/seaworthy-updater/src/net.rs | use rustls_platform_verifier::BuilderVerifierExt as _; | the update helper attaches the OS trust store to the builder from seaworthy_crypto::tls::client_config_builder() (provider and policy stay the crypto crate's); keeping rustls-platform-verifier out of seaworthy-crypto spares its other users that dependency
 site crates/seaworthy-updater/src/net.rs | .and_then(|builder| builder.with_platform_verifier()) | the same call: the verifier goes onto the crypto crate's canonical client builder, nothing else is configured here
+site crates/seaworthy/src/s3/mod.rs | use rustls_platform_verifier::BuilderVerifierExt as _; | the S3 publish client attaches the OS trust store to the builder from seaworthy_crypto::tls::client_config_builder() (provider and policy stay the crypto crate's), as the update helper does
+site crates/seaworthy/src/s3/mod.rs | .and_then(|builder| builder.with_platform_verifier()) | the same call: the verifier goes onto the crypto crate's canonical client builder, nothing else is configured here

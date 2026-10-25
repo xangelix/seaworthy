@@ -1,0 +1,92 @@
+[package]
+name = "seaworthy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The seaworthy command-line tool: build plans, verification, packaging, signing, SBOMs and publishing of per-CPU releases (under construction)"
+keywords = ["release", "packaging", "signing", "distribution", "s3"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
+
+# A library target only, for now: the command-line front end lands with the
+# rest of the tool.
+[lib]
+name = "seaworthy"
+
+[features]
+default = []
+# The S3 publish client (`seaworthy::s3`): SigV4 over seaworthy-crypto, the
+# bounded management calls a publication needs (create-only puts, head,
+# get, list, delete), reqwest on the crypto crate's TLS configuration.
+publish-s3 = [
+    "dep:base64",
+    "dep:bytes",
+    "dep:futures-util",
+    "dep:hex",
+    "dep:quick-xml",
+    "dep:reqwest",
+    "dep:rustls-platform-verifier",
+    "dep:seaworthy-crypto",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:zeroize",
+]
+
+[dependencies]
+# The `x-amz-checksum-sha256` wire encoding.
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+# `StreamExt` over response bodies and the boxed object stream.
+futures-util = { workspace = true, optional = true, features = ["std"] }
+hex = { workspace = true, optional = true }
+# The one XML parser: S3 keys and ETags carry XML entities, and entity
+# handling is exactly the part a hand parser gets wrong.
+quick-xml = { workspace = true, optional = true }
+# rustls with NO provider of its own: every client is built with
+# `use_preconfigured_tls` on `seaworthy_crypto::tls::client_config_builder()`
+# (scripts/check-tls-construction.sh). `stream` for response bodies.
+reqwest = { workspace = true, optional = true, features = ["rustls-no-provider", "stream"] }
+# The operating system's trust store, attached to the crypto crate's client
+# builder (an allowlisted site in scripts/tls-construction-allowlist.txt).
+rustls-platform-verifier = { workspace = true, optional = true }
+# HMAC-SHA-256 and SHA-256 for SigV4, the checksums, constant-time
+# compares, and the TLS client builder.
+seaworthy-crypto = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+# The deadlines (`time`) every request runs under.
+tokio = { workspace = true, optional = true, features = ["time"] }
+zeroize = { workspace = true, optional = true }
+
+[dev-dependencies]
+base64.workspace = true
+bytes.workspace = true
+futures-util = { workspace = true, features = ["std"] }
+hex.workspace = true
+seaworthy-crypto.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+zeroize.workspace = true
+
+# The container harness is unix-only; the RustFS suite is gated to match.
+[target.'cfg(unix)'.dev-dependencies]
+seaworthy-test-support.workspace = true
+
+[[test]]
+name = "sigv4_vectors"
+required-features = ["publish-s3"]
+
+[[test]]
+name = "s3_stub"
+required-features = ["publish-s3"]
+
+[[test]]
+name = "s3_direct_stub"
+required-features = ["publish-s3"]
+
+[[test]]
+name = "s3_rustfs"
+required-features = ["publish-s3"]
+
+[lints]
+workspace = true
