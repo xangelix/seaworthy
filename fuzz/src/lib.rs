@@ -44,6 +44,7 @@ macro_rules! targets {
 targets![
     levels_records,
     service_unit,
+    updater_manifest,
 ];
 
 /// Drive a future to completion on the current thread. Fuzzed futures

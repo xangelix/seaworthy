@@ -35,7 +35,10 @@ arbitrary = { version = "1", features = ["derive"] }
 # The fuzzed crates. `fuzzing` enables a crate's doc-hidden `__fuzz` seam
 # over crate-private parsers (no extra dependencies).
 seaworthy-levels = { path = "../crates/seaworthy-levels" }
+seaworthy-formats = { path = "../crates/seaworthy-formats" }
 seaworthy-service = { path = "../crates/seaworthy-service", features = ["fuzzing"] }
+seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing"] }
+url = "2"
 
 [[bin]]
 name = "levels_records"
@@ -47,6 +50,13 @@ bench = false
 [[bin]]
 name = "service_unit"
 path = "fuzz_targets/service_unit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "updater_manifest"
+path = "fuzz_targets/updater_manifest.rs"
 test = false
 doc = false
 bench = false
