@@ -1,0 +1,62 @@
+[package]
+name = "seaworthy-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Service definitions for Linux, Windows and macOS: one validated spec rendered to systemd units, Windows service records and launchd plists with least-privilege defaults, plus an optional runtime (SCM dispatcher, signal loop, start/stop/status)"
+readme = "README.md"
+keywords = ["service", "daemon", "systemd", "windows-service", "launchd"]
+categories = ["os", "os::unix-apis", "os::windows-apis", "os::macos-apis"]
+
+[features]
+# The OS runtime: the service-manager backends (start/stop/status against
+# the Windows SCM, systemd and launchctl) and the run loop (the Unix signal
+# loop, the Windows SCM dispatcher and its console fallback). Off by
+# default: the spec and the renderers are pure and compile on every host,
+# so a packaging tool renders every platform's files on one machine without
+# tokio or the Windows crates.
+runtime = ["dep:tokio", "dep:tracing", "dep:windows-service", "dep:windows-sys"]
+# Doc-hidden `__fuzz` seam over the crate-private systemd unit renderer, for
+# the in-repo `fuzz/` crate only (no dependencies).
+fuzzing = []
+
+[dependencies]
+# SHA-1 for the one identifier Windows defines with it: a virtual
+# account's service SID (render::windows), and the windows_scm_e2e
+# fixture's FIPS posture report.
+seaworthy-crypto.workspace = true
+thiserror.workspace = true
+# The run loop's runtime. `signal` for SIGTERM/SIGINT and Ctrl-C; the
+# service body brings its own drivers (`time`, `net`) through its own tokio
+# dependency, and `enable_all` turns on whatever the graph enabled.
+tokio = { workspace = true, optional = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+] }
+tracing = { workspace = true, optional = true }
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { workspace = true, optional = true }
+# The SCM error codes the dispatcher and the backend branch on.
+windows-sys = { workspace = true, optional = true, features = ["Win32_Foundation"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# The Windows SCM end-to-end tool and the real-SCM tests drive the backend.
+[[example]]
+name = "windows_scm_e2e"
+required-features = ["runtime"]
+
+[[test]]
+name = "windows_scm"
+required-features = ["runtime"]
+
+[lints]
+workspace = true
