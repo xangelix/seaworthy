@@ -1,0 +1,26 @@
+[env]
+# The AWS-LC FIPS module's CMake build (aws-lc-fips-sys, built only under
+# `seaworthy-crypto/fips`) is validated with clang: without this the build
+# script falls back to cc/gcc, and the configure step can fail on
+# directories the module build prunes. Setting it here means stripped
+# environments (IDEs, GUI git clients running hooks) build the same way. An
+# explicit environment value still wins (`force` defaults to false).
+AWS_LC_FIPS_SYS_CC = "clang"
+# Build the pinned FIPS module FROM SOURCE, always: without this,
+# aws-lc-fips-sys auto-detects a pre-installed AWS-LC (OPENSSL_DIR /
+# OPENSSL_LIB_DIR / pkg-config) and links THAT instead, a silent module
+# swap. seaworthy-crypto's build script refuses a `fips` build without it
+# (crates/seaworthy-crypto/build/knobs.rs); applications building with
+# `fips` outside this repository set it too.
+AWS_LC_FIPS_SYS_USE_SYSTEM = "0"
+# ...except on Windows, where the FIPS module is supported ONLY with MSVC:
+# aws-lc-fips-sys reads the target-scoped variable first, and without it the
+# line above would hand CMake `clang` for the msvc target.
+AWS_LC_FIPS_SYS_CC_x86_64_pc_windows_msvc = "cl"
+AWS_LC_FIPS_SYS_CXX_x86_64_pc_windows_msvc = "cl"
+# Windows builds keep AWS-LC's CPU-jitter entropy, like the FIPS builds
+# (which cannot opt out). Its startup health tests can abort a process on
+# its first random draw inside small virtual machines; a non-FIPS build
+# that must run there can opt out with the target-scoped
+# AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_pc_windows_msvc = "1"
+# (examples/entropy_probe.rs in seaworthy-crypto measures the rate).

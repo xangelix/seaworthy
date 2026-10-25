@@ -1,0 +1,66 @@
+[package]
+name = "seaworthy-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Minimal cryptography facade for seaworthy on AWS-LC: ML-DSA-87, ECDSA P-256 and Ed25519 signatures, SHA-2, randomness and a TLS client configuration, with an optional FIPS module"
+readme = "README.md"
+keywords = ["crypto", "fips", "aws-lc", "post-quantum", "signature"]
+categories = ["cryptography"]
+
+[features]
+# The one FIPS switch of the crate family. It forwards to `aws-lc-rs/fips`:
+# the AWS-LC FIPS 4.2.0 module backend (CMVP: in process, Comment
+# Resolution; its validated predecessor is AWS-LC 3, certificate #5314),
+# built from source by the pinned `aws-lc-fips-sys` (enabled here too, so
+# the `=` pin in the workspace manifest binds). Applications enable it;
+# libraries never set it.
+#
+# It also enables `rustls/fips`: the canonical `tls_provider()` (and, by
+# feature unification, every rustls AWS-LC provider in the graph) then keeps
+# only FIPS-approved cipher suites and key-exchange groups, so `is_fips()`
+# describes the TLS the process actually negotiates. The build script
+# refuses environment knobs that alter the module build under this feature
+# (build/knobs.rs).
+fips = ["aws-lc-rs/fips", "dep:aws-lc-fips-sys", "rustls/fips"]
+
+[dependencies]
+# PINNED EXACTLY in the workspace manifest: the aws-lc-rs release selects
+# the FIPS module it binds (1.18.1 -> aws-lc-fips-sys 0.14.2 -> AWS-LC FIPS
+# 4.2.0), and the lockfile alone is one `cargo update` away from a release
+# that binds a different module. Bump both pins together, deliberately:
+# `module::EXPECTED_*`, `tests/module_pin.rs`,
+# `scripts/check-fips-binary.sh`'s default prefix and the CMVP wording in
+# the docs move with them. `aws-lc-sys` is the non-FIPS backend; under
+# `fips` aws-lc-rs selects `aws-lc-fips-sys` instead.
+aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
+# The FIPS module's sys crate, a DIRECT optional dependency only so its
+# exact pin binds the resolution (aws-lc-rs itself asks for `^0.14.2`) and
+# `module::compiled_branch()` can read its build-time branch. Enabled by
+# `fips` only.
+aws-lc-fips-sys = { workspace = true, optional = true }
+hex.workspace = true
+# The canonical TLS provider (`tls_provider()`): rustls's AWS-LC provider
+# shaped by the `tls::TlsPolicy` (an explicit group order). The `fips`
+# feature enables `rustls/fips`, so feature unification FIPS-filters every
+# `aws_lc_rs::default_provider()` in the graph (no ChaCha20-Poly1305, no
+# plain X25519). `prefer-post-quantum` is stated HERE: the policy's own list
+# does not need it, but third-party code that still builds rustls's default
+# provider must never lose the hybrid-first order to a graph that happens
+# not to unify the feature in.
+rustls = { workspace = true, features = [
+    "aws_lc_rs",
+    "prefer-post-quantum",
+    # `builder_with_provider` (the `tls` builders) is std-only; stated here
+    # rather than borrowed from feature unification.
+    "std",
+] }
+subtle.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
