@@ -1,0 +1,10 @@
+# scripts/check-tls-construction.sh allowlist.
+#
+# Every TLS configuration is built in crates/seaworthy-crypto, and every
+# outbound HTTP client takes a configuration built there. An entry here is a
+# reviewed exception with its reason; an entry that matches nothing fails.
+#
+#   site <path> | <fragment of the matched line> | <reason>
+#   path <prefix> | <reason>
+#
+# (Empty: no exception exists.)
