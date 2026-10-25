@@ -41,7 +41,7 @@ seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing
 # The CLI's parsers and writers: the release version, seaworthy.toml, the
 # ELF/PE readers verify runs, the archive writers and the version-resource
 # stamper (dist_inputs, dist_archive, dist_pe).
-seaworthy = { path = "../crates/seaworthy" }
+seaworthy = { path = "../crates/seaworthy", default-features = false }
 url = "2"
 # dist_archive's independent readers: the tarball's zstd and the zip's
 # deflate (both already in the CLI's graph).

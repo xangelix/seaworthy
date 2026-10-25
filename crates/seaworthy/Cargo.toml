@@ -20,7 +20,9 @@ name = "seaworthy"
 path = "src/main.rs"
 
 [features]
-default = []
+# The binary publishes by default; a library caller that never publishes
+# takes `default-features = false` and links no HTTP client.
+default = ["publish-s3"]
 # The S3 publish client (`seaworthy::s3`): SigV4 over seaworthy-crypto, the
 # bounded management calls a publication needs (create-only puts, head,
 # get, list, delete), reqwest on the crypto crate's TLS configuration.
@@ -33,6 +35,12 @@ publish-s3 = [
     "dep:rustls-platform-verifier",
     "dep:tokio",
 ]
+# The Linux conformance lane's suite (`tests/conformance.rs`): real packages
+# installed by each distribution's package manager under systemd, in
+# containers. Run by the lane's own script, which builds the lane it
+# reads; never part of the default build or the generic test jobs
+# (scripts/ci/plan.sh leaves it out).
+conformance = []
 
 # A build-host tool: native only.
 [dependencies]
@@ -90,8 +98,9 @@ reqwest = { workspace = true, optional = true, features = ["rustls-no-provider",
 # crate's client builder (an allowlisted site in
 # scripts/tls-construction-allowlist.txt).
 rustls-platform-verifier = { workspace = true, optional = true }
-# publish-s3: the deadlines (`time`) every request runs under.
-tokio = { workspace = true, optional = true, features = ["time"] }
+# publish-s3: the deadlines (`time`) every request runs under, and the
+# current-thread runtime `publish` drives the client on (`rt`).
+tokio = { workspace = true, optional = true, features = ["rt", "time"] }
 
 # Signing programs run in their own process group; on a deadline the whole
 # group is killed (src/process.rs).
@@ -129,6 +138,10 @@ required-features = ["publish-s3"]
 
 [[test]]
 name = "s3_rustfs"
+required-features = ["publish-s3"]
+
+[[test]]
+name = "publish"
 required-features = ["publish-s3"]
 
 [lints]

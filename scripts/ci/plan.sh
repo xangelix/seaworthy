@@ -10,11 +10,13 @@
 # members; the jobs that need one are skipped until `crates=true`.
 #
 #   crates        true when crates/ holds at least one package
-#   features      every feature of every member EXCEPT the FIPS ones, as a
-#                 comma-separated `package/feature` list for `cargo --features`
-#                 (empty when there are none). A feature is FIPS when its name
-#                 or anything it enables mentions "fips": the FIPS module is a
-#                 separate, slow C build with its own job.
+#   features      every feature of every member EXCEPT the FIPS ones and the
+#                 lane suites, as a comma-separated `package/feature` list for
+#                 `cargo --features` (empty when there are none). A feature
+#                 is FIPS when its name or anything it enables mentions
+#                 "fips": the FIPS module is a separate, slow C build with its
+#                 own job. `conformance` is a lane suite: it needs the lane
+#                 its own script builds, and runs only from there.
 #   fips          true when a member declares a `fips` feature
 #   cli           true when crates/seaworthy is the `seaworthy` package
 #   version       workspace.package.version
@@ -84,6 +86,10 @@ for manifest in sorted(glob.glob("crates/*/Cargo.toml")):
             die(f"{manifest}: feature {feature!r} is outside [A-Za-z0-9_+.-]")
     packages.append((manifest, name, features))
 
+# Features that turn on a lane's suite (built and run by the lane's own
+# script, never by the generic test jobs).
+LANE_SUITES = {"conformance"}
+
 selected = []
 fips = False
 cli = False
@@ -96,6 +102,8 @@ for manifest, name, features in packages:
         if feature == "default":
             continue
         if "fips" in feature or any("fips" in str(entry) for entry in enables):
+            continue
+        if feature in LANE_SUITES:
             continue
         selected.append(f"{name}/{feature}")
 

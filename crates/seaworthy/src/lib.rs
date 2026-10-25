@@ -37,9 +37,9 @@
 //!    release first checked as a client would (its manifests, its package
 //!    signatures), with a publish plan that orders the upload; with them
 //!    the [`repository_package`], which sets apt and dnf up to use them.
-//! 9. **`publish`**: the plan uploaded to any S3-compatible store,
-//!    immutable files first and the indexes last, checked back through the
-//!    public URL, old files pruned.
+//! 9. **`publish`** (feature `publish-s3`): the plan uploaded to any
+//!    S3-compatible store, immutable files first and the indexes last,
+//!    checked back through the public URL, old files pruned.
 //!
 //! For the CI templates (`ci/gitlab/seaworthy.yml`): [`build_plan`],
 //! the build each target triple needs, from `seaworthy.toml`; and [`ci_order`],
@@ -70,10 +70,12 @@
 //!
 //! ## Features
 //!
-//! - `publish-s3`: the `s3` module, the S3 publish client. AWS Signature
-//!   Version 4 over `seaworthy-crypto`, and the bounded management calls a
-//!   publication needs: create-only checksummed puts, head, bounded get,
-//!   list, delete.
+//! - `publish-s3` (default): the `s3` module, the S3 publish client (AWS
+//!   Signature Version 4 over `seaworthy-crypto`, and the bounded
+//!   management calls a publication needs: create-only checksummed puts,
+//!   head, bounded get, list, delete), and `publish` on top of it. Without
+//!   it the crate opens no network connection, and the binary's `publish`
+//!   command refuses.
 
 #![forbid(unsafe_code)]
 
@@ -92,6 +94,8 @@ pub mod nfpm;
 pub mod package;
 pub mod pe_version;
 pub mod process;
+#[cfg(feature = "publish-s3")]
+pub mod publish;
 pub mod repo;
 pub mod repository_package;
 #[cfg(feature = "publish-s3")]

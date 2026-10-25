@@ -1006,7 +1006,14 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                 out.join(seaworthy::repo::PLAN_FILE).display()
             );
         }
-        #[cfg(any())] // PUBLISH-PENDING: wired to crate::s3 once it lands.
+        #[cfg(not(feature = "publish-s3"))]
+        "publish" => {
+            return Err(DistError::Tool(
+                "publish: this seaworthy was built without the publish-s3 feature".to_owned(),
+            )
+            .into());
+        }
+        #[cfg(feature = "publish-s3")]
         "publish" => {
             let repo = required(&args.repo, command, "--repo")?;
             let target_path = required(&args.target, command, "--target")?;

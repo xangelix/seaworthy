@@ -448,6 +448,8 @@ fn every_input_is_declared_and_used_and_none_defaults_to_an_organization() {
                         default.starts_with(&format!("rust:{channel}-bookworm@sha256:")),
                         "{name}: build-image is the official Rust image at the toolchain's version, digest-pinned: {default}"
                     );
+                    // The same pin the container suites build in.
+                    assert_eq!(default, seaworthy_test_support::images::RUST_BUILDER);
                 }
                 Some(_) => {}
             }
