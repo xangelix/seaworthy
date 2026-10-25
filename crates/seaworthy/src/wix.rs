@@ -38,8 +38,8 @@
 //!   manager refuses (an image Windows can't load) still fails it.
 //! - **Recovery** (the failure actions, also on non-crash exits): two
 //!   deferred custom actions running the system's `sc.exe failure` and
-//!   `sc.exe failureflag` as LocalSystem, right after `InstallServices`
-//!, on a first install or an upgrade only (`NOT Installed`). A
+//!   `sc.exe failureflag` as LocalSystem, right after `InstallServices`,
+//!   on a first install or an upgrade only (`NOT Installed`). A
 //!   repair, which a standard user can start, never runs them: a console
 //!   program running as SYSTEM during a user-started repair is a known
 //!   escalation path, and a repair leaves the recovery settings in place. Not `MsiServiceConfigFailureActions`: Microsoft documents

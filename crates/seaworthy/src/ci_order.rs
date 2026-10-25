@@ -39,7 +39,10 @@
 //! first, in order, then the including file, mappings deep-merged, arrays
 //! and scalars replaced. A `spec: inputs` header's values fill every whole
 //! or partial `$[[ inputs.… ]]` of the parsed configuration (a whole value
-//! keeps its type). Then `extends`, then `!reference`. An include with
+//! keeps its type). A further file stands for an include whose inputs the
+//! lint can't see, so its required inputs (those without a default, such
+//! as a template's images and runner tags, which never decide an order)
+//! read as empty there. Then `extends`, then `!reference`. An include with
 //! `rules:` is refused (the lint can't tell when it applies); includes from
 //! other projects, URLs, GitLab templates and components can't be read
 //! offline: they're reported, and a job defined only there is unknown.
@@ -497,7 +500,9 @@ pub struct Pipeline {
 
 /// Loads `ci` (a product's `.gitlab-ci.yml`, its local includes resolved
 /// against `root`, the repository root) with `extra` files merged in
-/// before it, as if included first.
+/// before it, as if included first. An `extra` file's own inputs are its
+/// defaults, and empty for one without a default: it stands for an include
+/// whose inputs the lint can't read.
 ///
 /// # Errors
 /// [`DistError::Ci`] for a file that can't be read or isn't YAML, an
@@ -510,12 +515,14 @@ pub fn load(root: &Path, ci: &Path, extra: &[PathBuf]) -> Result<Pipeline, DistE
         count: 0,
         unresolved: Vec::new(),
         files: None,
+        stand_in: true,
     };
     let mut merged = Node::Map(Vec::new());
     for file in extra {
         let node = loader.file(file, &BTreeMap::new(), &mut Vec::new())?;
         merged = deep_merge(merged, node);
     }
+    loader.stand_in = false;
     let node = loader.file(ci, &BTreeMap::new(), &mut Vec::new())?;
     merged = deep_merge(merged, node);
     let Node::Map(entries) = merged else {
@@ -576,6 +583,10 @@ struct Loader {
     unresolved: Vec<Unresolved>,
     /// The repository's files a glob matches against, once listed.
     files: Option<Vec<String>>,
+    /// Loading the further files given beside the CI file: each stands for
+    /// an include whose inputs the lint can't see, so an input without a
+    /// default reads as empty at its top level.
+    stand_in: bool,
 }
 
 impl Loader {
@@ -619,7 +630,8 @@ impl Loader {
         let body = match (documents.next(), documents.next(), documents.next()) {
             (None, ..) => Node::Map(Vec::new()),
             (Some(header), Some(body), None) if header.get("spec").is_some() => {
-                let values = input_values(&header, inputs, &what)?;
+                let stand_in = self.stand_in && chain.is_empty();
+                let values = input_values(&header, inputs, &what, stand_in)?;
                 interpolate(&body, &values, &what)?
             }
             (Some(only), None, _) => {
@@ -856,8 +868,14 @@ fn glob_matches(pattern: &[u8], path: &[u8]) -> bool {
     }
 }
 
-/// The inputs' values: those given, else each input's default.
-fn input_values(header: &Node, given: &Inputs, what: &str) -> Result<Inputs, DistError> {
+/// The inputs' values: those given, else each input's default, else (for a
+/// `stand_in` file, whose inputs the lint can't see) an empty value.
+fn input_values(
+    header: &Node,
+    given: &Inputs,
+    what: &str,
+    stand_in: bool,
+) -> Result<Inputs, DistError> {
     let mut values = BTreeMap::new();
     if let Some(Node::Map(inputs)) = header.get("spec").and_then(|s| s.get("inputs")) {
         for (name, spec) in inputs {
@@ -865,6 +883,7 @@ fn input_values(header: &Node, given: &Inputs, what: &str) -> Result<Inputs, Dis
                 .get(name)
                 .cloned()
                 .or_else(|| spec.get("default").cloned())
+                .or_else(|| stand_in.then(|| Node::Scalar(String::new(), false)))
                 .ok_or_else(|| {
                     DistError::Ci(format!(
                         "{what}: input {name:?} has no default and isn't given"
