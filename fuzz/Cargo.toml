@@ -38,7 +38,38 @@ seaworthy-levels = { path = "../crates/seaworthy-levels" }
 seaworthy-formats = { path = "../crates/seaworthy-formats" }
 seaworthy-service = { path = "../crates/seaworthy-service", features = ["fuzzing"] }
 seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing"] }
+# The CLI's parsers and writers: the release version, seaworthy.toml, the
+# ELF/PE readers verify runs, the archive writers and the version-resource
+# stamper (dist_inputs, dist_archive, dist_pe).
+seaworthy = { path = "../crates/seaworthy" }
 url = "2"
+# dist_archive's independent readers: the tarball's zstd and the zip's
+# deflate (both already in the CLI's graph).
+zstd = { version = "0.14", default-features = false }
+miniz_oxide = "0.8"
+# dist_pe's check that a stamped image still parses (read side only).
+object = { version = "0.37", default-features = false, features = ["read_core", "pe", "std"] }
+
+[[bin]]
+name = "dist_archive"
+path = "fuzz_targets/dist_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dist_inputs"
+path = "fuzz_targets/dist_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dist_pe"
+path = "fuzz_targets/dist_pe.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "levels_records"

@@ -43,6 +43,9 @@ macro_rules! targets {
 // The target list, one name per line, sorted.
 #[rustfmt::skip]
 targets![
+    dist_archive,
+    dist_inputs,
+    dist_pe,
     levels_records,
     service_unit,
     updater_manifest,

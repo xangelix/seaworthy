@@ -1,0 +1,39 @@
+
+[defaults]
+vendor = "Acme"
+targets = ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+channel = "stable"
+release-signatures = ["ml-dsa-87"]
+fips = true
+maintainer = "Acme <packages@example.com>"
+license = "LicenseRef-Acme-Proprietary"
+homepage = "https://example.com"
+
+[product.collector]
+display-name = "Acme Forensic Collector"
+description = "Collects forensic data for Acme."
+launcher = "crates/acme_collector/launcher"
+executable = "AcmeForensicCollector"
+core = "acme_collector_core"
+helper = "AcmeCollectorUpdate"
+sidecars.windows = ["aws_lc_fips_*_crypto.dll", "aws_lc_fips_*_rust_wrapper.dll"]
+outputs = ["msi", "zip", "deb", "rpm", "pacman", "tar"]
+updates.default = "auto"
+
+[product.collector.service]
+name = "AcmeLiveResponseService"
+account = "local-system"
+arguments = ["service"]
+restart-delays = ["15s", "60s", "300s", "900s"]
+state-directory = "acme/collector"
+hardening = "none"
+
+[product.console]
+display-name = "Acme Console"
+description = "The Acme desktop console."
+executable = "AcmeConsole"
+core = "acme_console_core"
+helper = "AcmeConsoleUpdate"
+kind = "desktop"
+outputs = ["msi", "deb"]
+linux.depends.deb = ["libvulkan1 | libegl1", "libxkbcommon0"]
