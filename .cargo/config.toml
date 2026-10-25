@@ -24,3 +24,10 @@ AWS_LC_FIPS_SYS_CXX_x86_64_pc_windows_msvc = "cl"
 # that must run there can opt out with the target-scoped
 # AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_pc_windows_msvc = "1"
 # (examples/entropy_probe.rs in seaworthy-crypto measures the rate).
+
+# Windows x86_64 (non-FIPS): when NASM is not installed, assemble with the
+# prebuilt NASM objects shipped inside the aws-lc-sys crate (the same
+# source, checksummed by crates.io) instead of failing; an installed NASM
+# still wins. Target-scoped, and read only by builds of this repository:
+# an application using seaworthy-crypto makes its own choice.
+AWS_LC_SYS_PREBUILT_NASM_x86_64_pc_windows_msvc = "1"

@@ -32,6 +32,25 @@ doctest = false
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
+# The fuzzed crates. `fuzzing` enables a crate's doc-hidden `__fuzz` seam
+# over crate-private parsers (no extra dependencies).
+seaworthy-levels = { path = "../crates/seaworthy-levels" }
+seaworthy-service = { path = "../crates/seaworthy-service", features = ["fuzzing"] }
+
+[[bin]]
+name = "levels_records"
+path = "fuzz_targets/levels_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "service_unit"
+path = "fuzz_targets/service_unit.rs"
+test = false
+doc = false
+bench = false
+
 # The fuzzed crates, as path dependencies. A crate that reaches private
 # parsers exposes them behind its own `fuzzing` feature (off by default, no
 # extra dependencies); enable it here, e.g.:

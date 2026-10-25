@@ -41,7 +41,10 @@ macro_rules! targets {
 }
 
 // The target list, one name per line, sorted.
-targets![];
+targets![
+    levels_records,
+    service_unit,
+];
 
 /// Drive a future to completion on the current thread. Fuzzed futures
 /// (in-memory channels, cursor-backed codecs) never park on I/O, but the
