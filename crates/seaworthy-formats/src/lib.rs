@@ -59,8 +59,13 @@
 
 #![forbid(unsafe_code)]
 // Parsers of signed, network-delivered bytes: no index or slice that can
-// panic, no arithmetic that can overflow (tests may index).
-#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+// panic, no arithmetic that can overflow, no `unreachable!` (tests may
+// index).
+#![deny(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::unreachable
+)]
 
 pub mod format_check;
 mod log;
