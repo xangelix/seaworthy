@@ -1,0 +1,3 @@
+acme-agent
+updates = "auto"
+server = "https://updates.example.com:8443/t"

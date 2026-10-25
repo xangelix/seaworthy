@@ -1,0 +1,2 @@
+https://r.example.com/{product}/{version}/{target}/pkg.{format}?c={channel}
+v1.4.0+812
