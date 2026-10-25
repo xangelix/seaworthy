@@ -128,6 +128,9 @@ jobs:
       contents: read
     env:
       FEATURES: ${{ needs.plan.outputs.features }}
+      # The container suites run in the `containers` job; here docker is
+      # disabled (Linux) or absent, so they skip instead of failing.
+      SEAWORTHY_TEST_CONTAINERS_REQUIRED: "0"
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         if: runner.os == 'Linux'
@@ -144,6 +147,39 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: cargo test
+        run: cargo test --workspace --locked --features "$FEATURES"
+
+  containers:
+    name: Container suites (Linux)
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      FEATURES: ${{ needs.plan.outputs.features }}
+      # Docker must be usable here: a missing or broken daemon fails the
+      # suites instead of skipping them.
+      SEAWORTHY_TEST_CONTAINERS_REQUIRED: "1"
+    steps:
+      # Containers stay enabled in this job (the suites start public,
+      # digest-pinned images; never privileged); sudo is not needed.
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Pre-pull the test images
+        run: scripts/pull-test-images.sh
+      - name: cargo test (container suites required)
         run: cargo test --workspace --locked --features "$FEATURES"
 
   msrv:
@@ -362,7 +398,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [plan, fmt, clippy, test, msrv, docs, deny, fips, fuzz-replay, checks, lint]
+    needs: [plan, fmt, clippy, test, containers, msrv, docs, deny, fips, fuzz-replay, checks, lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -374,7 +410,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
-          jq -e '["clippy", "test", "msrv", "docs", "fips"] as $gated
+          jq -e '["clippy", "test", "containers", "msrv", "docs", "fips"] as $gated
             | to_entries
             | all(.value.result == "success"
                   or (.value.result == "skipped" and (.key | IN($gated[]))))' <<<"$NEEDS" >/dev/null \
