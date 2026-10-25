@@ -1,0 +1,30 @@
+[package]
+name = "seaworthy-levels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The x86-64 and aarch64 CPU feature tables, host detection (raw CPUID; sysctl on Apple Silicon macOS), and the requirement record each per-CPU core carries — what seaworthy-launcher selects cores by"
+readme = "README.md"
+keywords = ["cpu", "cpuid", "simd", "x86-64", "aarch64"]
+categories = ["hardware-support"]
+
+# Native only: no wasm build (there is no CPUID to read there).
+[dependencies]
+# Reading a core's `.cpureq` / a launcher's `.cpulist` section straight from
+# its ELF, PE or Mach-O file, through a read cache (only the section's bytes
+# are read), without loading it. Read-side features only, plus `unaligned`
+# (which object's own `read` feature includes): without it a Mach-O segment
+# with no sections — `__LINKEDIT` in every binary, `__PAGEZERO` in every
+# executable — fails to parse ("Invalid Mach-O number of sections"), as its
+# empty section list is checked for 8-byte alignment.
+object = { workspace = true, features = ["read_core", "elf", "pe", "macho", "std", "unaligned"] }
+
+# sysctlbyname: the aarch64 features macOS reports (hw.optional.*).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true
