@@ -3,7 +3,12 @@
 members = ["crates/*"]
 # The cargo-fuzz crate: its own workspace and lockfile on a pinned nightly
 # (fuzz/README.md), never part of the stable build, tests or clippy.
-exclude = ["fuzz"]
+exclude = [
+    "fuzz",
+    # The launcher's end-to-end fixture product: its own workspace and
+    # lockfile, built once per CPU target by scripts/launcher-e2e.sh.
+    "crates/seaworthy-launcher/e2e",
+]
 resolver = "3"
 
 # Shared metadata. The crates are versioned in lockstep: a caller pins one

@@ -1,0 +1,8 @@
+[package]
+name = "inspect"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+seaworthy-levels = { path = "../../../seaworthy-levels" }

@@ -1,0 +1,16 @@
+[package]
+name = "demo_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+seaworthy-launcher = { path = "../.." }
+
+# `serve` under the Windows SCM (a Windows service lane's service): the
+# dispatcher and the status protocol.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Services"] }

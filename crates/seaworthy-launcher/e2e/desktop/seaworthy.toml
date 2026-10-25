@@ -1,0 +1,45 @@
+# The desktop fixture: a client-only desktop product — the e2e launcher
+# fixture (`demo`) and its per-CPU cores (`demo_core`), data files beside
+# them, icons, a menu entry and shortcuts, no update helper and so no
+# release manifests. The packaging lanes build, package and install it as a
+# product's pipeline does: Linux packages, the Windows MSI and zip, and on
+# Apple Silicon an ad hoc-signed app in a disk image. Paths are relative to
+# this file; the crate paths to the e2e workspace. (`demo/build.rs` links
+# `icons/viewer.ico` into the Windows launcher.)
+
+[defaults]
+vendor = "Acme"
+targets = ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+macos-targets = ["apple-m4", "apple-m1"]
+channel = "stable"
+maintainer = "Acme Packaging <packages@example.com>"
+license = "MIT OR Apache-2.0"
+homepage = "https://example.com/acme/viewer"
+
+[product.viewer]
+display-name = "Acme Viewer"
+description = "The desktop fixture: the launcher, its cores, data files, icons and shortcuts."
+launcher = "demo"
+executable = "demo"
+core = "demo_core"
+kind = "desktop"
+windows-directory = "Viewer"
+outputs = ["msi", "zip", "deb", "tar", "dmg"]
+updates.default = "off"
+linux.command = "acme-viewer"
+linux.depends.deb = ["libc6 (>= 2.34)"]
+
+[product.viewer.desktop]
+linux-icons = ["icons/viewer-48.png", "icons/viewer.svg"]
+windows-icon = "icons/viewer.ico"
+desktop-shortcut = true
+categories = ["Utility"]
+
+[product.viewer.macos]
+bundle-id = "com.example.acme.viewer"
+icon = "icons/viewer.icns"
+category = "public.app-category.utilities"
+
+[[product.viewer.files]]
+source = "data"
+destination = "share"

@@ -1,0 +1,21 @@
+# The launcher's end-to-end fixture (scripts/launcher-e2e.sh and
+# scripts/launcher-e2e-macos.sh): a product laid out exactly as a packaging
+# tool lays one out — a launcher built for the architecture's baseline and
+# one core per CPU target — plus a tool that reads the records back out of
+# the built files. Its own workspace and lockfile, excluded from the
+# repository's workspace: the scripts build it once per CPU target, each in
+# its own target directory.
+[workspace]
+members = ["demo", "demo_core", "inspect"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+# The shipped profile: thin LTO, one codegen unit, stripped — the records
+# must survive all of it.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
