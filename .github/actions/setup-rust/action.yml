@@ -1,0 +1,55 @@
+# Install the Rust toolchain with rustup, which GitHub-hosted runners ship:
+# no third-party toolchain action runs with the job's token.
+name: Set up Rust
+description: >-
+  Install the toolchain pinned in rust-toolchain.toml (with its components),
+  or an explicit toolchain, using the runner's rustup.
+inputs:
+  toolchain:
+    description: >-
+      A toolchain to use instead of rust-toolchain.toml's (for example the
+      MSRV), set as rustup's directory override for the workspace, which
+      takes precedence over rust-toolchain.toml for the rest of the job.
+    required: false
+    default: ""
+  components:
+    description: Extra components to add, space-separated.
+    required: false
+    default: ""
+  targets:
+    description: Extra compilation targets to add, space-separated.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install the Rust toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -euo pipefail
+        name='^[A-Za-z0-9._-]+$'
+        rustup --version
+        rustup set auto-self-update disable
+        rustup set profile minimal
+        if [ -n "$TOOLCHAIN" ]; then
+          [[ "$TOOLCHAIN" =~ $name ]] || { echo "::error::invalid toolchain '$TOOLCHAIN'"; exit 1; }
+          rustup toolchain install "$TOOLCHAIN"
+          rustup override set "$TOOLCHAIN"
+        else
+          # rustup >= 1.28 installs what rust-toolchain.toml names.
+          rustup toolchain install
+        fi
+        for component in $COMPONENTS; do
+          [[ "$component" =~ $name ]] || { echo "::error::invalid component '$component'"; exit 1; }
+          rustup component add "$component"
+        done
+        for target in $TARGETS; do
+          [[ "$target" =~ $name ]] || { echo "::error::invalid target '$target'"; exit 1; }
+          rustup target add "$target"
+        done
+        rustc --version --verbose
+        cargo --version

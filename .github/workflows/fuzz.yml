@@ -1,0 +1,116 @@
+# Fuzzing: build every target on the pinned nightly (fuzz/rust-toolchain.toml)
+# and run each one briefly with libFuzzer + AddressSanitizer, one job per
+# target (scripts/fuzz.sh smoke). Every change already replays the committed
+# corpus on stable (CI's "Fuzz corpus replay" job).
+#
+# Crash inputs and logs are uploaded as artifacts for 7 days. Logs and
+# artifacts of a public repository are public: a crash on the scheduled run
+# is a potential vulnerability to triage privately (fuzz/README.md).
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "41 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target (1-1800)
+        required: false
+        default: "300"
+        type: string
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "scripts/fuzz.sh"
+      - "scripts/ci/install-tool.sh"
+      - ".github/workflows/fuzz.yml"
+
+permissions: {}
+
+concurrency:
+  group: fuzz-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      targets: ${{ steps.plan.outputs.fuzz-targets }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: List the fuzz targets
+        id: plan
+        run: |
+          scripts/ci/plan.sh | tee -a "$GITHUB_OUTPUT"
+          if grep -qx 'fuzz-targets=\[\]' "$GITHUB_OUTPUT"; then
+            echo "::notice::fuzz/ has no targets yet: nothing to fuzz"
+          fi
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: plan
+    if: needs.plan.outputs.targets != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 60 s per target on pull requests; 300 s (or the dispatch input) on
+      # the schedule. scripts/fuzz.sh installs the pinned nightly with rustup
+      # and the pinned cargo-fuzz release binary (SHA-256 verified).
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          EVENT: ${{ github.event_name }}
+          REQUESTED_SECONDS: ${{ inputs.seconds }}
+        run: |
+          seconds=60
+          if [ "$EVENT" != pull_request ]; then
+            seconds="${REQUESTED_SECONDS:-300}"
+          fi
+          if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [ "$seconds" -lt 1 ] || [ "$seconds" -gt 1800 ]; then
+            echo "::error::seconds must be an integer from 1 to 1800"
+            exit 1
+          fi
+          FUZZ_TARGETS="$TARGET" FUZZ_SMOKE_SECS="$seconds" scripts/fuzz.sh smoke
+      - name: Upload crash inputs and logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            fuzz/artifacts/
+            fuzz/logs/
+          if-no-files-found: ignore
+          retention-days: 7

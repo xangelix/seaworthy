@@ -1,0 +1,372 @@
+# Continuous integration: formatting, clippy and tests on Linux, Windows and
+# macOS, the MSRV, docs, cargo-deny, the FIPS build, the fuzz-corpus replay,
+# the repository's check scripts, and a lint of the workflows themselves.
+#
+# The jobs run over whatever crates/ holds. Cargo refuses a workspace with no
+# members, so the jobs that need one wait for `plan` (scripts/ci/plan.sh) and
+# are skipped while crates/ is empty. Make "CI result" the required check: it
+# fails unless every job passed or was skipped by the plan.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+  schedule:
+    # Weekly, against the moving advisory database and runner images.
+    - cron: "23 4 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      crates: ${{ steps.plan.outputs.crates }}
+      features: ${{ steps.plan.outputs.features }}
+      fips: ${{ steps.plan.outputs.fips }}
+      msrv: ${{ steps.plan.outputs.msrv }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Describe the workspace
+        id: plan
+        run: scripts/ci/plan.sh | tee -a "$GITHUB_OUTPUT"
+
+  fmt:
+    name: Format
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: cargo fmt (workspace)
+        if: needs.plan.outputs.crates == 'true'
+        run: cargo fmt --all --check
+      - name: cargo fmt (fuzz)
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --all --check
+
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # Every feature except the FIPS ones (the `fips` job covers those).
+      FEATURES: ${{ needs.plan.outputs.features }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked --features "$FEATURES" -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      FEATURES: ${{ needs.plan.outputs.features }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: cargo test
+        run: cargo test --workspace --locked --features "$FEATURES"
+
+  msrv:
+    name: MSRV (${{ needs.plan.outputs.msrv }})
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      FEATURES: ${{ needs.plan.outputs.features }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # workspace.package.rust-version, as x.y.0 when it names no patch.
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ needs.plan.outputs.msrv }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # Libraries and binaries: what a dependent builds. Dev-dependencies may
+      # need a newer toolchain than the MSRV.
+      - name: cargo check
+        run: cargo check --workspace --lib --bins --locked --features "$FEATURES"
+
+  docs:
+    name: Docs
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      FEATURES: ${{ needs.plan.outputs.features }}
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps --locked --features "$FEATURES"
+
+  deny:
+    name: cargo-deny
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: Install cargo-deny (pinned, SHA-256 verified)
+        run: scripts/ci/install-tool.sh cargo-deny
+      - name: cargo deny (workspace)
+        if: needs.plan.outputs.crates == 'true'
+        run: cargo deny --locked check
+      # The fuzz crate is never distributed: its licenses are not checked,
+      # but advisories, bans and sources are.
+      - name: cargo deny (fuzz)
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check advisories bans sources
+
+  fips:
+    name: FIPS (all features, Linux)
+    needs: plan
+    if: needs.plan.outputs.fips == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      # The AWS-LC FIPS module builds from source with CMake, Go, Perl and
+      # Clang, all preinstalled on GitHub's Ubuntu image.
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build tools
+        run: |
+          clang --version | head -n1
+          cmake --version | head -n1
+          go version
+          perl -e 'print "perl $^V\n"'
+      - name: cargo clippy --all-features
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: cargo test --all-features
+        run: cargo test --workspace --all-features --locked
+
+  fuzz-replay:
+    name: Fuzz corpus replay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The root rust-toolchain.toml (stable): the replay needs no nightly.
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          cache-bin: "false"
+          workspaces: fuzz -> target
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: cargo clippy (fuzz)
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Replay every seed and regression
+        run: cargo test --manifest-path fuzz/Cargo.toml --locked
+
+  checks:
+    name: Repository checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: scripts/check-*.sh
+        run: |
+          status=0
+          for script in scripts/check-*.sh; do
+            [ -e "$script" ] || continue
+            echo "::group::$script"
+            "$script" || { status=1; echo "::error::$script failed"; }
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  lint:
+    name: Lint workflows and scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install linters (pinned, SHA-256 verified)
+        run: scripts/ci/install-tool.sh actionlint zizmor shellcheck
+      - name: shellcheck
+        run: shellcheck scripts/*.sh scripts/ci/*.sh
+      - name: actionlint
+        run: actionlint
+      # Online audits (impostor commits, known-vulnerable actions, stale
+      # pins) use the job's read-only token.
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format=github .
+
+  result:
+    name: CI result
+    if: always()
+    needs: [plan, fmt, clippy, test, msrv, docs, deny, fips, fuzz-replay, checks, lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      # Only the jobs the plan gates (no crates yet, no `fips` feature yet)
+      # may be skipped; every other job must succeed.
+      - name: Every job passed, or was skipped by the plan
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e '["clippy", "test", "msrv", "docs", "fips"] as $gated
+            | to_entries
+            | all(.value.result == "success"
+                  or (.value.result == "skipped" and (.key | IN($gated[]))))' <<<"$NEEDS" >/dev/null \
+            || { echo "::error::a CI job failed, was cancelled, or was skipped unexpectedly"; exit 1; }

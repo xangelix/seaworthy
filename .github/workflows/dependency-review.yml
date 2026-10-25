@@ -1,0 +1,39 @@
+# Dependency review: fail a change that adds a dependency (Cargo or GitHub
+# Actions) with a known vulnerability of any severity. Licenses, bans and
+# sources are cargo-deny's job (deny.toml), the single policy for them.
+name: Dependency review
+
+on:
+  pull_request:
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  review:
+    name: Dependency review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      # Pull requests compare their own base and head; a merge-queue entry
+      # names its base and head commits explicitly.
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          fail-on-scopes: runtime, development, unknown
+          vulnerability-check: true
+          license-check: false
+          show-openssf-scorecard: true
+          warn-on-openssf-scorecard-level: 3
+          base-ref: ${{ github.event.merge_group.base_sha }}
+          head-ref: ${{ github.event.merge_group.head_sha }}

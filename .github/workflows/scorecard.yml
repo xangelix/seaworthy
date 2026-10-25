@@ -1,0 +1,54 @@
+# OpenSSF Scorecard: supply-chain checks, published to the public Scorecard
+# API (badge) and uploaded to code scanning as SARIF.
+#
+# Publishing imposes rules on this file (github.com/ossf/scorecard-action,
+# "Workflow restrictions"): no workflow- or job-level `env` or `defaults`, no
+# workflow-level write permission, `id-token: write` only in the Scorecard
+# job, Ubuntu hosted runners, and only these actions in the job: checkout,
+# upload-artifact, codeql-action/upload-sarif, scorecard-action and
+# harden-runner.
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "29 6 * * 3"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      security-events: write # upload the SARIF results to code scanning
+      id-token: write # sign the results published to the Scorecard API (OIDC)
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: results.sarif

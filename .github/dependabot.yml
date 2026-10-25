@@ -1,0 +1,67 @@
+# Dependabot version updates: weekly, grouped into one pull request per
+# ecosystem and directory, after a cooldown so a freshly published (possibly
+# compromised, then yanked) release is never proposed the day it appears.
+# Security updates are not delayed by the cooldown.
+#
+# Not covered here (bumped by hand, docs/releasing.md): the release binaries
+# pinned in scripts/ci/install-tool.sh, and the musl toolchain packages.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+    groups:
+      # Majors stay separate: each is a reviewed API change.
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+    groups:
+      cargo-fuzz:
+        patterns: ["*"]
+    commit-message:
+      prefix: fuzz
+
+  # The pinned stable toolchain (rust-toolchain.toml) and the fuzz nightly
+  # (fuzz/rust-toolchain.toml). A stable bump is a reviewed change; it never
+  # moves the MSRV (docs/releasing.md).
+  - package-ecosystem: rust-toolchain
+    directories: [/, /fuzz]
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: toolchain

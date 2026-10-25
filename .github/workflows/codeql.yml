@@ -1,0 +1,52 @@
+# CodeQL code scanning (advanced setup): GitHub Actions workflows, and Rust
+# (generally available since CodeQL 2.23.3, analyzed without a build:
+# `build-mode: none`). Leave the repository's CodeQL "default setup" off:
+# it and this workflow would conflict.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 2"
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # check out the code
+      security-events: write # upload the analysis to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, rust]
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The Rust extractor runs cargo and rust-analyzer: give it the pinned
+      # toolchain rather than whatever the runner image carries.
+      - name: Set up Rust
+        if: matrix.language == 'rust'
+        uses: ./.github/actions/setup-rust
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}

@@ -1,0 +1,14 @@
+# zizmor configuration (CI's "Lint workflows and scripts" job runs
+# `zizmor .`; see https://docs.zizmor.sh/configuration/).
+rules:
+  # GitHub's self-repository syntax (`uses: $/...`, July 2026) resolves a
+  # local action at the workflow's own commit instead of the working tree.
+  # actionlint 1.7.12, the latest release, still rejects it, so the local
+  # setup-rust action is referenced as `./.github/actions/setup-rust`; every
+  # use follows a fresh checkout and precedes any build step, so no earlier
+  # step can have modified it. Switch to `$/` once actionlint accepts it.
+  self-repository:
+    ignore:
+      - ci.yml
+      - codeql.yml
+      - release.yml
