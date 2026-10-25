@@ -1,0 +1,142 @@
+# seaworthy's GitLab CI template, the Windows build: include it beside
+# ci/gitlab/seaworthy.yml when a product has Windows outputs (msi, zip). It
+# carries out the prepare job's x86_64-pc-windows-msvc build plan on a
+# Windows runner, natively (the AWS-LC FIPS module builds only as a native
+# MSVC build); the package job takes its artifacts (its need on this job is
+# optional, so a product without Windows outputs doesn't include this file).
+#
+# The MSI: `seaworthy package` (Linux) stamps and Authenticode-signs every
+# Windows binary and writes each product's .wxs beside the signed tree;
+# seaworthy-msi builds it with WiX on the Windows runner and runs Windows
+# Installer's validation (ICE); seaworthy-msi-adopt (Linux) checks the MSI's
+# payload is exactly the signed tree (`seaworthy adopt-msi`), signs it with
+# the package job's signers on a release, and lists it with its manifest and
+# SBOM in seaworthy/adopted/, which seaworthy-repo publishes; on a dev build
+# (dev-sign-if) it signs the MSI with [authenticode] alone, under
+# dev-sign-secrets, as the package job signed the binaries. Signing stays on
+# Linux because the version resource is stamped into each binary before it's
+# signed; a cloud signing service reaches it through a command signer (such
+# as scripts/ci/azure-sign.sh for Azure Artifact Signing). The check catches
+# an MSI that isn't this release's; it isn't a boundary against the Windows
+# runner, which builds the binaries the package job signs and so is trusted
+# for a release (its MSI's tables are taken as WiX built them).
+#
+#   seaworthy-build-windows  build    the Windows build plan, natively
+#   seaworthy-msi            package  WiX: each .wxs into an MSI, validated
+#   seaworthy-msi-adopt      package  seaworthy adopt-msi (Linux; signed on
+#                                     a release, under package-secrets, or
+#                                     a dev build, under dev-sign-secrets)
+#
+# The Windows image and the runner's tags have no default: both are required
+# inputs.
+spec:
+  inputs:
+    windows-image:
+      description: Required. The MSVC build image (Visual Studio Build Tools with the MSVC x64 tools, CMake, Go, NASM, rustup; the C++ Clang tools or LIBCLANG_PATH for a FIPS core).
+    windows-tags:
+      description: Required. The Windows runner's tags.
+      type: array
+    build-stage:
+      default: build
+    package-stage:
+      description: The MSI jobs' stage (seaworthy.yml's package-stage, where seaworthy-package runs).
+      default: build
+    package-secrets:
+      description: The command prefix the adopt job's seaworthy call runs under on a release (seaworthy.yml's package-secrets; the MSI is signed with the package job's signers).
+      default: ""
+    manifest:
+      description: The Cargo workspace manifest the products build from.
+      default: Cargo.toml
+    cargo-args:
+      description: More cargo arguments for every build, such as --features fips.
+      default: ""
+    release-if:
+      description: The rules expression for a release (as seaworthy.yml's); the adopt job signs a release's MSIs.
+      default: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)(\.(0|[1-9][0-9]*))?)?$/
+    dev-sign-if:
+      description: The rules expression for a dev build (as seaworthy.yml's); the adopt job signs its MSIs with [authenticode] alone.
+      default: $CI_PIPELINE_ID == "0"
+    dev-sign-secrets:
+      description: The command prefix the adopt job's seaworthy call runs under on a dev build (seaworthy.yml's dev-sign-secrets).
+      default: ""
+---
+seaworthy-build-windows:
+  stage: $[[ inputs.build-stage ]]
+  image: $[[ inputs.windows-image ]]
+  tags: $[[ inputs.windows-tags ]]
+  needs:
+    - seaworthy-prepare
+  variables:
+    SEAWORTHY_WORK: seaworthy
+    SEAWORTHY_MANIFEST: $[[ inputs.manifest ]]
+    SEAWORTHY_CARGO_ARGS:
+      value: >-
+        $[[ inputs.cargo-args ]]
+      expand: false
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File seaworthy\scripts\seaworthy-build.ps1
+  artifacts:
+    paths:
+      - seaworthy/artifacts/x86_64-pc-windows-msvc/
+    expire_in: 1 week
+
+# WiX on the Windows runner: every product's .wxs (the package job's) built
+# into an MSI and validated (scripts/ci/seaworthy-msi.ps1: WiX v5.0.2 from
+# its pinned MSI; every ICE error fails it). The MSI leaves unsigned: the
+# adopt job signs it.
+seaworthy-msi:
+  stage: $[[ inputs.package-stage ]]
+  image: $[[ inputs.windows-image ]]
+  tags: $[[ inputs.windows-tags ]]
+  needs:
+    - seaworthy-prepare
+    - seaworthy-package
+  variables:
+    SEAWORTHY_WORK: seaworthy
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File seaworthy\scripts\seaworthy-msi.ps1
+  artifacts:
+    paths:
+      - seaworthy/msi/
+    expire_in: 1 week
+
+# On Linux, with the package job's tools image: each MSI checked against the
+# signed tree it was built from (byte for byte, at the release's version and
+# the product's UpgradeCode), signed and listed with its manifest and SBOM
+# on a release (under package-secrets: the package job's signers),
+# Authenticode-signed alone on a dev build (under dev-sign-secrets), unsigned
+# otherwise, in seaworthy/adopted/.
+seaworthy-msi-adopt:
+  extends: .seaworthy
+  stage: $[[ inputs.package-stage ]]
+  variables:
+    SEAWORTHY_SECRETS:
+      value: >-
+        $[[ inputs.package-secrets ]]
+      expand: false
+    SEAWORTHY_DEV_SECRETS:
+      value: >-
+        $[[ inputs.dev-sign-secrets ]]
+      expand: false
+  needs:
+    - seaworthy-prepare
+    - seaworthy-package
+    - seaworthy-msi
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+    - if: >-
+        $[[ inputs.dev-sign-if ]]
+      variables:
+        SEAWORTHY_DEV_SIGN: "1"
+    - when: on_success
+  script:
+    # The script runs seaworthy under SEAWORTHY_SECRETS on a release, and
+    # SEAWORTHY_DEV_SECRETS on a dev build.
+    - bash seaworthy/scripts/seaworthy.sh adopt-msi
+  artifacts:
+    paths:
+      - seaworthy/adopted/
+    expire_in: 4 weeks

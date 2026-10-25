@@ -1,0 +1,98 @@
+# seaworthy's GitLab CI template, the macOS build: include it beside
+# ci/gitlab/seaworthy.yml when a product has macOS outputs (dmg, pkg). One
+# job on a Mac runner carries out the prepare job's aarch64-apple-darwin
+# build plan and packages each product's macOS outputs there: macOS's own
+# codesign and hdiutil sign the app bundle (ad hoc) and build the disk image
+# (pkgbuild and productbuild the pkg of a service), so seaworthy runs on the
+# Mac too, built from the seaworthy checkout (seaworthy-fetch, as the
+# prepare job's).
+#
+# The dmg is a pipeline artifact, never part of a release: seaworthy.yml's
+# package job packages every platform but macOS, so a release's listing,
+# repositories and update tree never hold it, and this job is never signed
+# and gets no secrets, on a release too. A downloaded copy opens once its
+# quarantine is cleared (`xattr -dr com.apple.quarantine "<App>.app"`);
+# Developer ID signing and notarization bring it into releases later.
+#
+#   seaworthy-macos  build  the macOS build plan, natively; seaworthy
+#                           package --platforms macos (ad hoc-signed)
+#
+# The job writes cargo's target directories and the bundle under $HOME
+# (on a VM, its own disk: copies on a shared mount of the build directory
+# can come back incomplete), and puts Homebrew's bash first on PATH (macOS's
+# /bin/bash is 3.2; seaworthy.sh needs 4.4). The Mac's VM image and the
+# runner's tags have no default: both are required inputs.
+spec:
+  inputs:
+    macos-image:
+      description: Required. The Mac runner's image (Xcode's command line tools, rustup, CMake and Go for a FIPS core, Homebrew), as your runner names it.
+    macos-tags:
+      description: Required. The Mac runner's tags.
+      type: array
+    macos-resource-group:
+      description: The resource group the job runs in, one at a time (a Mac host runs few VMs at once).
+      default: seaworthy-macos
+    build-stage:
+      default: build
+    seaworthy-dir:
+      description: A seaworthy checkout at this template's ref, relative to the project directory (seaworthy.yml's seaworthy-dir).
+      default: .seaworthy
+    seaworthy-fetch:
+      description: A command putting the seaworthy checkout at seaworthy-dir when it isn't there (seaworthy.yml's seaworthy-fetch).
+      default: ""
+    manifest:
+      description: The Cargo workspace manifest the products build from.
+      default: Cargo.toml
+    cargo-args:
+      description: More cargo arguments for every build, such as --features fips.
+      default: ""
+    release-if:
+      description: The rules expression for a release (as seaworthy.yml's), so the job names the release's version; its dmg still stays out of the release.
+      default: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)(\.(0|[1-9][0-9]*))?)?$/
+---
+seaworthy-macos:
+  extends: .seaworthy
+  stage: $[[ inputs.build-stage ]]
+  image: $[[ inputs.macos-image ]]
+  tags: $[[ inputs.macos-tags ]]
+  resource_group: $[[ inputs.macos-resource-group ]]
+  needs:
+    - seaworthy-prepare
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+    - when: on_success
+  variables:
+    SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
+    SEAWORTHY_FETCH:
+      value: >-
+        $[[ inputs.seaworthy-fetch ]]
+      expand: false
+    SEAWORTHY_MANIFEST: $[[ inputs.manifest ]]
+    SEAWORTHY_CARGO_ARGS:
+      value: >-
+        $[[ inputs.cargo-args ]]
+      expand: false
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+    HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  script:
+    - |
+      if [ ! -f "$SEAWORTHY_CHECKOUT/Cargo.toml" ] && [ -n "$SEAWORTHY_FETCH" ]; then
+        eval "$SEAWORTHY_FETCH"
+      fi
+    - export SEAWORTHY_TARGET_DIR="$HOME/seaworthy/target" SEAWORTHY_TOOL_TARGET="$HOME/seaworthy/tool-target" SEAWORTHY_MACOS_SCRATCH="$HOME/seaworthy/macos"
+    - brew list bash >/dev/null 2>&1 || brew install bash
+    - export PATH="$(brew --prefix)/bin:$PATH"
+    # The toolchains both checkouts pin (rustup installs a pinned toolchain
+    # only when asked).
+    - rustup toolchain install 2>/dev/null || true
+    - (cd "$SEAWORTHY_CHECKOUT" && rustup toolchain install 2>/dev/null) || true
+    - sw_vers && uname -m && bash --version | head -1 && cargo --version
+    - bash seaworthy/scripts/seaworthy.sh build aarch64-apple-darwin
+    - bash seaworthy/scripts/seaworthy.sh package-macos
+  artifacts:
+    paths:
+      - seaworthy/dist-macos/
+    expire_in: 4 weeks

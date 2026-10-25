@@ -1,0 +1,325 @@
+# seaworthy's GitLab CI template for products: a tag goes to verified,
+# signed packages, published APT/DNF/pacman repositories and the update
+# helper's release tree, through the seaworthy command.
+#
+#   include:
+#     - project: <group>/seaworthy        # a mirror of seaworthy; or `remote:`
+#       ref: <the seaworthy revision the product builds against>
+#       file: ci/gitlab/seaworthy.yml
+#       inputs:
+#         tools-image: <an image with Rust and the packaging tools>
+#         seaworthy-fetch: git clone --depth 1 --branch <ref> https://github.com/xangelix/seaworthy.git .seaworthy
+#         server-deploy-jobs: deploy-server       # the release-ordering lint
+#         client-deploy-jobs: deploy-web-console
+#         publish-secrets: <your secret store's wrapper> --
+#     # with Windows outputs (msi, zip):
+#     - project: <group>/seaworthy
+#       ref: <the same revision>
+#       file: ci/gitlab/seaworthy-windows.yml
+#       inputs:
+#         windows-image: <an MSVC build image>
+#         windows-tags: [<your Windows runner's tags>]
+#     # with macOS outputs (dmg, pkg; a pipeline artifact, never released
+#     # until Developer ID signing):
+#     - project: <group>/seaworthy
+#       ref: <the same revision>
+#       file: ci/gitlab/seaworthy-macos.yml
+#       inputs:
+#         macos-image: <your Mac runner's VM image>
+#         macos-tags: [<your Mac runner's tags>]
+#         seaworthy-fetch: <as above>
+#
+# Jobs (every one runs one step of scripts/ci/seaworthy.sh, which the
+# prepare job hands on with the seaworthy binary itself, so one seaworthy
+# revision serves the whole pipeline):
+#
+#   seaworthy-prepare      .pre      seaworthy built from the seaworthy
+#                                    checkout; seaworthy.toml checked; the
+#                                    build plans; the release-ordering lint
+#                                    (seaworthy ci-order)
+#   seaworthy-build-linux  build     the Linux build plan, in a builder whose
+#                                    glibc is at or below the products' floor
+#   seaworthy-package      build     seaworthy package: every pipeline, signed
+#                                    (signing.toml) on a release; on a dev
+#                                    build (dev-sign-if), its Windows
+#                                    binaries Authenticode-signed alone;
+#                                    every platform but macOS (the Mac's
+#                                    seaworthy-macos packages those)
+#   seaworthy-repo         deploy    seaworthy repo, after the plan published
+#                                    at public-url: release only; with
+#                                    seaworthy-windows.yml's MSI jobs, from
+#                                    their adopted copy of the packages
+#   seaworthy-publish      deploy    seaworthy publish: release only, one at
+#                                    a time (resource_group seaworthy-publish)
+#
+# The product's server deploy jobs must need seaworthy-publish (and the web
+# console's deploy) and run on the same release rule: the prepare job's lint
+# refuses anything else; make the pipeline a required merge check, so a
+# configuration it refuses never reaches a release. A release runs on a
+# protected ref only. The seaworthy call of package, repo and publish runs
+# under a command prefix on a release only (the *-secrets inputs: a wrapper
+# that fetches the step's credentials from your secret store and runs the
+# command with them), never the tool installs; add any `id_tokens` the
+# wrapper needs to those jobs in the product's CI (keys merge).
+#
+# A dev build: outside a release, a pipeline dev-sign-if matches (protected
+# refs alone, such as protected branches other than the default) signs its
+# Windows binaries, and seaworthy-windows.yml's MSIs, with signing.toml's
+# [authenticode] and nothing else: no manifest, so the update helper never
+# installs it, and no OpenPGP signature, so seaworthy repo refuses it. Its
+# package call runs under dev-sign-secrets, which should give the
+# Authenticode signer's credentials alone. The default matches nothing.
+#
+# A CI test build: outside a release, with ci-signing-toml set, every
+# pipeline (protected ref or not) signs its manifests and its rpm and pacman
+# packages with the CI test keys that file names (`seaworthy package
+# --ci-test-signing`; seaworthy.toml's [defaults.ci-test-keys]): keys kept in
+# the product's repository, public, which only the product's non-release
+# builds trust, so an installed dev build's helper updates to a later one
+# and a release's never does. seaworthy repo refuses it. On a dev-sign-if
+# ref its Windows binaries are Authenticode-signed too. A release never uses
+# it.
+#
+# A release with SEAWORTHY_PUBLISH_DRY_RUN=1 (a pipeline variable) runs
+# every job, and publish checks the files, the store and the public URL but
+# uploads and deletes nothing; the product's deploy jobs still run on the
+# release rule, so a dry run on a pipeline that deploys skips them itself.
+# seaworthy-prepare runs in .pre: an override giving it `needs` on a product
+# job must move it to that job's stage or later, or GitLab refuses the whole
+# pipeline (docs/ci-gitlab.md, "Overriding a template job's needs"). FIPS
+# products need a build image with the module's toolchain (clang, cmake, Go)
+# and glibc at or below their floor: set build-image.
+#
+# No image, runner tag or secret source has an organization default: the
+# images without a default below are required inputs.
+spec:
+  inputs:
+    seaworthy-toml:
+      description: The product's seaworthy.toml.
+      default: seaworthy.toml
+    signing-toml:
+      description: The signing configuration (signing.toml), naming signers by command; never secrets.
+      default: signing.toml
+    ci-signing-toml:
+      description: Outside a release, the CI test keys' signing configuration (`seaworthy package --ci-test-signing`), naming the public test keys kept in the product's repository, which only its non-release builds trust. Empty (the default), non-release builds stay unsigned.
+      default: ""
+    publish-toml:
+      description: The repositories' target (publish.toml); its public-url is seaworthy.toml's [defaults.repository] url when the repository package is built.
+      default: publish.toml
+    seaworthy-dir:
+      description: A seaworthy checkout at this template's ref, relative to the project directory.
+      default: .seaworthy
+    seaworthy-fetch:
+      description: A command putting the seaworthy checkout at seaworthy-dir when it isn't there (empty, it must be).
+      default: ""
+    manifest:
+      description: The Cargo workspace manifest the products build from.
+      default: Cargo.toml
+    cargo-args:
+      description: More cargo arguments for every build, such as --features fips.
+      default: ""
+    version-file:
+      description: A Cargo.toml whose literal [package] version names a release without a tag (one from a branch) and every pipeline outside a release; a release tag must name the same version. Empty, the tag alone names a release.
+      default: ""
+    build-metadata:
+      description: A command (bash, in the checkout) printing the release's build metadata, the build part of the product's version token ([A-Za-z0-9.-], at most 64 characters), for a product that composes its own token. Empty, the commit's short SHA.
+      default: ""
+    release-if:
+      description: The rules expression for a release (signed packages, repo, publish); the server deploy needs the same.
+      default: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)(\.(0|[1-9][0-9]*))?)?$/
+    dev-sign-if:
+      description: The rules expression for a dev build outside a release, naming protected refs alone, such as $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH; package signs its Windows binaries with signing-toml's [authenticode] alone (no manifests, no repository signatures, never published). The default matches nothing.
+      default: $CI_PIPELINE_ID == "0"
+    tools-image:
+      description: Required. The image of prepare, package, repo and publish, for any x86-64 runner. It needs Rust, bash, curl and git, plus the packaging tools (dpkg, rpm's rpmsign and rpmkeys, createrepo_c, pacman's repo-add, gnupg, libarchive's bsdtar; msitools for the MSI adoption, desktop-file-utils for desktop products); on Arch Linux the steps install what's missing with pacman. Nothing it builds ships (the products compile in build-image).
+    build-image:
+      description: The Linux build's image, whose glibc is at or below the products' floor (2.34 by default); a FIPS product's needs the module's toolchain too. The default is the official Rust image on Debian 12 (glibc 2.36), digest-pinned.
+      default: rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
+    build-stage:
+      default: build
+    package-stage:
+      default: build
+    publish-stage:
+      default: deploy
+    server-deploy-jobs:
+      description: The product's server deploy jobs, comma-separated (the release-ordering lint; empty, none).
+      default: ""
+    client-deploy-jobs:
+      description: Other client jobs every server deploy must wait for, comma-separated (the web console's deploy).
+      default: ""
+    package-secrets:
+      description: On a release, a command prefix (space-separated words, no quoting) the package job's seaworthy call runs under, giving its signers' credentials.
+      default: ""
+    dev-sign-secrets:
+      description: On a dev build, a command prefix the package job's seaworthy call runs under, giving the Authenticode signer's credentials alone.
+      default: ""
+    repo-secrets:
+      description: On a release, a command prefix the repo job's seaworthy call runs under, giving the index signer's credentials.
+      default: ""
+    publish-secrets:
+      description: On a release, a command prefix the publish job's seaworthy call runs under, giving SEAWORTHY_S3_ACCESS_KEY_ID and SEAWORTHY_S3_SECRET_ACCESS_KEY.
+      default: ""
+---
+.seaworthy:
+  image: $[[ inputs.tools-image ]]
+  variables:
+    # This file's marker: the seaworthy checkout's template must carry the
+    # same (tests/ci_template.rs keeps it current).
+    SEAWORTHY_TEMPLATE: "8a963ddf50c3cdc8"
+    SEAWORTHY_WORK: seaworthy
+    SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
+    SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
+    SEAWORTHY_CI_SIGNING: $[[ inputs.ci-signing-toml ]]
+    SEAWORTHY_PUBLISH: $[[ inputs.publish-toml ]]
+    SEAWORTHY_MANIFEST: $[[ inputs.manifest ]]
+    SEAWORTHY_VERSION_FILE: $[[ inputs.version-file ]]
+    SEAWORTHY_BUILD_COMMAND:
+      value: >-
+        $[[ inputs.build-metadata ]]
+      expand: false
+
+seaworthy-prepare:
+  extends: .seaworthy
+  stage: .pre
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+    - when: on_success
+  variables:
+    SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
+    SEAWORTHY_TOOL_TARGET: seaworthy/tool-target
+    SEAWORTHY_FETCH:
+      value: >-
+        $[[ inputs.seaworthy-fetch ]]
+      expand: false
+    SEAWORTHY_SERVER_JOBS: $[[ inputs.server-deploy-jobs ]]
+    SEAWORTHY_CLIENT_JOBS: $[[ inputs.client-deploy-jobs ]]
+  script:
+    - |
+      if [ ! -f "$SEAWORTHY_CHECKOUT/Cargo.toml" ] && [ -n "$SEAWORTHY_FETCH" ]; then
+        eval "$SEAWORTHY_FETCH"
+      fi
+    - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" prepare
+  # Outside the checkout: restored before the fetch, it must not make
+  # seaworthy-dir exist. Keyed by the ref's protection: a merge request's
+  # pipeline can't leave a compiled tool for a release to sign, whether or
+  # not the project keeps GitLab's separate caches for protected branches
+  # on.
+  cache:
+    key: seaworthy-tool-$CI_COMMIT_REF_PROTECTED
+    paths:
+      - seaworthy/tool-target/
+  artifacts:
+    paths:
+      - seaworthy/bin/
+      - seaworthy/scripts/
+      - seaworthy/plan-*.tsv
+      # The release's version and build metadata, for the build jobs (a
+      # product's version token) and the package job (which checks it).
+      - seaworthy/release.env
+    expire_in: 1 week
+
+seaworthy-build-linux:
+  extends: .seaworthy
+  stage: $[[ inputs.build-stage ]]
+  image: $[[ inputs.build-image ]]
+  needs:
+    - seaworthy-prepare
+  variables:
+    SEAWORTHY_CARGO_ARGS:
+      value: >-
+        $[[ inputs.cargo-args ]]
+      expand: false
+  script:
+    - bash seaworthy/scripts/seaworthy.sh build x86_64-unknown-linux-gnu
+  artifacts:
+    paths:
+      - seaworthy/artifacts/x86_64-unknown-linux-gnu/
+    expire_in: 1 week
+
+seaworthy-package:
+  extends: .seaworthy
+  stage: $[[ inputs.package-stage ]]
+  variables:
+    SEAWORTHY_SECRETS:
+      value: >-
+        $[[ inputs.package-secrets ]]
+      expand: false
+    SEAWORTHY_DEV_SECRETS:
+      value: >-
+        $[[ inputs.dev-sign-secrets ]]
+      expand: false
+  needs:
+    - seaworthy-prepare
+    - seaworthy-build-linux
+    - job: seaworthy-build-windows
+      optional: true
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+    - if: >-
+        $[[ inputs.dev-sign-if ]]
+      variables:
+        SEAWORTHY_DEV_SIGN: "1"
+    - when: on_success
+  script:
+    # The script runs seaworthy under SEAWORTHY_SECRETS on a release, and
+    # SEAWORTHY_DEV_SECRETS on a dev build.
+    - bash seaworthy/scripts/seaworthy.sh package
+  artifacts:
+    paths:
+      - seaworthy/dist/
+    expire_in: 4 weeks
+
+seaworthy-repo:
+  extends: .seaworthy
+  stage: $[[ inputs.publish-stage ]]
+  variables:
+    SEAWORTHY_SECRETS:
+      value: >-
+        $[[ inputs.repo-secrets ]]
+      expand: false
+  needs:
+    - seaworthy-prepare
+    - seaworthy-package
+    # seaworthy-windows.yml's: the packages with every MSI adopted
+    # (seaworthy/adopted/, which the script prefers).
+    - job: seaworthy-msi-adopt
+      optional: true
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+  script:
+    # The script runs seaworthy under SEAWORTHY_SECRETS, on a release only.
+    - bash seaworthy/scripts/seaworthy.sh repo
+  artifacts:
+    paths:
+      - seaworthy/repo/
+    expire_in: 4 weeks
+
+seaworthy-publish:
+  extends: .seaworthy
+  stage: $[[ inputs.publish-stage ]]
+  variables:
+    SEAWORTHY_SECRETS:
+      value: >-
+        $[[ inputs.publish-secrets ]]
+      expand: false
+  needs:
+    - seaworthy-prepare
+    - seaworthy-repo
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+  resource_group: seaworthy-publish
+  script:
+    # The script runs seaworthy under SEAWORTHY_SECRETS, on a release only.
+    - bash seaworthy/scripts/seaworthy.sh publish
