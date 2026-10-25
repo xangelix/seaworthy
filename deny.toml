@@ -1,0 +1,119 @@
+# cargo-deny policy for the workspace (`cargo deny check`; CI runs it on
+# every change and weekly against the moving advisory database).
+#
+# Schema: cargo-deny 0.20 (https://embarkstudios.github.io/cargo-deny/).
+# Every exception below names its reason; adding one is a reviewed change.
+
+[graph]
+# Every target seaworthy ships for or supports as a host. A dependency that
+# only one of these platforms pulls (a Windows-only crate, a macOS-only
+# crate) is checked too; targets outside this list (wasm, UEFI, Android)
+# are not part of the product and stay out of the license and ban checks.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+# Every feature of every workspace member, `fips` included: the FIPS
+# module's build-time dependencies (bindgen, clang-sys) are in the graph.
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories (RustSec)
+# ---------------------------------------------------------------------------
+[advisories]
+# Vulnerability and notice advisories always fail in cargo-deny 0.16+; the
+# remaining kinds are set to fail as well.
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+# An ignore that no longer matches anything fails, so exceptions cannot
+# outlive their reason. Each entry needs `reason` (and preferably `expiry`).
+unused-ignored-advisory = "deny"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.93
+# Permissive licenses only, and only those the dependency graph actually
+# needs (checked against the resolved graph of aws-lc-rs, rustls, reqwest,
+# tokio, serde, toml, object, zstd, windows-sys/windows-service, libc and
+# their dependencies). Licenses that appear only as an alternative in an
+# `OR` expression (Unlicense, MIT-0, 0BSD, CC0-1.0, Apache-2.0 WITH
+# LLVM-exception, LGPL) are not listed: the other alternative satisfies
+# the expression. Adding a license here is a reviewed change.
+allow = [
+    "Apache-2.0",
+    # subtle, zstd / zstd-safe / zstd-sys (bundled libzstd), bindgen.
+    "BSD-3-Clause",
+    # rustls-webpki, untrusted, libloading; part of AWS-LC's license.
+    "ISC",
+    "MIT",
+    # The ICU4X crates under url/idna, and unicode-ident.
+    "Unicode-3.0",
+    # foldhash (hashbrown's default hasher).
+    "Zlib",
+]
+exceptions = [
+    # The AWS-LC FIPS module carries OpenSSL's original BSD-style license
+    # for code AWS-LC inherited from OpenSSL (via BoringSSL). It is a
+    # permissive license with an advertising clause, accepted for this crate
+    # only.
+    { crate = "aws-lc-fips-sys", allow = ["OpenSSL"] },
+]
+
+[licenses.private]
+# Workspace crates are published under MIT OR Apache-2.0 and are checked
+# like every other crate.
+ignore = false
+registries = []
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates always carry a version
+# (`[workspace.dependencies]`); unpublished crates may omit it.
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+# One cryptography stack: AWS-LC through seaworthy-crypto (aws-lc-rs, and
+# aws-lc-fips-sys under `fips`). A second stack would bypass the FIPS
+# module, the TLS policy and the review that covers the first. rustls is
+# used with its aws-lc-rs provider only; reqwest with `rustls-no-provider`.
+deny = [
+    { crate = "ring", reason = "second cryptography stack: use seaworthy-crypto (AWS-LC)" },
+    { crate = "openssl", reason = "second cryptography/TLS stack: use seaworthy-crypto (AWS-LC)" },
+    { crate = "openssl-sys", reason = "links system or vendored OpenSSL: use seaworthy-crypto (AWS-LC)" },
+    { crate = "openssl-src", reason = "vendored OpenSSL build: use seaworthy-crypto (AWS-LC)" },
+    { crate = "native-tls", reason = "platform TLS stack outside the TLS policy: use seaworthy-crypto's rustls config" },
+    { crate = "boring", reason = "second cryptography/TLS stack: use seaworthy-crypto (AWS-LC)" },
+    { crate = "boring-sys", reason = "second cryptography stack (BoringSSL): use seaworthy-crypto (AWS-LC)" },
+]
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+# crates.io only: no other registry, no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
