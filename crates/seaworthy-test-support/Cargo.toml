@@ -1,0 +1,47 @@
+[package]
+name = "seaworthy-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Docker-backed integration-test harness for seaworthy's own suites (testcontainers): digest-pinned public images, an S3-compatible store, systemd hosts per Linux distribution, skip-graceful without a docker daemon. Unpublished; dev-dependency use only."
+publish = false
+
+# Unix only: the harness talks to the daemon over its unix socket (or
+# tcp://), and the systemd hosts are Linux containers. On Windows the crate
+# compiles to nothing, so `cargo clippy --workspace --all-targets` and
+# `cargo test --workspace` stay green on every CI platform; suites that use
+# it gate themselves with `#![cfg(unix)]`.
+[target.'cfg(unix)'.dependencies]
+# default-features off: the `ring` feature is BANNED (deny.toml: one
+# cryptography stack); `aws-lc-rs` is bollard's TLS backend, matching the
+# workspace provider. `http_wait_plain` is the readiness-probe strategy
+# (plain HTTP to the container's published port; no TLS client).
+testcontainers = { workspace = true, features = ["aws-lc-rs", "http_wait_plain"] }
+# Direct for the classified daemon probe behind `docker_or_skip`
+# (testcontainers' client creation is lazy: a missing daemon would
+# otherwise surface as an obscure first-start failure), the bridge-gateway
+# inspect, the leak sweep's list/remove calls, the image presence check,
+# and the systemd hosts' commit. Its unix-socket transport comes from
+# testcontainers' own (default-featured) bollard dependency.
+bollard.workspace = true
+# The canonical rustls provider (`seaworthy_crypto::install_default_tls_provider`)
+# — this harness never constructs a provider itself — plus the CSPRNG behind
+# the pull retries' jitter and the digest that tags provisioned systemd images.
+seaworthy-crypto.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "time"] }
+# Bracket-aware `DOCKER_HOST` parsing (`tcp://[::1]:2375`); the same parser
+# testcontainers itself resolves the host with.
+url.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# The pre-pull step's entry point (scripts/pull-test-images.sh).
+[[example]]
+name = "pull_test_images"
+
+[lints]
+workspace = true
