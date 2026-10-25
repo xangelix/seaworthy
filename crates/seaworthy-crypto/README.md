@@ -14,6 +14,7 @@ distribution stack needs, and nothing else:
 | `ecdsa` | ECDSA P-256/SHA-256 (DER signatures, SPKI public keys) |
 | `ed25519` | Ed25519, with small-order and non-canonical key rejection |
 | `rand` | `fill` from the AWS-LC DRBG |
+| `hmac` | HMAC-SHA-256 with the 112-bit key floor (`hmac_sha256`, `ensure_key_strength`): the S3 publisher's SigV4 MAC |
 | `tls` | the TLS policy (hybrid post-quantum key exchange first) and `client_config_builder()` |
 | `fips_policy` | the algorithm-admission gate (`ensure_approved`) and the deployment's policy |
 | `module` | the linked module's identity, the boot self-check, the build provenance |
@@ -119,6 +120,10 @@ scheme.
   signature bytes as a uniqueness key. Anchor on the message digest.
 - **`is_fips()` attests module linkage and TLS filtering**, not that only approved services
   ran (the X25519 half of the hybrid key exchange is not approved by the module's indicator).
+- **HMAC keys below 112 bits are not approved** (SP 800-131A; the AWS-LC Security Policies'
+  112–524288-bit HMAC key length). `hmac::hmac_sha256` refuses them under `fips` and under
+  `AlgorithmPolicy::CERTIFIED_ONLY` (`fips_policy::Service::HmacShortKey`); intake points call
+  `hmac::ensure_key_strength` when a secret is configured.
 - **SHA-1** exists only as `digest::sha1_for_identifiers`, for identifiers such as the
   Windows virtual-account SID; the workspace `clippy.toml` disallows it outside reasoned call
   sites.

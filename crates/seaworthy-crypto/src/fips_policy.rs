@@ -7,9 +7,11 @@
 //! algorithm choice (a release-key install, a manifest signature check)
 //! calls [`ensure_approved`]; under `fips` a non-approved service is refused
 //! there with [`CryptoError::NotApproved`] naming it, never silently served.
-//! Every service this crate offers today is approved by the linked module,
-//! so the feature half refuses nothing yet; the gate exists so that a future
-//! non-approved algorithm is refused where it enters.
+//! Every signature service this crate offers today is approved by the
+//! linked module; the one refusal is HMAC under a key below 112 bits
+//! ([`Service::HmacShortKey`], consulted by [`crate::hmac`]). The gate
+//! exists so that a future non-approved algorithm is refused where it
+//! enters.
 //!
 //! **The deployment's policy:** the same gate then consults the process's
 //! installed [`AlgorithmPolicy`], with two explicit axes:
@@ -76,6 +78,10 @@ pub enum Service {
     /// ML-DSA-87 (FIPS 204): approved by the linked 4.2.0 module's
     /// indicator; not on a validated certificate yet (see the module docs).
     MlDsa87,
+    /// HMAC under a key below 112 bits: neither approved nor listed (the
+    /// AWS-LC Security Policies' HMAC key length is 112–524288 bits).
+    /// [`crate::hmac`] consults it only for a short key.
+    HmacShortKey,
 }
 
 /// A CMVP module record the tables cite ("approved by the linked module's
@@ -128,6 +134,7 @@ impl Service {
             Self::Ed25519 => "Ed25519 (EdDSA)",
             Self::EcdsaP256 => "ECDSA P-256/SHA-256",
             Self::MlDsa87 => "ML-DSA-87",
+            Self::HmacShortKey => "HMAC with a key below 112 bits",
         }
     }
 
@@ -139,6 +146,7 @@ impl Service {
     pub const fn approved(self) -> bool {
         match self {
             Self::Ed25519 | Self::EcdsaP256 | Self::MlDsa87 => true,
+            Self::HmacShortKey => false,
         }
     }
 
@@ -149,6 +157,7 @@ impl Service {
         match self {
             Self::Ed25519 | Self::EcdsaP256 => &[Module::AwsLc3, Module::AwsLcFips4],
             Self::MlDsa87 => &[Module::AwsLcFips4],
+            Self::HmacShortKey => &[],
         }
     }
 
@@ -181,6 +190,7 @@ impl Service {
             Self::MlDsa87 => 1,
             Self::Ed25519 => 1 << 1,
             Self::EcdsaP256 => 1 << 2,
+            Self::HmacShortKey => 0,
         }
     }
 }
@@ -403,7 +413,33 @@ pub fn ensure_approved_for(service: Service, approved_only: bool) -> Result<(), 
 mod tests {
     use super::*;
 
+    /// Every signature service (HMAC's short-key refusal has its own test).
     const ALL_SERVICES: [Service; 3] = [Service::Ed25519, Service::EcdsaP256, Service::MlDsa87];
+
+    /// HMAC under a key below 112 bits is neither approved nor listed
+    /// (#5314 Table 5: HMAC key length 112–524288), so `fips` refuses it
+    /// and so does the certified-only posture; it is not a signature
+    /// service, so a signature set never admits or refuses it.
+    #[test]
+    fn a_short_hmac_key_is_neither_approved_nor_certified() {
+        let short = Service::HmacShortKey;
+        assert!(!short.approved());
+        assert!(!short.certified());
+        assert!(!short.is_signature());
+        assert!(!SignatureSet::ALL.contains(short));
+        assert!(short.name().contains("112"));
+        assert!(matches!(
+            ensure_approved_for(short, true),
+            Err(CryptoError::NotApproved(_))
+        ));
+        assert!(ensure_approved_for(short, false).is_ok());
+        assert!(AlgorithmPolicy::DEFAULT.admits(short).is_ok());
+        assert!(AlgorithmPolicy::ML_DSA_87_ONLY.admits(short).is_ok());
+        assert!(matches!(
+            AlgorithmPolicy::CERTIFIED_ONLY.admits(short),
+            Err(CryptoError::NotAllowed { .. })
+        ));
+    }
 
     /// The research conclusion, pinned: every signature service the facade
     /// offers is approved by the linked module's indicator (Ed25519

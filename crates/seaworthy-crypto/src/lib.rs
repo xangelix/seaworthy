@@ -1,9 +1,9 @@
 //! `seaworthy-crypto`: the seaworthy crate family's **minimal cryptography
 //! facade**. Every cryptographic operation the distribution stack performs
-//! goes through here: digests ([`digest`]), secure randomness ([`rand`]),
-//! signatures ([`ed25519`], [`ecdsa`] P-256, [`mldsa`] ML-DSA-87),
-//! constant-time compare ([`ct_eq`]) and the TLS client configuration
-//! ([`tls`]).
+//! goes through here: digests ([`digest`]), HMAC-SHA-256 ([`hmac`]),
+//! secure randomness ([`rand`]), signatures ([`ed25519`], [`ecdsa`] P-256,
+//! [`mldsa`] ML-DSA-87), constant-time compare ([`ct_eq`]) and the TLS
+//! client configuration ([`tls`]).
 //!
 //! **The module.** Under the `fips` feature every operation runs in the
 //! AWS-LC FIPS 4.2.0 module (CMVP: in process, Comment Resolution; its
@@ -58,6 +58,7 @@ pub mod digest;
 pub mod ecdsa;
 pub mod ed25519;
 pub mod fips_policy;
+pub mod hmac;
 pub mod mldsa;
 pub mod module;
 pub mod rand;

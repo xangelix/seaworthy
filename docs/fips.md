@@ -34,6 +34,14 @@ by the module's service indicator.
 A deployment that must use only what a validated certificate lists today installs
 `fips_policy::AlgorithmPolicy::CERTIFIED_ONLY` at boot; intake points then refuse ML-DSA-87.
 
+### HMAC
+
+HMAC-SHA-256 (the S3 publisher's AWS Signature Version 4) is approved with keys of at least 112
+bits (SP 800-131A; the AWS-LC Security Policies' HMAC key length is 112–524288 bits). A shorter
+key is `fips_policy::Service::HmacShortKey`: `seaworthy_crypto::hmac` refuses it under `fips`
+and under `AlgorithmPolicy::CERTIFIED_ONLY`, and the publisher refuses such a secret when its
+S3 client is constructed, before any request.
+
 ## What a FIPS build needs
 
 The module is compiled from C sources during the build, so a FIPS build needs, besides Rust:
