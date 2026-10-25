@@ -1,7 +1,7 @@
 //! The FIPS release-binary probe.
 //!
 //! Build this example in release with the `fips` feature and its symbols
-//! kept, run `scripts/check-fips-binary.sh` over it (the
+//! kept, run `scripts/verify-fips-binary.sh` over it (the
 //! `aws_lc_fips_0_14_2_*` symbols present, zero non-FIPS `aws_lc_0_*` /
 //! `ring_core_*`), then run it with `--expect-fips`: the boot self-check (a
 //! module-DRBG draw + the pinned-module assertion), then `is_fips()`, then
@@ -11,7 +11,7 @@
 //! ```text
 //! CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p seaworthy-crypto \
 //!     --features fips --example fips_selfcheck
-//! scripts/check-fips-binary.sh target/release/examples/fips_selfcheck
+//! scripts/verify-fips-binary.sh target/release/examples/fips_selfcheck
 //! target/release/examples/fips_selfcheck --expect-fips
 //! ```
 

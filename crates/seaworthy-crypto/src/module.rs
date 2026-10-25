@@ -9,7 +9,7 @@
 //! what is actually linked, at runtime; [`ensure_expected_module`] refuses
 //! anything but the pinned build; the `fips`-only
 //! `the_linked_module_is_the_pinned_aws_lc_fips_4_2_0` test and
-//! `scripts/check-fips-binary.sh` (an `nm` check of a release binary: the
+//! `scripts/verify-fips-binary.sh` (an `nm` check of a release binary: the
 //! `aws_lc_fips_0_14_2_*` symbols present, zero non-FIPS `aws_lc_0_*` /
 //! `ring_core_*`) are the gates.
 //!
@@ -51,7 +51,7 @@ pub const EXPECTED_FIPS_SYS_VERSION: &str = "0.14.2";
 /// manifest).
 pub const EXPECTED_AWS_LC_RS_VERSION: &str = "1.18.1";
 /// The symbol prefix the pinned sys crate gives every module symbol: what
-/// `scripts/check-fips-binary.sh` requires in a release binary.
+/// `scripts/verify-fips-binary.sh` requires in a release binary.
 pub const FIPS_SYMBOL_PREFIX: &str = "aws_lc_fips_0_14_2_";
 /// The module's CMVP status, the one wording docs and evidence use (the
 /// design assumes 4.2.0 will be validated; say "validated" only once the

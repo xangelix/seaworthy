@@ -24,7 +24,7 @@
 # `aws-lc-sys` is STILL compiled — rustls's `aws_lc_rs` feature (which
 # `rustls/fips` implies) enables `aws-lc-rs/aws-lc-sys` unconditionally —
 # but never linked (aws-lc-rs selects `aws-lc-fips-sys` under `fips`); rule 3
-# keeps it that way, and scripts/check-fips-binary.sh proves it on the
+# keeps it that way, and scripts/verify-fips-binary.sh proves it on the
 # release binary. See docs/fips.md.
 #
 # Needs cargo and python3. Runs from the repository root (or anywhere: it

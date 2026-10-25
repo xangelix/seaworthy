@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/check-fips-binary.sh — prove a FIPS release binary links ONLY the
+# scripts/verify-fips-binary.sh — prove a FIPS release binary links ONLY the
 # pinned AWS-LC FIPS module.
 #
 # The Security Policy's static-link check (AWS-LC 3 Security Policy, #5314
@@ -26,9 +26,9 @@
 # out of this script's scope.
 #
 # Usage (from the repository root, or anywhere):
-#   scripts/check-fips-binary.sh [--prefix aws_lc_fips_0_14_2_] BINARY
-#   scripts/check-fips-binary.sh [--prefix …] --nm-output FILE   # pre-captured `nm` output
-#   scripts/check-fips-binary.sh --self-test                     # the script's own tests
+#   scripts/verify-fips-binary.sh [--prefix aws_lc_fips_0_14_2_] BINARY
+#   scripts/verify-fips-binary.sh [--prefix …] --nm-output FILE   # pre-captured `nm` output
+#   scripts/verify-fips-binary.sh --self-test                     # the script's own tests
 set -euo pipefail
 
 DEFAULT_PREFIX="aws_lc_fips_0_14_2_"
@@ -142,12 +142,12 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -n "$nm_output" ]; then
-    echo "check-fips-binary: ${nm_output} (pre-captured nm output), expecting ${prefix}*"
+    echo "verify-fips-binary: ${nm_output} (pre-captured nm output), expecting ${prefix}*"
     check_symbols "$prefix" < "$nm_output"
     exit $?
 fi
 [ -n "$binary" ] || usage
-[ -f "$binary" ] || { echo "check-fips-binary: no such file: $binary" >&2; exit 2; }
-command -v "$NM" >/dev/null 2>&1 || { echo "check-fips-binary: $NM not found (binutils or llvm-nm; set NM)" >&2; exit 2; }
-echo "check-fips-binary: ${binary}, expecting ${prefix}*"
+[ -f "$binary" ] || { echo "verify-fips-binary: no such file: $binary" >&2; exit 2; }
+command -v "$NM" >/dev/null 2>&1 || { echo "verify-fips-binary: $NM not found (binutils or llvm-nm; set NM)" >&2; exit 2; }
+echo "verify-fips-binary: ${binary}, expecting ${prefix}*"
 "$NM" "$binary" 2>/dev/null | check_symbols "$prefix"

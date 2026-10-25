@@ -101,11 +101,11 @@ From the repository root:
 ```sh
 CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p seaworthy-crypto \
     --features fips --example fips_selfcheck
-scripts/check-fips-binary.sh target/release/examples/fips_selfcheck
+scripts/verify-fips-binary.sh target/release/examples/fips_selfcheck
 target/release/examples/fips_selfcheck --expect-fips
 ```
 
-- `scripts/check-fips-binary.sh BINARY` is a standalone `nm` check (bash, nm, grep, awk), so you
+- `scripts/verify-fips-binary.sh BINARY` is a standalone `nm` check (bash, nm, grep, awk), so you
   can run it over your own release binary. It needs the symbol table: build unstripped, check,
   then strip the shipped copy. It requires the `aws_lc_fips_0_14_2_*` symbols with
   `awslc_version_string` defined in text (the Security Policy's static-link check), and zero
