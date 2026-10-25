@@ -40,6 +40,12 @@ cargo test --manifest-path fuzz/Cargo.toml   # replay the fuzz corpus
 for check in scripts/check-*.sh; do "$check"; done
 ```
 
+The container suites (`seaworthy-test-support`: an S3-compatible store, systemd hosts) skip,
+announced on stderr, when no docker daemon exists; a daemon that exists but cannot be used
+fails them. `SEAWORTHY_TEST_CONTAINERS_REQUIRED=1` turns a missing daemon into a failure (CI),
+`=0` skips them explicitly, and `scripts/pull-test-images.sh` pulls their digest-pinned images
+ahead of a run.
+
 `--all-features` includes `fips`, which builds the AWS-LC FIPS module from source and needs
 Clang, CMake, Go and Perl. CI runs clippy and the tests with every other feature on Linux,
 Windows and macOS, and with all features (FIPS included) on Linux. It also checks the MSRV,

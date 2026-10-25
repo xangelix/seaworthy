@@ -34,6 +34,9 @@ configuration file, with every piece optional.
 | `seaworthy-updater` | Update requests, policy, the update helper and installers |
 | `seaworthy` | The command-line tool: plan, build, package, sign, verify, publish |
 
+`seaworthy-test-support` (unpublished) is the docker harness of seaworthy's own integration
+tests.
+
 Use only the crates (and features) you need: a local-only desktop tool can take the launcher and
 packaging alone; a product with a server can add services and updates.
 
