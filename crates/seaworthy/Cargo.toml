@@ -6,14 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "The seaworthy command-line tool: build plans, verification, packaging, signing, SBOMs and publishing of per-CPU releases (under construction)"
-keywords = ["release", "packaging", "signing", "distribution", "s3"]
+description = "The seaworthy packaging tool: verifies built launchers and per-CPU cores against a seaworthy.toml, lays out install trees, builds reproducible deb, rpm and pacman packages, tarballs, zips, MSIs, macOS bundles and Group Policy templates, signs release manifests and publishes signed repositories. It never compiles product code."
+readme = "README.md"
+keywords = ["packaging", "msi", "deb", "rpm", "release"]
 categories = ["command-line-utilities", "development-tools::build-utils"]
 
-# A library target only, for now: the command-line front end lands with the
-# rest of the tool.
 [lib]
 name = "seaworthy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seaworthy"
+path = "src/main.rs"
 
 [features]
 default = []
@@ -24,40 +28,78 @@ publish-s3 = [
     "dep:base64",
     "dep:bytes",
     "dep:futures-util",
-    "dep:hex",
     "dep:quick-xml",
     "dep:reqwest",
     "dep:rustls-platform-verifier",
-    "dep:seaworthy-crypto",
-    "dep:thiserror",
     "dep:tokio",
-    "dep:zeroize",
 ]
 
+# A build-host tool: native only.
 [dependencies]
-# The `x-amz-checksum-sha256` wire encoding.
+# The records each core and launcher carries, and the feature table.
+seaworthy-levels.workspace = true
+# The pure service renderers: a seaworthy.toml service is validated (and
+# later rendered) by the same rules an install uses.
+seaworthy-service.workspace = true
+# SHA-256 for sidecar identity and the layout manifest; the pinned FIPS
+# module's symbol prefix; the release keys' signing operations; and, for
+# the S3 client, HMAC-SHA-256 and SHA-256 for SigV4, the checksums,
+# constant-time compares and the TLS client builder.
+seaworthy-crypto.workspace = true
+# The release manifest's own encoder and key intake (seaworthy-formats,
+# re-exported), the bounded process runner and the OpenPGP checks: the
+# release side and the update helper can never disagree on the format.
+seaworthy-updater.workspace = true
+# Key files and command signers' output are hex.
+hex.workspace = true
+# Secret key material is wiped on drop.
+zeroize.workspace = true
+# ELF symbol tables and DT_NEEDED, PE imports. Read-side features only.
+object = { workspace = true, features = ["read_core", "elf", "pe", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# seaworthy.toml.
+toml.workspace = true
+# The repository URLs machines fetch through, checked as a URL parser reads
+# them (config.rs).
+url.workspace = true
+# The reproducible archives (src/archive.rs): zstd for the Linux tarball,
+# raw deflate for the Windows zip.
+zstd.workspace = true
+miniz_oxide.workspace = true
+
+# The release-ordering lint (src/ci_order.rs) reads a product's GitLab CI:
+# a pure-Rust YAML 1.2 parser (the maintained fork of yaml-rust), without
+# the optional encoding_rs (CI files are UTF-8).
+yaml-rust2.workspace = true
+
+# publish-s3: the `x-amz-checksum-sha256` wire encoding.
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-# `StreamExt` over response bodies and the boxed object stream.
+# publish-s3: `StreamExt` over response bodies and the boxed object stream.
 futures-util = { workspace = true, optional = true, features = ["std"] }
-hex = { workspace = true, optional = true }
-# The one XML parser: S3 keys and ETags carry XML entities, and entity
-# handling is exactly the part a hand parser gets wrong.
+# publish-s3: the one XML parser: S3 keys and ETags carry XML entities, and
+# entity handling is exactly the part a hand parser gets wrong.
 quick-xml = { workspace = true, optional = true }
-# rustls with NO provider of its own: every client is built with
+# publish-s3: rustls with NO provider of its own: every client is built with
 # `use_preconfigured_tls` on `seaworthy_crypto::tls::client_config_builder()`
 # (scripts/check-tls-construction.sh). `stream` for response bodies.
 reqwest = { workspace = true, optional = true, features = ["rustls-no-provider", "stream"] }
-# The operating system's trust store, attached to the crypto crate's client
-# builder (an allowlisted site in scripts/tls-construction-allowlist.txt).
+# publish-s3: the operating system's trust store, attached to the crypto
+# crate's client builder (an allowlisted site in
+# scripts/tls-construction-allowlist.txt).
 rustls-platform-verifier = { workspace = true, optional = true }
-# HMAC-SHA-256 and SHA-256 for SigV4, the checksums, constant-time
-# compares, and the TLS client builder.
-seaworthy-crypto = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
-# The deadlines (`time`) every request runs under.
+# publish-s3: the deadlines (`time`) every request runs under.
 tokio = { workspace = true, optional = true, features = ["time"] }
-zeroize = { workspace = true, optional = true }
+
+# Signing programs run in their own process group; on a deadline the whole
+# group is killed (src/process.rs).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+# An imported OpenPGP key's private home is removed on SIGTERM, SIGINT and
+# SIGHUP too (src/codesign.rs, ImportedGpg).
+signal-hook.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
@@ -65,6 +107,7 @@ bytes.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 hex.workspace = true
 seaworthy-crypto.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 zeroize.workspace = true
 
