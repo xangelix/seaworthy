@@ -36,12 +36,22 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo deny check
+cargo test --manifest-path fuzz/Cargo.toml   # replay the fuzz corpus
+for check in scripts/check-*.sh; do "$check"; done
 ```
 
-CI runs the same checks on Linux, Windows and macOS, plus the MSRV build, the packaging
-conformance lanes and the fuzz smoke run.
+`--all-features` includes `fips`, which builds the AWS-LC FIPS module from source and needs
+Clang, CMake, Go and Perl. CI runs clippy and the tests with every other feature on Linux,
+Windows and macOS, and with all features (FIPS included) on Linux. It also checks the MSRV,
+cargo-deny, the fuzz corpus replay, the check scripts, and the workflows themselves; the fuzz
+targets run weekly ([fuzz/README.md](fuzz/README.md)). The toolchain, MSRV and release
+procedures are in [docs/releasing.md](docs/releasing.md).
 
 ## Commits
 
 One logical change per commit, with a message that says what changed and why. By contributing
 you agree that your contribution is licensed under the project's dual MIT / Apache-2.0 license.
+
+## Conduct
+
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).

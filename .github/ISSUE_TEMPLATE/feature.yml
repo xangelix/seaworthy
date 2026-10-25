@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a new capability or a change to existing behavior.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        seaworthy keeps every piece optional and has no organization defaults: new platform or
+        format support goes behind a feature or a configuration switch, off unless asked for
+        ([CONTRIBUTING.md](https://github.com/xangelix/seaworthy/blob/main/CONTRIBUTING.md)).
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - seaworthy (CLI)
+        - seaworthy-levels
+        - seaworthy-launcher
+        - seaworthy-crypto
+        - seaworthy-formats
+        - seaworthy-service
+        - seaworthy-updater
+        - CI workflows or templates
+        - Documentation
+        - New crate or not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do, and why seaworthy does not let you do it today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The behavior, configuration or API you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: security
+    attributes:
+      label: Security considerations
+      description: >-
+        Does this change a trust boundary, a signed or on-disk format, a default, the update
+        helper's privileges, or what is downloaded and from where? See
+        [the threat model](https://github.com/xangelix/seaworthy/blob/main/docs/threat-model.md).

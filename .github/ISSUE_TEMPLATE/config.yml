@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/xangelix/seaworthy/security/advisories/new
+    about: Report vulnerabilities privately here. Never open a public issue for a security problem.
+  - name: Security policy
+    url: https://github.com/xangelix/seaworthy/security/policy
+    about: How vulnerabilities are reported, handled and disclosed.

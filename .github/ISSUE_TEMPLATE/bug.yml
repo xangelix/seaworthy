@@ -1,0 +1,82 @@
+name: Bug report
+description: Something in seaworthy does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security vulnerabilities here.** Use
+        [private vulnerability reporting](https://github.com/xangelix/seaworthy/security/advisories/new)
+        instead ([SECURITY.md](https://github.com/xangelix/seaworthy/security/policy)). If you are
+        unsure whether a bug has security impact, report it privately.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - seaworthy (CLI)
+        - seaworthy-levels
+        - seaworthy-launcher
+        - seaworthy-crypto
+        - seaworthy-formats
+        - seaworthy-service
+        - seaworthy-updater
+        - CI workflows or templates
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The seaworthy version or commit, and the Cargo features in use (for example `fips`).
+      placeholder: 0.1.0, features = ["fips"]
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what seaworthy did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        A minimal configuration (`seaworthy.toml`) or code sample and the commands. Use
+        `example.com` and the product name `Acme` instead of your own names, and remove secrets,
+        keys and internal URLs.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system and version, CPU architecture, and `rustc -Vv`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output, with secrets and internal URLs removed.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
