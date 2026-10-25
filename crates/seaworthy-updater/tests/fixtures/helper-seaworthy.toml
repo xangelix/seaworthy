@@ -1,0 +1,17 @@
+# The seaworthy.toml the README's helper example compiles in (a product's
+# own lives at its repository root). Only the settings that name things are
+# read by the helper; the seaworthy CLI validates the whole file.
+[defaults]
+vendor = "Acme"
+channel = "stable"
+targets = ["x86-64-v3"]
+
+[product.agent]
+display-name = "Acme Agent"
+executable = "AcmeAgent"
+helper = "AcmeAgentUpdate"
+updates.default = "auto"
+
+[product.agent.service]
+name = "AcmeAgent"
+state-directory = "acme/agent"

@@ -1,0 +1,107 @@
+[package]
+name = "seaworthy-updater"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Verified updates for applications shipped with seaworthy: the app's update request and the machine's update policy, and (feature `helper`) a privileged update helper that verifies signed release manifests and installs packages through apt, dnf, pacman, msiexec or macOS's installer under a version floor. Native only."
+readme = "README.md"
+keywords = ["updater", "packages", "deployment", "signature", "msi"]
+categories = ["os", "cryptography"]
+
+[features]
+# The request API (UpdateRequester, the policy readers, request_update),
+# the bounded process runner and the OpenPGP checks are always on: an app
+# links no network stack to ask for an update.
+default = []
+# The installers (apt, dnf, pacman on Linux; macOS's installer on every
+# unix; msiexec on Windows): which release is installed, and installing a
+# verified file. No dependencies of their own; the helper and the relaunch
+# helpers both need them.
+installers = []
+# The privileged update helper: the download path (TLS, redirect policy,
+# size and time bounds), the staging directory, the failure memo and the
+# helper's run (on Windows, under the Service Control Manager).
+helper = [
+    "installers",
+    "dep:futures-util",
+    "dep:hex",
+    "dep:reqwest",
+    "dep:rustls-platform-verifier",
+    "dep:tokio",
+    "dep:windows-service",
+]
+# A desktop app around its own update: the installed release, a restart
+# after a Linux update, the Windows relaunch watcher.
+relaunch = ["installers"]
+# Doc-hidden `__fuzz` seam over the crate-private network-input helpers
+# (the manifest/signature URL derivation, the package URL expansion), for
+# the repository's fuzz crate only.
+fuzzing = ["helper"]
+
+# Native only by nature (it installs packages): no wasm support.
+[dependencies]
+# Digests, randomness, constant-time compare and the TLS client
+# configuration: always through the facade.
+seaworthy-crypto.workspace = true
+# The signed contract: manifests, release versions, product names.
+seaworthy-formats.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# helper: the streamed download and the run's race against a stop.
+futures-util = { workspace = true, optional = true, features = ["std"] }
+# helper: lowercase hex of the verified digest.
+hex = { workspace = true, optional = true }
+# helper: the downloads. `rustls-no-provider` keeps the single-provider
+# discipline: the client's TLS is preconfigured on seaworthy-crypto's TLS
+# policy with the platform verifier; no process default is consulted or
+# installed.
+reqwest = { workspace = true, optional = true, features = ["rustls-no-provider", "stream"] }
+rustls-platform-verifier = { workspace = true, optional = true }
+# helper: the run's runtime, timeouts and the staged download's writes.
+tokio = { workspace = true, optional = true, features = ["fs", "io-util", "net", "rt", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+# geteuid (the helper's root check), O_NOFOLLOW (the request file, staged
+# files, the memo), and kill(2) on a timed-out program's process group.
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The policy's registry reader and ACL rule, the request's StartServiceW;
+# the helper's %ProgramData% lookup, token check, staging DACL audit and
+# directory fsync; msiexec's and PowerShell's paths.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+# helper: the helper's service under the Service Control Manager.
+windows-service = { workspace = true, optional = true }
+# helper: the SCM's STOP reaching the helper's run.
+tokio = { workspace = true, optional = true, features = ["sync"] }
+
+[dev-dependencies]
+# The sign_release example's lowercase hex.
+hex.workspace = true
+# Test scratch directories.
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# The sign_release example's key-material hygiene: the env-var key string
+# and its decoded bytes ride Zeroizing to the drop.
+zeroize.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
