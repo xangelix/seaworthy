@@ -1,0 +1,38 @@
+# The Windows lab's FIPS product (scripts/windows-lab-build.ps1 -Fips):
+# seaworthy.toml's [product.scm] with its cores built on the AWS-LC FIPS
+# module (`--features fips`), the module's DLL laid beside them
+# (`sidecars.windows`), and `verify`'s Windows FIPS checks on. The build
+# copies this file into its work directory and generates the code-signing
+# certificate it names beside it (keys/). Crate paths are relative to the
+# e2e workspace (the build plan's manifest).
+
+[defaults]
+vendor = "AcmeE2E"
+targets = ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+channel = "stable"
+maintainer = "Acme Packaging <packages@example.com>"
+license = "MIT OR Apache-2.0"
+homepage = "https://example.com/acme/e2e"
+fips = true
+
+[defaults.authenticode]
+subject = "CN=AcmeE2E Test Code Signing"
+trust = "keys/codesign.pem"
+
+[product.scm]
+display-name = "Acme SCM fixture"
+description = "The Windows SCM suite's service on the AWS-LC FIPS module."
+launcher = "scm"
+executable = "scm"
+core = "scm_core"
+windows-directory = "Scm"
+outputs = ["msi"]
+updates.default = "off"
+sidecars.windows = ["aws_lc_fips_*_crypto.dll"]
+
+[product.scm.service]
+name = "acme-e2e"
+account = "virtual"
+arguments = ["run", "--name", "acme-e2e"]
+restart-delays = ["8s"]
+sandbox = { user = "acmee2e-scm" }

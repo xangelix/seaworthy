@@ -1,0 +1,17 @@
+[package]
+name = "scm"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# The Windows lab's service product's launcher (seaworthy.toml beside this
+# file): the executable each MSI registers as its service. Its cores are
+# `scm_core`, its update helper `scm_helper`.
+
+[features]
+# The FIPS lane builds every crate of its plan with `--features fips`
+# (scripts/windows-lab-build.ps1 -Fips); the launcher links no crypto.
+fips = []
+
+[dependencies]
+seaworthy-launcher = { path = "../.." }

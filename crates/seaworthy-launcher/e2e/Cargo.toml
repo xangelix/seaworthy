@@ -2,11 +2,21 @@
 # scripts/launcher-e2e-macos.sh): a product laid out exactly as a packaging
 # tool lays one out — a launcher built for the architecture's baseline and
 # one core per CPU target — plus a tool that reads the records back out of
-# the built files. Its own workspace and lockfile, excluded from the
-# repository's workspace: the scripts build it once per CPU target, each in
-# its own target directory.
+# the built files, and the Windows lab's service product (`scm`, its
+# `scm_core` and its update helper `scm_helper`: scm/seaworthy.toml,
+# docs/testing-windows.md). Its own workspace and lockfile, excluded from
+# the repository's workspace: the scripts build it once per CPU target,
+# each in its own target directory.
 [workspace]
-members = ["demo", "demo_core", "inspect"]
+members = [
+    "demo",
+    "demo_core",
+    "inspect",
+    # The Windows lab (scripts/windows-lab-build.ps1).
+    "scm",
+    "scm_core",
+    "scm_helper",
+]
 resolver = "3"
 
 [workspace.package]

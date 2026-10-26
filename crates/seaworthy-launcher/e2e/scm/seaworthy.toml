@@ -1,0 +1,68 @@
+# The Windows lab's products (docs/testing-windows.md), packaged by the
+# seaworthy CLI on a Windows runner (scripts/windows-lab-build.ps1): the
+# `scm` launcher, its `scm_core` cores and, for the update lane, its
+# `scm_helper`. The build copies this file into its work directory and
+# generates the throwaway keys it names beside it (keys/): an ML-DSA-87
+# release key and a self-signed code-signing certificate, both made fresh
+# in the job and never uploaded. Crate paths are relative to the e2e
+# workspace (the build plan's manifest).
+
+[defaults]
+vendor = "AcmeE2E"
+targets = ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+channel = "stable"
+release-signatures = ["ml-dsa-87"]
+release-keys = [{ algorithm = "ml-dsa-87", public-key = "keys/release.pub" }]
+maintainer = "Acme Packaging <packages@example.com>"
+license = "MIT OR Apache-2.0"
+homepage = "https://example.com/acme/e2e"
+
+# The job's certificate: one RDN, so its subject reads the same in every
+# tool's order.
+[defaults.authenticode]
+subject = "CN=AcmeE2E Test Code Signing"
+trust = "keys/codesign.pem"
+
+# The SCM suite's service (scripts/windows-scm-e2e.ps1): a virtual account,
+# one restart action, no update helper (a version rejection's request must
+# fail: the suite's evidence).
+[product.scm]
+display-name = "Acme SCM fixture"
+description = "The Windows SCM suite's service: seaworthy-service's run loop under the real Service Control Manager."
+launcher = "scm"
+executable = "scm"
+core = "scm_core"
+windows-directory = "Scm"
+outputs = ["msi"]
+updates.default = "off"
+
+[product.scm.service]
+name = "acme-e2e"
+account = "virtual"
+arguments = ["run", "--name", "acme-e2e"]
+restart-delays = ["8s"]
+sandbox = { user = "acmee2e-scm" }
+
+# The update lane's service (scripts/windows-msi-update.ps1): the same
+# service with its update helper, upgraded by that helper through Windows
+# Installer. A display name outside one Windows code page checks the MSI's
+# UTF-8 database end to end.
+[product.agent]
+display-name = "Acme E2E Agent (Prüfung, 試験)"
+description = "The Windows update lane's service, updated through its helper."
+launcher = "scm"
+executable = "scm"
+core = "scm_core"
+helper = "scm_helper"
+helper-crate = "scm_helper"
+windows-directory = "Agent"
+outputs = ["msi"]
+updates.default = "auto"
+
+[product.agent.service]
+name = "AcmeAgent"
+account = "virtual"
+arguments = ["run", "--name", "AcmeAgent"]
+restart-delays = ["15s"]
+state-directory = "acmee2e/agent"
+sandbox = { user = "acmee2e-agent" }

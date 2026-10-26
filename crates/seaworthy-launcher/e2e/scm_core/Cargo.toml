@@ -1,0 +1,26 @@
+[package]
+name = "scm_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# The Windows lab's service, as a product's core (one per CPU target, beside
+# the `scm` launcher): seaworthy-service's run loop under the real Service
+# Control Manager (scripts/windows-scm-e2e.ps1), and the service the update
+# lane's helper upgrades (scripts/windows-msi-update.ps1).
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# The AWS-LC FIPS module (the FIPS lane: the MSI lays the module's DLL
+# beside the cores, `sidecars.windows` in seaworthy-fips.toml).
+fips = ["seaworthy-crypto/fips"]
+
+[dependencies]
+seaworthy-crypto = { path = "../../../seaworthy-crypto" }
+seaworthy-launcher = { path = "../.." }
+seaworthy-service = { path = "../../../seaworthy-service", features = ["runtime"] }
+seaworthy-updater = { path = "../../../seaworthy-updater" }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
