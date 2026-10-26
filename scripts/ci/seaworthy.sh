@@ -9,9 +9,13 @@
 #                                   checkout, seaworthy.toml checked, the
 #                                   build plans, the release-ordering lint,
 #                                   the scripts the later jobs run
-#   seaworthy.sh build <triple>    the build plan carried out (Linux, or
+#   seaworthy.sh build <triple> [<target dir>]
+#                                  the build plan carried out (Linux, or
 #                                   aarch64-apple-darwin on the Mac): every
-#                                   binary into the artifact directory
+#                                   binary into the artifact directory; with
+#                                   a target directory (base, or a CPU) only
+#                                   that build's steps, so one CI job per
+#                                   CPU builds in parallel
 #   seaworthy.sh package           seaworthy package, every platform but
 #                                   macOS (signed on a release, Authenticode
 #                                   alone on a dev build)
@@ -93,6 +97,10 @@
 #                             (default CI_PIPELINE_IID)
 #   SEAWORTHY_COMMIT          the commit's short SHA, the default build
 #                             metadata (default CI_COMMIT_SHORT_SHA)
+#   SEAWORTHY_PRODUCTS        prepare, package, package-macos: the products
+#                             to build and package, comma-separated
+#                             (default every product); the repository
+#                             package is built only for every product
 #   SEAWORTHY_TOOL_BIN        prepare, package-macos: a seaworthy binary
 #                             already built from the checkout (the GitHub
 #                             workflow's setup-seaworthy action), installed
@@ -194,6 +202,35 @@ need_file() { # <path> <what>
 
 # A release: the version from the tag, the signing configuration required.
 release() { [ "${SEAWORTHY_RELEASE:-0}" = 1 ]; }
+
+# Whether product <id> has outputs for any of <triple>s (its build plan
+# there isn't refused as having none).
+product_has() { # <id> <triple>...
+    local id="$1" triple
+    shift
+    for triple in "$@"; do
+        "$tool" build-plan --config "$config" --triple "$triple" --product "$id" \
+            --manifest "${SEAWORTHY_MANIFEST:-Cargo.toml}" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# SEAWORTHY_PRODUCTS' ids in `products` (none: every product), each
+# checked to be a product id. (Not a command substitution: a refusal must
+# stop the step.)
+products=()
+selected_products() {
+    local list="${SEAWORTHY_PRODUCTS:-}" id ids=()
+    products=()
+    list="${list//[[:space:]]/}"
+    [ -n "$list" ] || return 0
+    IFS=, read -r -a ids <<<"$list"
+    for id in "${ids[@]}"; do
+        [ -n "$id" ] || continue
+        [[ "$id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "SEAWORTHY_PRODUCTS: ${id@Q} isn't a product id"
+        products+=("$id")
+    done
+}
 
 # A dev build: not a release, but its Windows binaries and MSIs
 # carry the release's Authenticode signature (nothing else is signed, and
@@ -401,10 +438,27 @@ prepare() {
     fi
     "$tool" version --release "$release_version" --sequence "$check_sequence" >/dev/null ||
         fail "the release version $release_version isn't one seaworthy packages (MAJOR.MINOR.PATCH, optionally -alpha, -beta or -rc, each optionally .N)"
-    local triple
+    local triple product
+    selected_products
     for triple in "$linux" "$windows" "$macos"; do
         "$tool" build-plan --config "$config" --triple "$triple" \
             --manifest "${SEAWORTHY_MANIFEST:-Cargo.toml}" > "$work/plan-$triple.tsv"
+        if [ "${#products[@]}" -gt 0 ]; then
+            # The selected products' plans, each step once, in order (the
+            # whole plan above already refused products that build one
+            # artifact differently). A product without this triple's
+            # outputs adds nothing.
+            : > "$work/plan-$triple.tsv.selected"
+            for product in "${products[@]}"; do
+                if ! "$tool" build-plan --config "$config" --triple "$triple" --product "$product" \
+                    --manifest "${SEAWORTHY_MANIFEST:-Cargo.toml}" >> "$work/plan-$triple.tsv.selected" 2>"$work/plan.err"; then
+                    grep -q "has no $triple output" "$work/plan.err" ||
+                        fail "build-plan --product $product: $(cat "$work/plan.err")"
+                fi
+            done
+            awk '!seen[$0]++' "$work/plan-$triple.tsv.selected" > "$work/plan-$triple.tsv"
+            rm -f "$work/plan-$triple.tsv.selected" "$work/plan.err"
+        fi
         if [ -s "$work/plan-$triple.tsv" ]; then
             say "$triple: $(grep -c '^build' "$work/plan-$triple.tsv") build(s), $(grep -c '^copy' "$work/plan-$triple.tsv") binaries"
         else
@@ -423,8 +477,8 @@ prepare() {
     fi
 }
 
-build() { # <triple>
-    local triple="${1:-}"
+build() { # <triple> [<target dir>]
+    local triple="${1:-}" only="${2:-}"
     case "$triple" in
         "$linux") ;;
         "$macos") [ "$(uname -s)" = Darwin ] || fail "build: $macos builds on the Mac (the template's seaworthy-macos job)" ;;
@@ -434,6 +488,17 @@ build() { # <triple>
     if [ ! -f "$plan" ]; then
         say "$triple: no product needs it"
         return 0
+    fi
+    if [ -n "$only" ]; then
+        # One target directory's steps: its build, its copies, and the
+        # sidecars its build leaves (the first CPU's, for every core).
+        [[ "$only" =~ ^[A-Za-z0-9._-]+$ ]] || fail "build: ${only@Q} isn't a target directory"
+        grep -q "^build"$'\t'"$only"$'\t' "$plan" || fail "build: the $triple plan has no target directory ${only@Q}"
+        local part="$work/plan-$triple.$only.tsv"
+        awk -F'\t' -v d="$only" '($1 == "build" && $2 == d) || (($1 == "copy" || $1 == "sidecars") && index($2, d "/") == 1)' \
+            "$plan" > "$part"
+        plan="$part"
+        say "$triple: the $only build alone"
     fi
     # The per-CPU flags go in as target.<triple>.rustflags, which joins the
     # product's own config; RUSTFLAGS would replace both.
@@ -524,6 +589,7 @@ build() { # <triple>
             *) fail "plan line $line: unknown step ${kind@Q}" ;;
         esac
     done < "$plan"
+    [ -z "$only" ] || rm -f "$plan"
     say "built: $(find "$artifacts/$triple" -type f | wc -l) file(s) under $artifacts/$triple"
 }
 
@@ -616,11 +682,19 @@ package() {
         signing+=("${ci_test_signing[@]}")
     fi
     rm -rf "$work/dist"
-    # macOS packages on the Mac (package-macos), and never joins a
-    # release's listing until it can be signed.
-    with_secrets "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$work/dist" \
-        --release "$release_version" --sequence "$release_sequence" --build "$release_build" \
-        --platforms linux,windows "${signing[@]}"
+    # macOS packages on the Mac (package-macos).
+    local product
+    selected_products
+    [ "${#products[@]}" -gt 0 ] || products=("")
+    for product in "${products[@]}"; do
+        if [ -n "$product" ] && ! product_has "$product" "$linux" "$windows"; then
+            say "product $product has no Linux or Windows outputs: packaged on the Mac alone"
+            continue
+        fi
+        with_secrets "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$work/dist" \
+            --release "$release_version" --sequence "$release_sequence" --build "$release_build" \
+            --platforms linux,windows ${product:+--product "$product"} "${signing[@]}"
+    done
 }
 
 # On the Mac (codesign and hdiutil are macOS's own): seaworthy built from
@@ -656,9 +730,18 @@ package_macos() {
     source_date_epoch
     local scratch="${SEAWORTHY_MACOS_SCRATCH:-$work/macos}"
     rm -rf "$scratch/dist" "$work/dist-macos"
-    with_secrets "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$scratch/dist" \
-        --release "$release_version" --sequence "$release_sequence" --build "$release_build" \
-        --platforms macos "${signing[@]}"
+    local product
+    selected_products
+    [ "${#products[@]}" -gt 0 ] || products=("")
+    for product in "${products[@]}"; do
+        if [ -n "$product" ] && ! product_has "$product" "$macos"; then
+            say "product $product has no macOS outputs"
+            continue
+        fi
+        with_secrets "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$scratch/dist" \
+            --release "$release_version" --sequence "$release_sequence" --build "$release_build" \
+            --platforms macos ${product:+--product "$product"} "${signing[@]}"
+    done
     local listing product copied=0
     mkdir -p "$work/dist-macos"
     for listing in "$scratch/dist"/*/packages.json; do

@@ -2515,6 +2515,268 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
     );
 }
 
+/// `build <triple> <target dir>` carries out one target directory's steps
+/// alone (one CI job per CPU): its build and its copies, nothing of the
+/// others'; an unknown directory is refused. The PowerShell build does the
+/// same, the first CPU's job also copying the sidecars beside every core.
+#[test]
+fn one_target_directory_builds_alone_for_a_job_per_cpu() {
+    let triple = "x86_64-unknown-linux-gnu";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("seaworthy.toml"), EXTRA_FLAGS_PRODUCT).unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("seaworthy")).unwrap();
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+        .current_dir(dir.path())
+        .args(["build-plan", "--triple", triple])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{}", said(&plan));
+    std::fs::write(
+        dir.path().join(format!("seaworthy/plan-{triple}.tsv")),
+        &plan.stdout,
+    )
+    .unwrap();
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.path().join("log");
+    std::fs::create_dir_all(&log).unwrap();
+    script_at(
+        &bin.join("cargo"),
+        &format!(
+            "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
+             dir=\"\" name=\"\" kind=\"\"\n\
+             while [ $# -gt 0 ]; do case \"$1\" in --target-dir) dir=\"$2\"; shift ;; --bin) name=\"$2\"; kind=bin; shift ;; -p) name=\"$2\"; kind=lib; shift ;; esac; shift; done\n\
+             release=\"$dir/{triple}/release\"; mkdir -p \"$release\"\n\
+             if [ \"$kind\" = bin ]; then echo bin > \"$release/$name\"; else echo so > \"$release/lib$name.so\"; fi\n",
+            log = log.display()
+        ),
+    );
+    let path = path_with(&bin);
+    let artifacts = dir.path().join("seaworthy/artifacts").join(triple);
+    let files = || -> Vec<String> {
+        let mut found = Vec::new();
+        for entry in walk(&artifacts) {
+            found.push(
+                entry
+                    .strip_prefix(&artifacts)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        found.sort();
+        found
+    };
+    let out = step(
+        dir.path(),
+        &["build", triple, "x86-64-v2"],
+        &[("PATH", path.as_str())],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains("the x86-64-v2 build alone"),
+        "{}",
+        said(&out)
+    );
+    assert_eq!(files(), ["cores/x86-64-v2/libacme_core.so"]);
+    assert_eq!(rustflags_by_target_dir(&log, triple).len(), 1);
+    let out = step(
+        dir.path(),
+        &["build", triple, "base"],
+        &[("PATH", path.as_str())],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        files(),
+        [
+            "cores/x86-64-v2/libacme_core.so",
+            "helper/AcmeToolUpdate",
+            "launcher/AcmeTool",
+        ]
+    );
+    assert!(
+        !dir.path()
+            .join(format!("seaworthy/plan-{triple}.base.tsv"))
+            .exists(),
+        "the partial plan is removed"
+    );
+    for bad in ["x86-64-v9", "../x86-64-v2"] {
+        let out = step(
+            dir.path(),
+            &["build", triple, bad],
+            &[("PATH", path.as_str())],
+        );
+        assert!(!out.status.success(), "{bad}");
+        assert!(
+            said(&out).contains("has no target directory")
+                || said(&out).contains("isn't a target directory"),
+            "{bad}: {}",
+            said(&out)
+        );
+    }
+
+    // Windows: the first CPU's job copies the sidecars beside every core.
+    let have_pwsh = pwsh()
+        .args(["-NoProfile", "-Command", "exit 0"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !have_pwsh {
+        eprintln!("SKIPPED: pwsh is not installed");
+        return;
+    }
+    let windows = "x86_64-pc-windows-msvc";
+    let wdir = tempfile::tempdir().unwrap();
+    std::fs::write(wdir.path().join("seaworthy.toml"), WINDOWS_PRODUCT).unwrap();
+    std::fs::create_dir_all(wdir.path().join("seaworthy")).unwrap();
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+        .current_dir(wdir.path())
+        .args(["build-plan", "--triple", windows])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{}", said(&plan));
+    std::fs::write(
+        wdir.path().join(format!("seaworthy/plan-{windows}.tsv")),
+        &plan.stdout,
+    )
+    .unwrap();
+    let wbin = wdir.path().join("stub-bin");
+    std::fs::create_dir_all(&wbin).unwrap();
+    script_at(&wbin.join("cargo"), &windows_cargo_stub(wdir.path()));
+    let script = repo_root().join("scripts/ci/seaworthy-build.ps1");
+    let run = |target_dir: &str| {
+        pwsh()
+            .current_dir(wdir.path())
+            .args(["-NoProfile", "-NonInteractive", "-File"])
+            .arg(&script)
+            .args(["-TargetDir", target_dir])
+            .env("PATH", path_with(&wbin))
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
+            .output()
+            .unwrap()
+    };
+    let wartifacts = wdir.path().join("seaworthy/artifacts").join(windows);
+    let out = run("x86-64-v2");
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(wartifacts.join("cores/x86-64-v2/acme_core.dll").is_file());
+    assert!(
+        !wartifacts
+            .join("cores/x86-64-v2/aws_lc_fips_0_13_crypto.dll")
+            .exists(),
+        "the sidecars come from the first CPU's build"
+    );
+    let out = run("x86-64-v3");
+    assert!(out.status.success(), "{}", said(&out));
+    for file in [
+        "cores/x86-64-v3/acme_core.dll",
+        "cores/x86-64-v3/aws_lc_fips_0_13_crypto.dll",
+        "cores/x86-64-v2/aws_lc_fips_0_13_crypto.dll",
+        "cores/x86-64-v2/aws_lc_fips_0_13_rust_wrapper.dll",
+    ] {
+        assert!(wartifacts.join(file).is_file(), "{file}");
+    }
+    assert!(!wartifacts.join("launcher").exists());
+    let out = run("x86-64-v9");
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("has no target directory"),
+        "{}",
+        said(&out)
+    );
+}
+
+/// Every file under `dir`, recursively.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// `SEAWORTHY_PRODUCTS` narrows prepare's plans to the products named
+/// (each step once), dropping a triple none of them needs; an id that
+/// isn't one is refused.
+#[test]
+fn prepare_plans_the_selected_products_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join(".seaworthy");
+    for file in [
+        "scripts/ci/seaworthy.sh",
+        "scripts/ci/seaworthy-build.ps1",
+        "scripts/ci/seaworthy-msi.ps1",
+        "scripts/ci/azure-sign.sh",
+        "scripts/ci/install-nfpm.sh",
+        "scripts/ci/install-osslsigncode.sh",
+        "ci/gitlab/seaworthy.yml",
+    ] {
+        let to = checkout.join(file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(repo_root().join(file), &to).unwrap();
+    }
+    std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let two = format!(
+        "{WINDOWS_PRODUCT}\n[product.tool]\ndisplay-name = \"Acme Tool\"\ndescription = \"A tool.\"\n\
+         executable = \"AcmeCli\"\ncore = \"acme_cli_core\"\nkind = \"tool\"\noutputs = [\"tar\"]\n\
+         updates.default = \"off\"\n"
+    );
+    std::fs::write(dir.path().join("seaworthy.toml"), two).unwrap();
+    let tool = env!("CARGO_BIN_EXE_seaworthy");
+    let prepare = |products: &str| {
+        step(
+            dir.path(),
+            &["prepare"],
+            &[
+                ("SEAWORTHY_TOOL_BIN", tool),
+                ("SEAWORTHY_PRODUCTS", products),
+            ],
+        )
+    };
+    let plan = |triple: &str| {
+        std::fs::read_to_string(dir.path().join(format!("seaworthy/plan-{triple}.tsv")))
+            .unwrap_or_default()
+    };
+    let out = prepare("tool");
+    assert!(out.status.success(), "{}", said(&out));
+    let linux = plan("x86_64-unknown-linux-gnu");
+    assert!(
+        linux.contains("--bin AcmeCli") && !linux.contains("AcmeTool"),
+        "{linux}"
+    );
+    assert!(
+        said(&out).contains("x86_64-pc-windows-msvc: no product needs it"),
+        "{}",
+        said(&out)
+    );
+    let out = prepare("console, tool");
+    assert!(out.status.success(), "{}", said(&out));
+    let linux = plan("x86_64-unknown-linux-gnu");
+    assert!(
+        linux.contains("--bin AcmeCli") && linux.contains("--bin AcmeTool"),
+        "{linux}"
+    );
+    // Each step once, even where both products' plans have it.
+    let lines: Vec<&str> = linux.lines().collect();
+    let unique: BTreeSet<&str> = lines.iter().copied().collect();
+    assert_eq!(lines.len(), unique.len(), "{linux}");
+    assert!(plan("x86_64-pc-windows-msvc").contains("--bin AcmeTool"));
+    let out = prepare("Tool");
+    assert!(!out.status.success());
+    assert!(said(&out).contains("isn't a product id"), "{}", said(&out));
+    let out = prepare("missing");
+    assert!(!out.status.success());
+    assert!(said(&out).contains("missing"), "{}", said(&out));
+}
+
 /// The Windows build adds the caller's extra rustflags as the Linux step
 /// does: after the plan's (static C runtime included), the cores' on the
 /// cores alone, `{workspace}` absolute (a path with a space stays one

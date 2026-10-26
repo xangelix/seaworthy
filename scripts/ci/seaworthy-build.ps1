@@ -20,6 +20,10 @@
                                                         the core: at least one, and one set
                                                         of bytes per name
 
+    -TargetDir (SEAWORTHY_BUILD_TARGET_DIR) carries out one target directory's steps alone
+    (base, or a CPU: its build, its copies, the sidecars its build leaves), so one CI job per
+    CPU builds in parallel; the artifact directories the jobs leave merge.
+
     SEAWORTHY_RUSTFLAGS (every build) and SEAWORTHY_CORE_RUSTFLAGS (the cores' builds
     alone: each step whose target directory isn't base) add the caller's flags after the
     plan's, as scripts/ci/seaworthy.sh build does: whitespace-separated, with {workspace}
@@ -44,7 +48,8 @@ param(
     [string]$Work = $(if ($env:SEAWORTHY_WORK) { $env:SEAWORTHY_WORK } else { 'seaworthy' }),
     [string]$Manifest = $(if ($env:SEAWORTHY_MANIFEST) { $env:SEAWORTHY_MANIFEST } else { 'Cargo.toml' }),
     [string]$TargetRoot = $env:SEAWORTHY_TARGET_DIR,
-    [string]$CargoArgs = $env:SEAWORTHY_CARGO_ARGS
+    [string]$CargoArgs = $env:SEAWORTHY_CARGO_ARGS,
+    [string]$TargetDir = $env:SEAWORTHY_BUILD_TARGET_DIR
 )
 
 Set-StrictMode -Version Latest
@@ -182,8 +187,22 @@ $Extra = @()
 if ($CargoArgs) { $Extra = @($CargoArgs -split '\s+' | Where-Object { $_ }) }
 Enter-MsvcEnvironment
 
+$Steps = @(Get-Content -LiteralPath $Plan)
+if ($TargetDir) {
+    if ($TargetDir -notmatch '^[A-Za-z0-9._-]+$') { Fail "'$TargetDir' isn't a target directory" }
+    $Steps = @($Steps | Where-Object {
+        $F = "$_" -split "`t"
+        ($F[0] -eq 'build' -and $F.Count -gt 1 -and $F[1] -eq $TargetDir) -or
+        (($F[0] -eq 'copy' -or $F[0] -eq 'sidecars') -and $F.Count -gt 1 -and $F[1].StartsWith("$TargetDir/"))
+    })
+    if (-not @($Steps | Where-Object { "$_".StartsWith("build`t") })) {
+        Fail "the $Triple plan has no target directory '$TargetDir'"
+    }
+    Say "${Triple}: the $TargetDir build alone"
+}
+
 $Line = 0
-foreach ($Text in (Get-Content -LiteralPath $Plan)) {
+foreach ($Text in $Steps) {
     $Line++
     if (-not $Text) { continue }
     $Fields = $Text -split "`t"
