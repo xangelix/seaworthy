@@ -7,10 +7,18 @@ rules:
   # setup-rust action is referenced as `./.github/actions/setup-rust`; every
   # use follows a fresh checkout and precedes any build step, so no earlier
   # step can have modified it. Switch to `$/` once actionlint accepts it.
+  #
+  # dist.yml, a reusable workflow, checks seaworthy out at its own commit
+  # (job.workflow_repository, job.workflow_sha) into .seaworthy and uses the
+  # setup-seaworthy action from that checkout: `./.seaworthy/...` names the
+  # workflow's own commit by construction; dist-selftest.yml calls it as
+  # `./.github/workflows/dist.yml`, at the caller's commit.
   self-repository:
     ignore:
       - ci.yml
       - codeql.yml
+      - dist-selftest.yml
+      - dist.yml
       - lab.yml
       - release.yml
       - lab-windows.yml

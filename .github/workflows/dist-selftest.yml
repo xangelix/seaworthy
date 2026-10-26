@@ -1,0 +1,58 @@
+# The reusable workflow (dist.yml) run on the launcher's end-to-end fixture
+# product (crates/seaworthy-launcher/e2e/desktop): every job a caller's run
+# has, unsigned, on GitHub-hosted runners: the Linux, Windows and macOS
+# builds per CPU target, the Linux packages, the Windows zip and MSI (built
+# with WiX and adopted), the macOS disk image, and the verified packages
+# artifact. Not on pull requests: dist.yml's signing jobs request
+# id-token: write, which a fork's pull request can't grant.
+name: dist (self-test)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly, against the moving runner images.
+    - cron: "17 6 * * 3"
+
+permissions: {}
+
+concurrency:
+  group: dist-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dist:
+    uses: ./.github/workflows/dist.yml
+    permissions:
+      contents: read
+      id-token: write # requested by dist.yml's signing jobs; unused unsigned
+    with:
+      config: crates/seaworthy-launcher/e2e/desktop/seaworthy.toml
+      manifest: crates/seaworthy-launcher/e2e/Cargo.toml
+      artifact-prefix: selftest
+      retention-days: 3
+
+  check:
+    name: The packages artifact
+    needs: dist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.dist.outputs.packages-artifact }}
+          path: packages
+      - name: Every package, listed and checksummed
+        working-directory: packages
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict SHA256SUMS
+          for kind in deb zip msi dmg tar.zst; do
+            find . -name "*.$kind" | grep -q . || { echo "::error::no .$kind in the packages artifact"; exit 1; }
+          done

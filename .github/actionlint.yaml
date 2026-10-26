@@ -1,0 +1,9 @@
+# actionlint configuration (CI's "Lint workflows and scripts" job runs
+# `actionlint`; https://github.com/rhysd/actionlint/blob/main/docs/config.md).
+paths:
+  # GitHub's `job.workflow_repository` and `job.workflow_sha` name the
+  # reusable workflow's own repository and commit (github.* names the
+  # caller's); actionlint 1.7.12 doesn't know these `job` properties yet.
+  .github/workflows/dist.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

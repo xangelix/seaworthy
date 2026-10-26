@@ -20,7 +20,8 @@ configuration file, with every piece optional.
   jobs, with least-privilege defaults, plus the runtime glue a service binary needs.
 - **Updates.** A privileged update helper that installs only signed releases through the
   platform's own package manager, under administrator-controlled policy.
-- **CI.** Reusable GitHub Actions workflows (and GitLab CI templates) that run the whole pipeline.
+- **CI.** A reusable GitHub Actions workflow ([docs/ci-github.md](docs/ci-github.md)) and GitLab
+  CI templates ([docs/ci-gitlab.md](docs/ci-gitlab.md)) that run the whole pipeline.
 
 ## Crates
 

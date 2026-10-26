@@ -1,0 +1,114 @@
+# Builds the `seaworthy` command from a seaworthy checkout, once per commit
+# and runner OS/architecture: the binary is cached under the checkout's
+# full commit SHA, so every job of a workflow (and every later run at that
+# commit) gets the same tool without compiling it again. seaworthy has no
+# binary releases yet; this is how the reusable workflow
+# (.github/workflows/dist.yml) and any other caller get the tool at the
+# commit they pinned.
+#
+#   - uses: actions/checkout@<sha>
+#     with:
+#       repository: <owner>/seaworthy
+#       ref: <the full commit SHA you pin>
+#       path: .seaworthy
+#       persist-credentials: false
+#   - id: seaworthy
+#     uses: ./.seaworthy/.github/actions/setup-seaworthy
+#     with:
+#       source: .seaworthy
+#   - run: "$SEAWORTHY_BIN" check
+#     env:
+#       SEAWORTHY_BIN: ${{ steps.seaworthy.outputs.bin }}
+#
+# Linux and macOS runners (the tool runs there; Windows jobs need only the
+# PowerShell scripts). With `cache: false` (a release) the tool compiles
+# from source and nothing is restored from or saved to the cache.
+name: Set up seaworthy
+description: >-
+  Build the seaworthy command from a seaworthy checkout (its pinned
+  toolchain, --locked, release profile), cached by the checkout's commit.
+inputs:
+  source:
+    description: The seaworthy checkout, relative to the workspace.
+    required: true
+  cache:
+    description: >-
+      "true" to restore and save the built tool in the Actions cache, keyed
+      by the commit; "false" to compile it from source and cache nothing.
+    required: false
+    default: "true"
+outputs:
+  bin:
+    description: The absolute path of the built seaworthy binary.
+    value: ${{ steps.place.outputs.bin }}
+  commit:
+    description: The full commit SHA the tool was built at.
+    value: ${{ steps.commit.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - name: The checkout's commit
+      id: commit
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        CACHE: ${{ inputs.cache }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux | macOS) ;;
+          *) echo "::error::setup-seaworthy builds the tool on Linux and macOS runners"; exit 1 ;;
+        esac
+        case "$CACHE" in
+          true | false) ;;
+          *) echo "::error::cache must be true or false, not '$CACHE'"; exit 1 ;;
+        esac
+        [ -f "$SOURCE/Cargo.toml" ] && [ -f "$SOURCE/crates/seaworthy/Cargo.toml" ] ||
+          { echo "::error::$SOURCE is not a seaworthy checkout"; exit 1; }
+        sha="$(git -C "$SOURCE" rev-parse --verify HEAD)"
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$SOURCE has no commit"; exit 1; }
+        # The tree must be the commit's: a modified checkout would be cached
+        # under a commit it isn't.
+        if [ -n "$(git -C "$SOURCE" status --porcelain --untracked-files=no)" ]; then
+          echo "::error::$SOURCE has local changes: the tool is cached by its commit"; exit 1
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "dir=$RUNNER_TEMP/seaworthy-cli" >> "$GITHUB_OUTPUT"
+    - name: Restore the tool built at this commit
+      id: restore
+      if: inputs.cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.commit.outputs.dir }}
+        key: seaworthy-cli-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.commit.outputs.sha }}
+    - name: Build seaworthy
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ inputs.source }}
+      env:
+        OUT: ${{ steps.commit.outputs.dir }}
+      run: |
+        set -euo pipefail
+        rustup --version
+        rustup set auto-self-update disable
+        rustup set profile minimal
+        # rust-toolchain.toml's toolchain (this directory's).
+        rustup toolchain install
+        cargo build --release --locked -p seaworthy --target-dir "$RUNNER_TEMP/seaworthy-tool-target"
+        mkdir -p "$OUT"
+        install -m 0755 "$RUNNER_TEMP/seaworthy-tool-target/release/seaworthy" "$OUT/seaworthy"
+    - name: Save the tool for this commit
+      if: inputs.cache == 'true' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.commit.outputs.dir }}
+        key: seaworthy-cli-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.commit.outputs.sha }}
+    - name: The tool
+      id: place
+      shell: bash
+      env:
+        DIR: ${{ steps.commit.outputs.dir }}
+      run: |
+        set -euo pipefail
+        "$DIR/seaworthy" --version
+        echo "bin=$DIR/seaworthy" >> "$GITHUB_OUTPUT"

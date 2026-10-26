@@ -1,0 +1,933 @@
+# seaworthy's reusable workflow for products: a product's seaworthy.toml to
+# verified, signed packages for Linux, Windows and macOS, on GitHub-hosted
+# runners, through the same steps as the GitLab templates
+# (scripts/ci/seaworthy.sh), with the seaworthy command built at this
+# workflow's own commit. docs/ci-github.md has the caller's side: pinning,
+# inputs, secrets, OIDC and permissions.
+#
+#   jobs:
+#     dist:
+#       uses: <owner>/seaworthy/.github/workflows/dist.yml@<full commit SHA>
+#       permissions:
+#         contents: read
+#         id-token: write    # requested by the signing jobs (Azure OIDC)
+#       with:
+#         release: ${{ startsWith(github.ref, 'refs/tags/v') }}
+#
+# Jobs:
+#
+#   prepare          seaworthy built from this workflow's commit (cached by
+#                    it), seaworthy.toml checked, the release named, the
+#                    build plans and the build matrix
+#   build-linux      one job per target directory (the launcher, each CPU's
+#   build-windows    core): Linux in a container whose glibc is at or below
+#   build-macos      the products' floor, Windows natively (MSVC), macOS on
+#                    Apple Silicon
+#   package          seaworthy package: Linux and Windows outputs, verified,
+#                    laid out, signed on a release
+#   msi              WiX (pinned) builds each product's MSI on Windows
+#   adopt-msi        each MSI checked against the signed tree and signed
+#   package-macos    seaworthy package --platforms macos on the Mac: the dmg
+#                    or pkg, Developer ID-signed and notarized on a release
+#                    with the Apple secrets, else ad hoc-signed
+#   verify           every listed artifact checked against its listing,
+#                    assembled with SHA256SUMS into one artifact
+#   publish          on a release with publish-toml: seaworthy repo, then
+#                    seaworthy publish to the S3-compatible store
+#
+# No account, endpoint, bucket or signing identity has a default: each
+# signer is used only when its secrets or inputs are given, and without any
+# the packages are built unsigned. The runner labels default to
+# GitHub-hosted runners, and the Linux build image to the official Rust
+# image, digest-pinned (the GitLab template's default).
+name: seaworthy dist
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: The product's seaworthy.toml.
+        type: string
+        default: seaworthy.toml
+      manifest:
+        description: The Cargo workspace manifest the products build from.
+        type: string
+        default: Cargo.toml
+      products:
+        description: The products to build and package, comma-separated (empty, every product; publishing needs every product).
+        type: string
+        default: ""
+      platforms:
+        description: The platforms to build, comma-separated (linux, windows, macos); a product's outputs elsewhere are left out.
+        type: string
+        default: linux,windows,macos
+      release:
+        description: A release, versioned from the tag (or version, or version-file) and signed with the secrets given. The caller decides; keep the signing secrets in a protected environment (environment).
+        type: boolean
+        default: false
+      dev-sign:
+        description: Outside a release, Authenticode-sign the Windows binaries and MSIs alone (no manifests or package signatures; never published).
+        type: boolean
+        default: false
+      version:
+        description: The release version (default the tag less its `v`, else version-file's, else 0.0.0-alpha outside a release).
+        type: string
+        default: ""
+      version-file:
+        description: A Cargo.toml whose [package] version names the release when there's no tag; a tag must name the same version.
+        type: string
+        default: ""
+      sequence:
+        description: The release sequence, a counter that only grows (default the caller's github.run_number).
+        type: string
+        default: ""
+      build-metadata:
+        description: A command (bash, in the checkout) printing the version token's build metadata (default the commit's first 8 characters).
+        type: string
+        default: ""
+      environment:
+        description: The GitHub environment the signing and publishing jobs run in on a release or a dev build (its protection rules gate them; its secrets of the same names replace the ones passed).
+        type: string
+        default: ""
+      signing-toml:
+        description: Your own signing.toml (signers by command, a KMS, several manifest algorithms) instead of the one generated from the secrets.
+        type: string
+        default: ""
+      ci-signing-toml:
+        description: Outside a release, the CI test keys' signing configuration (public test keys in the repository, seaworthy package --ci-test-signing).
+        type: string
+        default: ""
+      publish-toml:
+        description: On a release, publish the repositories to the S3-compatible store this publish.toml names (empty, no publishing).
+        type: string
+        default: ""
+      publish-dry-run:
+        description: Check everything publishing would do, and upload nothing.
+        type: boolean
+        default: false
+      toolchain:
+        description: A Rust toolchain for the product's builds instead of its rust-toolchain.toml's.
+        type: string
+        default: ""
+      cargo-args:
+        description: More cargo arguments for every build (--features fips).
+        type: string
+        default: ""
+      rustflags:
+        description: More rustflags for every build (SEAWORTHY_RUSTFLAGS; {workspace}, {triple} and {cpu} expand).
+        type: string
+        default: ""
+      core-rustflags:
+        description: More rustflags for the cores' builds alone (SEAWORTHY_CORE_RUSTFLAGS), such as -Cprofile-use={workspace}/pgo/{triple}.profdata.
+        type: string
+        default: ""
+      build-env:
+        description: 'Environment for the builds, JSON: {"*": {"NAME": "value"}, "<target triple>": {...}} (a triple''s entries win).'
+        type: string
+        default: ""
+      linux-runner:
+        description: The runner label of the Linux jobs.
+        type: string
+        default: ubuntu-24.04
+      windows-runner:
+        description: The runner label of the Windows jobs.
+        type: string
+        default: windows-2025
+      macos-runner:
+        description: The runner label of the macOS jobs (Apple Silicon).
+        type: string
+        default: macos-15
+      linux-build-image:
+        description: The Linux builds' container image, whose glibc is at or below the products' floor (2.34 by default); digest-pinned.
+        type: string
+        default: rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
+      release-manifest-algorithm:
+        description: The RELEASE_MANIFEST_KEY secret's algorithm (ml-dsa-87, ecdsa-p256 or ed25519).
+        type: string
+        default: ""
+      openpgp-key-fingerprint:
+        description: The OPENPGP_SECRET_KEY secret's fingerprint (40 or 64 hex characters).
+        type: string
+        default: ""
+      authenticode-timestamp-url:
+        description: The RFC 3161 timestamping service the AUTHENTICODE_PFX signer uses.
+        type: string
+        default: ""
+      azure-tenant-id:
+        description: Azure Artifact Signing through OIDC (no secret) - the Microsoft Entra tenant.
+        type: string
+        default: ""
+      azure-client-id:
+        description: Azure Artifact Signing - the app registration (or managed identity) with a federated credential for this repository.
+        type: string
+        default: ""
+      azure-endpoint:
+        description: Azure Artifact Signing - the endpoint host (<region>.codesigning.azure.net).
+        type: string
+        default: ""
+      azure-account:
+        description: Azure Artifact Signing - the signing account.
+        type: string
+        default: ""
+      azure-profile:
+        description: Azure Artifact Signing - the certificate profile.
+        type: string
+        default: ""
+      apple-identity:
+        description: The Developer ID Application identity to sign with (default the one in APPLE_CERTIFICATE_P12).
+        type: string
+        default: ""
+      artifact-prefix:
+        description: The prefix of the artifacts this workflow uploads.
+        type: string
+        default: seaworthy
+      retention-days:
+        description: How long the uploaded artifacts are kept.
+        type: number
+        default: 14
+    secrets:
+      RELEASE_MANIFEST_KEY:
+        description: The release-manifest signing key (hex), for release-manifest-algorithm.
+        required: false
+      OPENPGP_SECRET_KEY:
+        description: The armored OpenPGP secret key that signs the rpm and pacman packages and the repositories.
+        required: false
+      AUTHENTICODE_PFX:
+        description: An Authenticode code-signing certificate and key, PKCS#12 (base64).
+        required: false
+      AUTHENTICODE_PFX_PASSWORD:
+        description: AUTHENTICODE_PFX's password.
+        required: false
+      APPLE_CERTIFICATE_P12:
+        description: The Developer ID Application (and Installer) identities, PKCS#12 (base64).
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        description: APPLE_CERTIFICATE_P12's password.
+        required: false
+      APPLE_NOTARY_KEY:
+        description: The App Store Connect API key that notarizes (.p8, armored or base64).
+        required: false
+      APPLE_NOTARY_KEY_ID:
+        description: APPLE_NOTARY_KEY's key id.
+        required: false
+      APPLE_NOTARY_ISSUER:
+        description: APPLE_NOTARY_KEY's issuer id.
+        required: false
+      S3_ACCESS_KEY_ID:
+        description: The S3-compatible store's access key id (publish).
+        required: false
+      S3_SECRET_ACCESS_KEY:
+        description: The S3-compatible store's secret access key (publish).
+        required: false
+      S3_SESSION_TOKEN:
+        description: A session token for temporary store credentials (publish).
+        required: false
+    outputs:
+      version:
+        description: The release version the packages carry.
+        value: ${{ jobs.prepare.outputs.version }}
+      packages-artifact:
+        description: The artifact holding every verified package, listing and SHA256SUMS.
+        value: ${{ jobs.verify.outputs.artifact }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  # seaworthy.sh's work directory and the seaworthy checkout, in the
+  # product's workspace; nothing is installed with a package manager behind
+  # its back (each job installs what it needs).
+  SEAWORTHY_WORK: seaworthy-work
+  SEAWORTHY_CHECKOUT: .seaworthy
+  SEAWORTHY_NO_INSTALL: "1"
+  SEAWORTHY_CONFIG: ${{ inputs.config }}
+  SEAWORTHY_MANIFEST: ${{ inputs.manifest }}
+  SEAWORTHY_PRODUCTS: ${{ inputs.products }}
+  # The release, named alike in every job (package checks the build jobs
+  # built the release prepare named).
+  SEAWORTHY_RELEASE: ${{ inputs.release && '1' || '0' }}
+  SEAWORTHY_DEV_SIGN: ${{ inputs.dev-sign && '1' || '0' }}
+  SEAWORTHY_VERSION: ${{ inputs.version }}
+  SEAWORTHY_VERSION_FILE: ${{ inputs.version-file }}
+  SEAWORTHY_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+  SEAWORTHY_SEQUENCE: ${{ inputs.sequence || github.run_number }}
+  SEAWORTHY_BUILD_COMMAND: ${{ inputs.build-metadata }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      linux: ${{ steps.matrix.outputs.linux }}
+      windows: ${{ steps.matrix.outputs.windows }}
+      macos: ${{ steps.matrix.outputs.macos }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # seaworthy at this workflow's own commit: job.workflow_repository and
+      # job.workflow_sha name the called workflow (github.* names the
+      # caller's).
+      - name: Check out seaworthy at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .seaworthy
+          persist-credentials: false
+      - id: seaworthy
+        uses: ./.seaworthy/.github/actions/setup-seaworthy
+        with:
+          source: .seaworthy
+          # A release's tool compiles from source: what signs must not come
+          # from a cache.
+          cache: ${{ (inputs.release || inputs.dev-sign) && 'false' || 'true' }}
+      - name: Prepare (seaworthy.sh prepare)
+        env:
+          SEAWORTHY_TOOL_BIN: ${{ steps.seaworthy.outputs.bin }}
+        run: |
+          bash .seaworthy/scripts/ci/seaworthy.sh prepare
+          install -m 0755 .seaworthy/scripts/ci/github.sh "$SEAWORTHY_WORK/scripts/"
+      - name: The release
+        id: release
+        run: |
+          version="$(sed -n 's/^SEAWORTHY_RELEASE_VERSION=//p' "$SEAWORTHY_WORK/release.env")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: The build matrix
+        id: matrix
+        env:
+          SEAWORTHY_PLATFORMS: ${{ inputs.platforms }}
+        run: bash "$SEAWORTHY_WORK/scripts/github.sh" matrix "$SEAWORTHY_WORK"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: |
+            seaworthy-work/bin/
+            seaworthy-work/scripts/
+            seaworthy-work/plan-*.tsv
+            seaworthy-work/release.env
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  build-linux:
+    name: Build Linux (${{ matrix.dir }})
+    needs: prepare
+    if: needs.prepare.outputs.linux != '[]'
+    strategy:
+      fail-fast: true
+      matrix:
+        dir: ${{ fromJSON(needs.prepare.outputs.linux) }}
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      # Containers stay enabled: the build runs in the build image.
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - name: The build environment
+        env:
+          SEAWORTHY_BUILD_ENV: ${{ inputs.build-env }}
+        run: bash "$SEAWORTHY_WORK/scripts/github.sh" build-env x86_64-unknown-linux-gnu "$RUNNER_TEMP/build.env"
+      # In the build image (its glibc is the products' floor, or older), as
+      # root (rustup installs what the product's rust-toolchain.toml names);
+      # the outputs are handed back to the runner's user.
+      - name: Build (seaworthy.sh build)
+        env:
+          IMAGE: ${{ inputs.linux-build-image }}
+          DIR: ${{ matrix.dir }}
+          TOOLCHAIN: ${{ inputs.toolchain }}
+          SEAWORTHY_CARGO_ARGS: ${{ inputs.cargo-args }}
+          SEAWORTHY_RUSTFLAGS: ${{ inputs.rustflags }}
+          SEAWORTHY_CORE_RUSTFLAGS: ${{ inputs.core-rustflags }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" == *@sha256:* ]] || { echo "::error::linux-build-image must be digest-pinned (name@sha256:...)"; exit 1; }
+          docker pull --quiet "$IMAGE"
+          args=(--rm --user 0:0 -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE"
+            --env-file "$RUNNER_TEMP/build.env"
+            -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL -e CARGO_NET_RETRY -e RUSTUP_MAX_RETRIES
+            -e SEAWORTHY_WORK -e SEAWORTHY_MANIFEST -e SEAWORTHY_CARGO_ARGS
+            -e SEAWORTHY_RUSTFLAGS -e SEAWORTHY_CORE_RUSTFLAGS
+            -e SEAWORTHY_RELEASE -e SEAWORTHY_VERSION -e SEAWORTHY_VERSION_FILE -e SEAWORTHY_TAG
+            -e SEAWORTHY_SEQUENCE -e SEAWORTHY_BUILD_COMMAND -e GITHUB_SHA)
+          [ -z "$TOOLCHAIN" ] || args+=(-e "RUSTUP_TOOLCHAIN=$TOOLCHAIN")
+          docker run "${args[@]}" "$IMAGE" bash -c \
+            'status=0; bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" build x86_64-unknown-linux-gnu "$1" || status=$?; chown -R "$2" "$SEAWORTHY_WORK"; exit "$status"' \
+            build "$DIR" "$(id -u):$(id -g)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-build-linux-${{ matrix.dir }}
+          path: seaworthy-work/artifacts/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  build-windows:
+    name: Build Windows (${{ matrix.dir }})
+    needs: prepare
+    if: needs.prepare.outputs.windows != '[]'
+    strategy:
+      fail-fast: true
+      matrix:
+        dir: ${{ fromJSON(needs.prepare.outputs.windows) }}
+    runs-on: ${{ inputs.windows-runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - name: The Rust toolchain
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+        run: |
+          set -euo pipefail
+          rustup set auto-self-update disable
+          rustup set profile minimal
+          if [ -n "$TOOLCHAIN" ]; then
+            [[ "$TOOLCHAIN" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid toolchain '$TOOLCHAIN'"; exit 1; }
+            rustup toolchain install "$TOOLCHAIN"
+            echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          elif [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
+            # The product's rust-toolchain.toml (rustup >= 1.28 installs
+            # what it names only when asked).
+            rustup toolchain install
+          fi
+      - name: The build environment
+        env:
+          SEAWORTHY_BUILD_ENV: ${{ inputs.build-env }}
+        run: |
+          bash "$SEAWORTHY_WORK/scripts/github.sh" build-env x86_64-pc-windows-msvc "$RUNNER_TEMP/build.env"
+          cat "$RUNNER_TEMP/build.env" >> "$GITHUB_ENV"
+      - name: Build (seaworthy-build.ps1)
+        shell: powershell
+        env:
+          SEAWORTHY_BUILD_TARGET_DIR: ${{ matrix.dir }}
+          SEAWORTHY_CARGO_ARGS: ${{ inputs.cargo-args }}
+          SEAWORTHY_RUSTFLAGS: ${{ inputs.rustflags }}
+          SEAWORTHY_CORE_RUSTFLAGS: ${{ inputs.core-rustflags }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File seaworthy-work\scripts\seaworthy-build.ps1
+          if ($LASTEXITCODE -ne 0) { throw "seaworthy-build.ps1 exited $LASTEXITCODE" }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-build-windows-${{ matrix.dir }}
+          path: seaworthy-work/artifacts/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  build-macos:
+    name: Build macOS (${{ matrix.dir }})
+    needs: prepare
+    if: needs.prepare.outputs.macos != '[]'
+    strategy:
+      fail-fast: true
+      matrix:
+        dir: ${{ fromJSON(needs.prepare.outputs.macos) }}
+    runs-on: ${{ inputs.macos-runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      # seaworthy.sh needs bash 4.4; macOS's /bin/bash is 3.2.
+      - name: Bash 4.4 or later, and the Rust toolchain
+        env:
+          TOOLCHAIN: ${{ inputs.toolchain }}
+        run: |
+          set -euo pipefail
+          brew list bash >/dev/null 2>&1 || brew install bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          rustup set auto-self-update disable
+          rustup set profile minimal
+          if [ -n "$TOOLCHAIN" ]; then
+            [[ "$TOOLCHAIN" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid toolchain '$TOOLCHAIN'"; exit 1; }
+            rustup toolchain install "$TOOLCHAIN"
+            echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          elif [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
+            # The product's rust-toolchain.toml (rustup >= 1.28 installs
+            # what it names only when asked).
+            rustup toolchain install
+          fi
+      - name: The build environment
+        env:
+          SEAWORTHY_BUILD_ENV: ${{ inputs.build-env }}
+        run: |
+          bash "$SEAWORTHY_WORK/scripts/github.sh" build-env aarch64-apple-darwin "$RUNNER_TEMP/build.env"
+          cat "$RUNNER_TEMP/build.env" >> "$GITHUB_ENV"
+      - name: Build (seaworthy.sh build)
+        env:
+          DIR: ${{ matrix.dir }}
+          SEAWORTHY_CARGO_ARGS: ${{ inputs.cargo-args }}
+          SEAWORTHY_RUSTFLAGS: ${{ inputs.rustflags }}
+          SEAWORTHY_CORE_RUSTFLAGS: ${{ inputs.core-rustflags }}
+        run: |
+          bash --version | head -n1
+          bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" build aarch64-apple-darwin "$DIR"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-build-macos-${{ matrix.dir }}
+          path: seaworthy-work/artifacts/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  package:
+    name: Package (Linux, Windows)
+    needs: [prepare, build-linux, build-windows]
+    if: >-
+      !cancelled() && needs.prepare.result == 'success'
+      && (needs.prepare.outputs.linux != '[]' || needs.prepare.outputs.windows != '[]')
+      && contains(fromJSON('["success", "skipped"]'), needs.build-linux.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.build-windows.result)
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 90
+    environment: ${{ (inputs.release || inputs.dev-sign) && inputs.environment || '' }}
+    permissions:
+      contents: read
+      id-token: write # Azure Artifact Signing through OIDC, when its inputs are set
+    outputs:
+      msi: ${{ steps.package.outputs.msi }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ${{ inputs.artifact-prefix }}-build-{linux,windows}-*
+          merge-multiple: true
+          path: seaworthy-work/artifacts
+      - name: The packaging tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # dpkg and nFPM's packages, rpm signing, the archives, desktop
+          # entry validation, and osslsigncode's build (Authenticode).
+          sudo apt-get install --yes --no-install-recommends \
+            rpm libarchive-tools desktop-file-utils cmake build-essential libssl-dev zlib1g-dev
+          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy"
+      - name: The signing configuration
+        if: inputs.release || inputs.dev-sign
+        env:
+          SIGNING_TOML: ${{ inputs.signing-toml }}
+          SEAWORTHY_GH_MANIFEST_ALGORITHM: ${{ inputs.release-manifest-algorithm }}
+          SEAWORTHY_RELEASE_MANIFEST_KEY: ${{ inputs.release && secrets.RELEASE_MANIFEST_KEY || '' }}
+          SEAWORTHY_GH_OPENPGP_FINGERPRINT: ${{ inputs.openpgp-key-fingerprint }}
+          SEAWORTHY_OPENPGP_SECRET_KEY: ${{ inputs.release && secrets.OPENPGP_SECRET_KEY || '' }}
+          SEAWORTHY_GH_AUTHENTICODE_PFX: ${{ secrets.AUTHENTICODE_PFX }}
+          SEAWORTHY_GH_AUTHENTICODE_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+          SEAWORTHY_GH_TIMESTAMP_URL: ${{ inputs.authenticode-timestamp-url }}
+          SEAWORTHY_GH_AZURE_ENDPOINT: ${{ inputs.azure-endpoint }}
+          SEAWORTHY_GH_AZURE_ACCOUNT: ${{ inputs.azure-account }}
+          SEAWORTHY_GH_AZURE_PROFILE: ${{ inputs.azure-profile }}
+          AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+          AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SIGNING_TOML" ]; then
+            echo "SEAWORTHY_SIGNING=$SIGNING_TOML" >> "$GITHUB_ENV"
+          else
+            # Exports SEAWORTHY_SIGNING, or SEAWORTHY_UNSIGNED=1 without a signer.
+            SEAWORTHY_GH_SCRIPTS="$GITHUB_WORKSPACE/$SEAWORTHY_WORK/scripts" \
+              bash "$SEAWORTHY_WORK/scripts/github.sh" signing-toml "$RUNNER_TEMP/seaworthy-signing/signing.toml"
+          fi
+      - name: Package (seaworthy.sh package)
+        id: package
+        env:
+          SEAWORTHY_CI_SIGNING: ${{ inputs.ci-signing-toml }}
+          SEAWORTHY_RELEASE_MANIFEST_KEY: ${{ inputs.release && secrets.RELEASE_MANIFEST_KEY || '' }}
+          SEAWORTHY_OPENPGP_SECRET_KEY: ${{ inputs.release && secrets.OPENPGP_SECRET_KEY || '' }}
+          AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+          AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        run: |
+          set -euo pipefail
+          bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" package
+          msi=false
+          if find "$SEAWORTHY_WORK/dist" -path '*/packages/*.wxs' | grep -q .; then msi=true; fi
+          echo "msi=$msi" >> "$GITHUB_OUTPUT"
+      - name: Remove the signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/seaworthy-signing"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist
+          path: |
+            seaworthy-work/dist/*/packages.json
+            seaworthy-work/dist/*/packages/
+            seaworthy-work/dist/*/x86_64-pc-windows-msvc/tree/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  msi:
+    name: MSI (WiX)
+    needs: [package]
+    if: ${{ !cancelled() && needs.package.result == 'success' && needs.package.outputs.msi == 'true' }}
+    runs-on: ${{ inputs.windows-runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist
+          path: seaworthy-work/dist
+      # WiX v5.0.2 from its pinned, checksum-verified MSI (unless the image
+      # has it), each MSI validated (ICE); the MSI leaves unsigned.
+      - name: Build each MSI (seaworthy-msi.ps1)
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File seaworthy-work\scripts\seaworthy-msi.ps1
+          if ($LASTEXITCODE -ne 0) { throw "seaworthy-msi.ps1 exited $LASTEXITCODE" }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-msi
+          path: seaworthy-work/msi/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  adopt-msi:
+    name: Adopt the MSIs
+    needs: [package, msi]
+    if: ${{ !cancelled() && needs.msi.result == 'success' }}
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 45
+    environment: ${{ (inputs.release || inputs.dev-sign) && inputs.environment || '' }}
+    permissions:
+      contents: read
+      id-token: write # Azure Artifact Signing through OIDC, when its inputs are set
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist
+          path: seaworthy-work/dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-msi
+          path: seaworthy-work/msi
+      - name: The tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends msitools cmake build-essential libssl-dev zlib1g-dev
+          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy"
+      - name: The signing configuration
+        if: inputs.release || inputs.dev-sign
+        env:
+          SIGNING_TOML: ${{ inputs.signing-toml }}
+          SEAWORTHY_GH_MANIFEST_ALGORITHM: ${{ inputs.release-manifest-algorithm }}
+          SEAWORTHY_RELEASE_MANIFEST_KEY: ${{ inputs.release && secrets.RELEASE_MANIFEST_KEY || '' }}
+          SEAWORTHY_GH_AUTHENTICODE_PFX: ${{ secrets.AUTHENTICODE_PFX }}
+          SEAWORTHY_GH_AUTHENTICODE_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+          SEAWORTHY_GH_TIMESTAMP_URL: ${{ inputs.authenticode-timestamp-url }}
+          SEAWORTHY_GH_AZURE_ENDPOINT: ${{ inputs.azure-endpoint }}
+          SEAWORTHY_GH_AZURE_ACCOUNT: ${{ inputs.azure-account }}
+          SEAWORTHY_GH_AZURE_PROFILE: ${{ inputs.azure-profile }}
+          AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+          AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SIGNING_TOML" ]; then
+            echo "SEAWORTHY_SIGNING=$SIGNING_TOML" >> "$GITHUB_ENV"
+          else
+            # Exports SEAWORTHY_SIGNING, or SEAWORTHY_UNSIGNED=1 without a signer.
+            SEAWORTHY_GH_SCRIPTS="$GITHUB_WORKSPACE/$SEAWORTHY_WORK/scripts" \
+              bash "$SEAWORTHY_WORK/scripts/github.sh" signing-toml "$RUNNER_TEMP/seaworthy-signing/signing.toml"
+          fi
+      - name: Adopt (seaworthy.sh adopt-msi)
+        env:
+          SEAWORTHY_CI_SIGNING: ${{ inputs.ci-signing-toml }}
+          SEAWORTHY_RELEASE_MANIFEST_KEY: ${{ inputs.release && secrets.RELEASE_MANIFEST_KEY || '' }}
+          AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+          AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        run: bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" adopt-msi
+      - name: Remove the signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/seaworthy-signing"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-adopted
+          path: |
+            seaworthy-work/adopted/*/packages.json
+            seaworthy-work/adopted/*/packages/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  package-macos:
+    name: Package macOS
+    needs: [prepare, build-macos]
+    if: ${{ !cancelled() && needs.build-macos.result == 'success' }}
+    runs-on: ${{ inputs.macos-runner }}
+    timeout-minutes: 120
+    environment: ${{ inputs.release && inputs.environment || '' }}
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      # Secrets can't be tested in a step's condition; whether one was given
+      # can.
+      HAS_APPLE: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out seaworthy at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .seaworthy
+          persist-credentials: false
+      - id: seaworthy
+        uses: ./.seaworthy/.github/actions/setup-seaworthy
+        with:
+          source: .seaworthy
+          cache: ${{ inputs.release && 'false' || 'true' }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ${{ inputs.artifact-prefix }}-build-macos-*
+          merge-multiple: true
+          path: seaworthy-work/artifacts
+      - name: Bash 4.4 or later
+        run: |
+          brew list bash >/dev/null 2>&1 || brew install bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      # On a release with the Apple secrets: a throwaway keychain with the
+      # Developer ID identities and the notary profile, and signing.toml's
+      # [apple]; the outputs are then signed, notarized and released.
+      - name: The Developer ID keychain
+        id: apple
+        if: inputs.release && env.HAS_APPLE == 'true'
+        env:
+          SEAWORTHY_GH_APPLE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          SEAWORTHY_GH_APPLE_P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SEAWORTHY_GH_APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          SEAWORTHY_GH_APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          SEAWORTHY_GH_APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          SEAWORTHY_GH_APPLE_IDENTITY: ${{ inputs.apple-identity }}
+        run: |
+          bash "$SEAWORTHY_WORK/scripts/github.sh" apple-keychain
+          echo "SEAWORTHY_MACOS_SIGN=1" >> "$GITHUB_ENV"
+      - name: The signing configuration
+        if: steps.apple.outcome == 'success'
+        env:
+          SIGNING_TOML: ${{ inputs.signing-toml }}
+          SEAWORTHY_GH_MANIFEST_ALGORITHM: ${{ inputs.release-manifest-algorithm }}
+          SEAWORTHY_RELEASE_MANIFEST_KEY: ${{ secrets.RELEASE_MANIFEST_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SIGNING_TOML" ]; then
+            echo "SEAWORTHY_SIGNING=$SIGNING_TOML" >> "$GITHUB_ENV"
+          else
+            bash "$SEAWORTHY_WORK/scripts/github.sh" signing-toml "$RUNNER_TEMP/seaworthy-signing/signing.toml"
+          fi
+      - name: Package (seaworthy.sh package-macos)
+        env:
+          SEAWORTHY_TOOL_BIN: ${{ steps.seaworthy.outputs.bin }}
+          SEAWORTHY_CI_SIGNING: ${{ inputs.ci-signing-toml }}
+          SEAWORTHY_RELEASE_MANIFEST_KEY: ${{ inputs.release && secrets.RELEASE_MANIFEST_KEY || '' }}
+        run: bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" package-macos
+      - name: Remove the keychain and the signing material
+        if: always()
+        run: |
+          bash "$SEAWORTHY_WORK/scripts/github.sh" apple-cleanup
+          rm -rf "$RUNNER_TEMP/seaworthy-signing"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist-macos
+          path: seaworthy-work/dist-macos/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  verify:
+    name: Verify and assemble
+    needs: [package, adopt-msi, package-macos]
+    if: >-
+      !cancelled()
+      && contains(fromJSON('["success", "skipped"]'), needs.package.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.adopt-msi.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.package-macos.result)
+      && (needs.package.result == 'success' || needs.package-macos.result == 'success')
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artifact: ${{ steps.name.outputs.artifact }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      # The MSIs' adopted listings when there are MSIs, else package's.
+      - if: needs.adopt-msi.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-adopted
+          path: seaworthy-work/released
+      - if: needs.adopt-msi.result != 'success' && needs.package.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist
+          path: seaworthy-work/released
+      - if: needs.package-macos.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist-macos
+          path: seaworthy-work/released-macos
+      - name: Check every artifact against its listing, with SHA256SUMS
+        run: |
+          bash "$SEAWORTHY_WORK/scripts/github.sh" assemble "$RUNNER_TEMP/packages" \
+            packages="$SEAWORTHY_WORK/released" packages-macos="$SEAWORTHY_WORK/released-macos"
+      - name: The artifact's name
+        id: name
+        env:
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: echo "artifact=$PREFIX-packages" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-packages
+          path: ${{ runner.temp }}/packages/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
+
+  publish:
+    name: Publish (seaworthy repo, seaworthy publish)
+    needs: [verify, adopt-msi, package]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && inputs.release && inputs.publish-toml != '' }}
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    # One publication at a time (the indexes and the plan).
+    concurrency:
+      group: seaworthy-publish-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-prepare
+          path: seaworthy-work
+      - if: needs.adopt-msi.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-adopted
+          path: seaworthy-work/adopted
+      - if: needs.adopt-msi.result != 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist
+          path: seaworthy-work/dist
+      - name: The repository tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends \
+            dpkg-dev createrepo-c pacman-package-manager libarchive-tools rpm
+          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy"
+      - name: The signing configuration (the repositories' OpenPGP key)
+        env:
+          SIGNING_TOML: ${{ inputs.signing-toml }}
+          SEAWORTHY_GH_OPENPGP_FINGERPRINT: ${{ inputs.openpgp-key-fingerprint }}
+          SEAWORTHY_OPENPGP_SECRET_KEY: ${{ secrets.OPENPGP_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SIGNING_TOML" ]; then
+            echo "SEAWORTHY_SIGNING=$SIGNING_TOML" >> "$GITHUB_ENV"
+          else
+            bash "$SEAWORTHY_WORK/scripts/github.sh" signing-toml "$RUNNER_TEMP/seaworthy-signing/signing.toml"
+          fi
+      - name: The repositories (seaworthy.sh repo)
+        env:
+          SEAWORTHY_PUBLISH: ${{ inputs.publish-toml }}
+          SEAWORTHY_OPENPGP_SECRET_KEY: ${{ secrets.OPENPGP_SECRET_KEY }}
+        run: bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" repo
+      - name: Publish (seaworthy.sh publish)
+        env:
+          SEAWORTHY_PUBLISH: ${{ inputs.publish-toml }}
+          SEAWORTHY_PUBLISH_DRY_RUN: ${{ inputs.publish-dry-run && '1' || '0' }}
+          SEAWORTHY_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          SEAWORTHY_S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          SEAWORTHY_S3_SESSION_TOKEN: ${{ secrets.S3_SESSION_TOKEN }}
+        run: bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" publish
+      - name: Remove the signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/seaworthy-signing"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-repo
+          path: seaworthy-work/repo/
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}
