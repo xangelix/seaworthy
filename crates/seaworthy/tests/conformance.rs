@@ -1343,12 +1343,25 @@ chmod 0755 /run/seaworthy-conformance-polkit.sh"#
             self.name()
         );
         let pid = self.show(&service, "MainPID").await;
-        let owner = self.host.ok(&format!("stat -c %U /proc/{pid}")).await;
+        // The process's real user, from its status: /proc/<pid>'s owner is
+        // root whenever the process isn't dumpable, whoever it runs as.
+        let owner = self
+            .host
+            .ok(&format!(
+                "id -nu \"$(sed -n 's/^Uid:[[:space:]]*\\([0-9]*\\).*/\\1/p' /proc/{pid}/status)\""
+            ))
+            .await;
         assert_eq!(
             owner.trim(),
             self.lane.product.user,
-            "{}: the service runs as its sandbox user",
-            self.name()
+            "{}: the service runs as its sandbox user ({})",
+            self.name(),
+            self.host
+                .ok(&format!(
+                    "grep -E '^(Uid|Gid|CapEff|NoNewPrivs):' /proc/{pid}/status; stat -c 'proc owner %U' /proc/{pid}"
+                ))
+                .await
+                .replace('\n', "; ")
         );
         self.assert_state_kept("a fresh install").await;
         let executable = &self.lane.product.executable;
