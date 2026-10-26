@@ -720,6 +720,13 @@ pub fn manifest_for_bytes(
 /// # or: secret-key-env = "REPO_KEY_ASC"   (an armored secret key, imported
 /// #     into a private throwaway gpg home for the run)
 /// key = "<fingerprint>"              # 40 or 64 hex characters
+///
+/// [apple]                            # macOS: Developer ID, then notarization
+/// identity = "Developer ID Application: Acme Inc (ABCDE12345)"   # or its SHA-1
+/// installer-identity = "Developer ID Installer: Acme Inc (ABCDE12345)"  # a pkg
+/// keychain = "build.keychain-db"     # optional: the keychain holding both
+/// notary-profile = "acme-notary"     # `xcrun notarytool store-credentials`' profile
+/// timeout-seconds = 1800             # notarization's wait (the default; at most 3000)
 /// ```
 ///
 /// A secret named by `key-env` or `secret-key-env` (a key held in a custody
@@ -742,6 +749,9 @@ pub struct SigningConfig {
     /// OpenPGP.
     #[serde(default)]
     pub openpgp: Option<OpenPgpConfig>,
+    /// Apple's Developer ID and notary service (macOS outputs).
+    #[serde(default)]
+    pub apple: Option<AppleConfig>,
 }
 
 impl SigningConfig {
@@ -763,6 +773,83 @@ impl SigningConfig {
             manifest: Vec::new(),
             authenticode: self.authenticode,
             openpgp: None,
+            apple: None,
+        })
+    }
+}
+
+/// `[apple]`: the Developer ID identities in a keychain, and the notary
+/// service's keychain profile (`xcrun notarytool store-credentials`). Names
+/// only: the identities' keys and the notary credentials stay in the
+/// keychain.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct AppleConfig {
+    /// The Developer ID Application identity: its common name
+    /// (`Developer ID Application: Acme Inc (ABCDE12345)`) or its
+    /// certificate's SHA-1.
+    pub identity: String,
+    /// The Developer ID Installer identity, which signs a pkg.
+    #[serde(default)]
+    pub installer_identity: Option<String>,
+    /// The keychain holding the identities and the profile.
+    #[serde(default)]
+    pub keychain: Option<PathBuf>,
+    /// The `notarytool` keychain profile.
+    pub notary_profile: String,
+    /// Notarization's wait (default 1800 s; at most 3000).
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl AppleConfig {
+    /// The signer, checked: identities `codesign` and `productbuild` take,
+    /// a profile name, a wait within bounds.
+    ///
+    /// # Errors
+    /// [`DistError::Sign`] naming the refused key.
+    pub fn developer_id(&self, base: &Path) -> Result<crate::macos::DeveloperId, DistError> {
+        if !crate::macos::is_identity(&self.identity, "Developer ID Application: ") {
+            return Err(DistError::Sign(
+                "[apple] identity: a Developer ID Application identity (\"Developer ID Application: <name> (<team>)\") or its certificate's SHA-1".to_owned(),
+            ));
+        }
+        if let Some(installer) = &self.installer_identity
+            && !crate::macos::is_identity(installer, "Developer ID Installer: ")
+        {
+            return Err(DistError::Sign(
+                "[apple] installer-identity: a Developer ID Installer identity (\"Developer ID Installer: <name> (<team>)\") or its certificate's SHA-1".to_owned(),
+            ));
+        }
+        let profile_ok = (1..=64).contains(&self.notary_profile.len())
+            && self
+                .notary_profile
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !profile_ok {
+            return Err(DistError::Sign(
+                "[apple] notary-profile: the name of a `notarytool store-credentials` keychain profile ([A-Za-z0-9._-], at most 64 characters)".to_owned(),
+            ));
+        }
+        let notary_timeout = match self.timeout_seconds {
+            None => crate::macos::DEFAULT_NOTARY_TIMEOUT,
+            Some(seconds) => {
+                let timeout = Duration::from_secs(seconds);
+                if seconds == 0 || timeout > crate::macos::MAX_NOTARY_TIMEOUT {
+                    return Err(DistError::Sign(format!(
+                        "[apple] timeout-seconds: 1 to {} seconds",
+                        crate::macos::MAX_NOTARY_TIMEOUT.as_secs()
+                    )));
+                }
+                timeout
+            }
+        };
+        Ok(crate::macos::DeveloperId {
+            identity: self.identity.clone(),
+            installer_identity: self.installer_identity.clone(),
+            keychain: self.keychain.as_ref().map(|k| beside(base, k, false)),
+            notary_profile: self.notary_profile.clone(),
+            notary_timeout,
         })
     }
 }
@@ -1028,10 +1115,16 @@ impl SigningConfig {
             },
         };
         let (openpgp, gpg) = self.openpgp_with(base, secrets)?;
+        let apple = self
+            .apple
+            .as_ref()
+            .map(|a| a.developer_id(base))
+            .transpose()?;
         Ok(crate::package::Signing {
             manifest: self.manifest_signers_with(base, secrets)?,
             authenticode,
             openpgp,
+            apple,
             osslsigncode,
             gpg,
             authenticode_only: false,

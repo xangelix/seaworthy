@@ -226,11 +226,18 @@ executable, `CFBundleShortVersionString` = `MAJOR.MINOR.PATCH`, `CFBundleVersion
   file, scripts that stop the service before an install and load the daemons after it, and an
   uninstaller at `Contents/Resources/uninstall`.
 
-Both tools are macOS's own, so macOS outputs package on a Mac (`--platforms macos`). The signature
-is ad hoc until Developer ID signing and notarization: Gatekeeper refuses a downloaded copy until a
-tester clears the quarantine (`xattr -dr com.apple.quarantine "/Applications/<name>.app"`), and the
-GitLab template keeps macOS outputs out of releases. A dmg isn't byte-reproducible (`hdiutil`
-writes timestamps and a UUID).
+Both tools are macOS's own, so macOS outputs package on a Mac (`--platforms macos`). Without a
+signer the signature is ad hoc: Gatekeeper refuses a downloaded copy until a tester clears the
+quarantine (`xattr -dr com.apple.quarantine "/Applications/<name>.app"`), and the GitLab template
+keeps macOS outputs out of releases. With `signing.toml`'s `[apple]` (and `defaults.apple.team-id`
+pinned), the bundle is **Developer ID-signed** from the inside out with the hardened runtime and a
+secure timestamp, every signature checked against Apple's Developer ID requirement for the pinned
+team; the dmg is signed, **notarized** (`xcrun notarytool submit --wait`), its ticket stapled
+(`xcrun stapler`), and Gatekeeper's assessment must accept it. A service's pkg is signed by the
+Developer ID Installer identity (`productbuild --sign`) and notarized the same way
+([configuration.md](configuration.md#signingtoml)). The ticket is stapled to the dmg or pkg, the
+outermost container; an app copied out of the dmg is checked against the notary service online.
+A dmg isn't byte-reproducible (`hdiutil` writes timestamps and a UUID).
 
 ### Release versions
 
@@ -287,6 +294,10 @@ secret unless you sign with a local key file. The full schema is in
   signature, and its timestamp, must verify to `[defaults.authenticode]`'s subject and trust
   anchors. A signed release with Windows outputs refuses to run without an Authenticode signer:
   unsigned executables under signed manifests are what SmartScreen, AppLocker and WDAC refuse.
+- **Developer ID** (`[apple]`): the macOS bundle, then the dmg or pkg, signed by the identities
+  in a keychain and notarized through a `notarytool` keychain profile; every signature checked
+  against `defaults.apple.team-id` and the result assessed as Gatekeeper will. A signed release
+  with macOS outputs refuses to run without it.
 - **OpenPGP** (`[openpgp]`): an embedded signature on every rpm and a detached `.sig` on every
   pacman package, by a key in a gpg home or an armored secret key handed over in the environment
   (`secret-key-env`) and imported into a private throwaway gpg home for the run. Every signature

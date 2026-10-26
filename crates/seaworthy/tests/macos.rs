@@ -1013,3 +1013,440 @@ fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
         )]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Developer ID signing and notarization
+//
+// macOS's own tools sign and notarize; here, off a Mac, stand-ins record
+// every call (one line each, arguments separated by `|`) and answer as the
+// real ones do, so the calls and their order are checked on every host.
+// The Mac runners' end-to-end lanes run the real tools.
+
+const TEAM: &str = "ABCDE12345";
+const IDENTITY: &str = "Developer ID Application: Acme Inc (ABCDE12345)";
+const INSTALLER: &str = "Developer ID Installer: Acme Inc (ABCDE12345)";
+
+/// Stand-ins for codesign, hdiutil, pkgbuild, productbuild, xcrun, spctl
+/// and pkgutil in `dir/bin`, logging to `dir/calls`. `xcrun notarytool
+/// submit` answers the status in `dir/notary-status` (default
+/// `Accepted`); `codesign --verify` with a requirement fails while
+/// `dir/wrong-team` exists.
+fn mac_stubs(dir: &Path) -> seaworthy::macos::Tools {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("calls");
+    let stub = |name: &str, body: &str| {
+        let path = bin.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/bash\n(IFS='|'; echo \"{name}|$*\") >> '{}'\n{body}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    // The file a creating tool writes is its last argument.
+    let create = "for last; do :; done; echo built > \"$last\"";
+    seaworthy::macos::Tools {
+        codesign: stub(
+            "codesign",
+            &format!(
+                "case \" $* \" in *\" --test-requirement \"*) [ ! -e '{}' ] || {{ echo 'test-requirement: code failed to satisfy specified code requirement(s)' >&2; exit 3; }} ;; esac\nexit 0",
+                dir.join("wrong-team").display()
+            ),
+        ),
+        hdiutil: stub("hdiutil", create),
+        pkgbuild: stub("pkgbuild", create),
+        productbuild: stub("productbuild", create),
+        xcrun: stub(
+            "xcrun",
+            &format!(
+                "status=Accepted; [ ! -e '{status}' ] || status=$(cat '{status}')\n\
+                 case \"$1 $2\" in\n\
+                 'notarytool submit') echo \"{{\\\"id\\\":\\\"2efe2717-52ef-43a5-96dc-0797e4ca1041\\\",\\\"status\\\":\\\"$status\\\",\\\"message\\\":\\\"Processing complete\\\"}}\" ;;\n\
+                 'notarytool log') echo '{{\"issues\":[{{\"message\":\"The binary is not signed with a valid Developer ID certificate.\"}}]}}' ;;\n\
+                 esac\nexit 0",
+                status = dir.join("notary-status").display()
+            ),
+        ),
+        spctl: stub("spctl", "exit 0"),
+        pkgutil: stub(
+            "pkgutil",
+            &format!(
+                "printf 'Package \"x.pkg\":\\n   Status: signed by a developer certificate issued by Apple for distribution\\n   Certificate Chain:\\n    1. {INSTALLER}\\n       Expires: 2030-01-01\\n    2. Developer ID Certification Authority\\n'"
+            ),
+        ),
+    }
+}
+
+fn calls(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn developer_id(dir: &Path) -> seaworthy::macos::DeveloperId {
+    seaworthy::macos::DeveloperId {
+        identity: IDENTITY.to_owned(),
+        installer_identity: Some(INSTALLER.to_owned()),
+        keychain: Some(dir.join("build.keychain-db")),
+        notary_profile: "acme-notary".to_owned(),
+        notary_timeout: std::time::Duration::from_secs(1800),
+    }
+}
+
+/// `[defaults.apple] team-id`, `macos.entitlements` and `signing.toml`'s
+/// `[apple]` are checked when they load.
+#[test]
+fn developer_id_settings_are_validated() {
+    let pinned = DESKTOP.replace(
+        "[product.viewer]",
+        "[defaults.apple]\nteam-id = \"ABCDE12345\"\n\n[product.viewer]",
+    );
+    let ok = config(&pinned).unwrap();
+    assert_eq!(ok.defaults.apple.as_ref().unwrap().team_id, TEAM);
+    for team in ["abcde12345", "ABCDE1234", "ABCDE-2345", "ABCDE123456"] {
+        refused(
+            &pinned.replace("ABCDE12345", team),
+            "defaults.apple.team-id",
+        );
+    }
+    let entitled = DESKTOP.replace(
+        "category = \"public.app-category.utilities\"",
+        "category = \"public.app-category.utilities\"\nentitlements = \"macos/app.entitlements\"",
+    );
+    assert_eq!(
+        config(&entitled).unwrap().products["viewer"]
+            .macos
+            .as_ref()
+            .unwrap()
+            .entitlements
+            .as_deref(),
+        Some(Path::new("macos/app.entitlements"))
+    );
+    for bad in ["../app.plist", "/etc/app.plist", "macos/app.xml"] {
+        refused(
+            &entitled.replace("macos/app.entitlements", bad),
+            "macos.entitlements",
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let parse = |text: &str| -> Result<seaworthy::macos::DeveloperId, String> {
+        let path = dir.path().join("signing.toml");
+        std::fs::write(&path, text).unwrap();
+        let (file, base) =
+            seaworthy::sign::SigningConfig::load(&path).map_err(|e| e.to_string())?;
+        file.apple
+            .unwrap()
+            .developer_id(&base)
+            .map_err(|e| e.to_string())
+    };
+    let good = format!(
+        "[apple]\nidentity = \"{IDENTITY}\"\ninstaller-identity = \"{INSTALLER}\"\nkeychain = \"ci.keychain-db\"\nnotary-profile = \"acme-notary\"\n"
+    );
+    let id = parse(&good).unwrap();
+    assert_eq!(id.identity, IDENTITY);
+    assert_eq!(
+        id.keychain.as_deref(),
+        Some(dir.path().join("ci.keychain-db").as_path())
+    );
+    assert_eq!(id.notary_timeout, seaworthy::macos::DEFAULT_NOTARY_TIMEOUT);
+    // A certificate's SHA-1 names an identity too.
+    let sha1 = good.replace(IDENTITY, "0123456789ABCDEF0123456789abcdef01234567");
+    assert!(parse(&sha1).is_ok());
+    for (from, to, why) in [
+        (
+            IDENTITY,
+            "Apple Development: Acme (ABCDE12345)",
+            "[apple] identity",
+        ),
+        (INSTALLER, IDENTITY, "[apple] installer-identity"),
+        ("acme-notary", "acme notary", "[apple] notary-profile"),
+        (
+            "notary-profile = \"acme-notary\"\n",
+            "notary-profile = \"acme-notary\"\ntimeout-seconds = 3001\n",
+            "[apple] timeout-seconds",
+        ),
+        (
+            "notary-profile = \"acme-notary\"\n",
+            "notary-profile = \"acme-notary\"\ntimeout-seconds = 0\n",
+            "[apple] timeout-seconds",
+        ),
+    ] {
+        let err = parse(&good.replace(from, to)).unwrap_err();
+        assert!(err.contains(why), "{to}: {err}");
+    }
+    // The profile is required: notarization isn't optional.
+    let err = parse(&good.replace("notary-profile = \"acme-notary\"\n", "")).unwrap_err();
+    assert!(err.contains("notary-profile"), "{err}");
+}
+
+/// With a Developer ID every Mach-O, then the bundle, is signed with the
+/// identity, the hardened runtime and a secure timestamp (the entitlements
+/// on the bundle's main executable alone), each signature checked against
+/// the Developer ID requirement for the pinned team; the disk image is
+/// signed, checked, notarized, stapled, validated and assessed, in that
+/// order. Ad hoc stays as it was.
+#[test]
+fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = mac_stubs(dir.path());
+    let id = developer_id(dir.path());
+    let bundle = dir.path().join("Acme Viewer.app");
+    let core = bundle.join("Contents/Frameworks/libacme_core_apple-m1.dylib");
+    std::fs::create_dir_all(core.parent().unwrap()).unwrap();
+    std::fs::write(&core, b"core").unwrap();
+    let entitlements = dir.path().join("entitlements.plist");
+    let signer = seaworthy::macos::MacSigner::DeveloperId {
+        id: &id,
+        team_id: TEAM,
+        entitlements: Some(&entitlements),
+    };
+    seaworthy::macos::sign_bundle(&tools, &bundle, std::slice::from_ref(&core), &signer).unwrap();
+    let dmg = dir.path().join("acme-viewer.dmg");
+    seaworthy::macos::build_dmg(
+        &tools,
+        &bundle,
+        "Acme Viewer",
+        &dmg,
+        &dir.path().join("work"),
+        &signer,
+    )
+    .unwrap();
+    let keychain = id.keychain.as_ref().unwrap().display().to_string();
+    let requirement = seaworthy::macos::developer_id_requirement(TEAM);
+    assert!(requirement.contains("certificate leaf[subject.OU] = \"ABCDE12345\""));
+    assert!(requirement.contains("certificate leaf[field.1.2.840.113635.100.6.1.13] exists"));
+    let (core, bundle, dmg) = (core.display(), bundle.display(), dmg.display());
+    let want = [
+        format!(
+            "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|{core}"
+        ),
+        format!(
+            "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|--entitlements|{}|{bundle}",
+            entitlements.display()
+        ),
+        format!("codesign|--verify|--strict|--test-requirement|{requirement}|{core}"),
+        format!("codesign|--verify|--strict|--deep|--test-requirement|{requirement}|{bundle}"),
+    ];
+    let seen = calls(dir.path());
+    assert_eq!(seen[..4], want, "{seen:#?}");
+    assert!(
+        seen[4].starts_with("hdiutil|create|-volname|Acme Viewer|"),
+        "{seen:#?}"
+    );
+    assert_eq!(
+        seen[5..],
+        [
+            format!("codesign|--force|--sign|{IDENTITY}|--timestamp|--keychain|{keychain}|{dmg}"),
+            format!("codesign|--verify|--strict|--test-requirement|{requirement}|{dmg}"),
+            format!(
+                "xcrun|notarytool|submit|{dmg}|--keychain-profile|acme-notary|--keychain|{keychain}|--wait|--timeout|1800s|--output-format|json"
+            ),
+            format!("xcrun|stapler|staple|{dmg}"),
+            format!("xcrun|stapler|validate|{dmg}"),
+            format!(
+                "spctl|--assess|--type|open|--context|context:primary-signature|--verbose|{dmg}"
+            ),
+        ],
+        "{seen:#?}"
+    );
+
+    // Ad hoc: no identity, timestamp, runtime, requirement or notary.
+    std::fs::remove_file(dir.path().join("calls")).unwrap();
+    let adhoc = seaworthy::macos::MacSigner::AdHoc;
+    let bundle_path = dir.path().join("Acme Viewer.app");
+    seaworthy::macos::sign_bundle(&tools, &bundle_path, &[], &adhoc).unwrap();
+    assert_eq!(
+        calls(dir.path()),
+        [
+            format!("codesign|--force|--sign|-|--timestamp=none|{bundle}"),
+            format!("codesign|--verify|--strict|--deep|{bundle}"),
+        ]
+    );
+}
+
+/// A signature another team made fails the requirement: refused by name,
+/// before anything is notarized. A rejected notarization names the
+/// service's log, and nothing is stapled.
+#[test]
+fn another_team_s_signature_and_a_rejected_notarization_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = mac_stubs(dir.path());
+    let id = developer_id(dir.path());
+    let bundle = dir.path().join("Acme Viewer.app");
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    let signer = seaworthy::macos::MacSigner::DeveloperId {
+        id: &id,
+        team_id: TEAM,
+        entitlements: None,
+    };
+    std::fs::write(dir.path().join("wrong-team"), "").unwrap();
+    let err = seaworthy::macos::sign_bundle(&tools, &bundle, &[], &signer)
+        .unwrap_err()
+        .to_string();
+    std::fs::remove_file(dir.path().join("wrong-team")).unwrap();
+    assert!(
+        err.contains("not signed by a Developer ID Application identity of team ABCDE12345"),
+        "{err}"
+    );
+
+    let dmg = dir.path().join("acme-viewer.dmg");
+    std::fs::write(dir.path().join("notary-status"), "Invalid").unwrap();
+    let err = seaworthy::macos::build_dmg(
+        &tools,
+        &bundle,
+        "Acme Viewer",
+        &dmg,
+        &dir.path().join("work"),
+        &signer,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("didn't accept"), "{err}");
+    assert!(err.contains("status Invalid"), "{err}");
+    assert!(
+        err.contains("not signed with a valid Developer ID certificate"),
+        "the service's log: {err}"
+    );
+    let seen = calls(dir.path());
+    assert!(
+        seen.iter().any(|c| c.starts_with("xcrun|notarytool|log|2efe2717-52ef-43a5-96dc-0797e4ca1041|--keychain-profile|acme-notary")),
+        "{seen:#?}"
+    );
+    assert!(!seen.iter().any(|c| c.contains("stapler")), "{seen:#?}");
+}
+
+/// A service's pkg: `productbuild` signs it with the Developer ID Installer
+/// identity, `pkgutil` must show that identity of the pinned team leading
+/// the chain, then it's notarized, stapled and assessed for install.
+/// Without an installer identity nothing runs.
+#[test]
+fn a_developer_id_signs_and_notarizes_a_service_s_pkg() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = mac_stubs(dir.path());
+    let mut id = developer_id(dir.path());
+    let bundle = dir.path().join("Acme Agent.app");
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    let names = seaworthy::macos::PkgNames {
+        display_name: "Acme Agent".to_owned(),
+        identifier: "com.example.acme.agent".to_owned(),
+        bundle: "/Applications/Acme Agent.app".to_owned(),
+        service: "AcmeAgent".to_owned(),
+        helper: None,
+        support: "/Library/Application Support/Acme/Agent".into(),
+        logs: "/Library/Logs/Acme/Agent".into(),
+    };
+    let pkg = dir.path().join("acme-agent.pkg");
+    let build = |id: &seaworthy::macos::DeveloperId| {
+        seaworthy::macos::build_pkg(
+            &tools,
+            &names,
+            &bundle,
+            &[],
+            "1.4.0",
+            "11.0",
+            &pkg,
+            &dir.path().join("work"),
+            &seaworthy::macos::MacSigner::DeveloperId {
+                id,
+                team_id: TEAM,
+                entitlements: None,
+            },
+        )
+    };
+    build(&id).unwrap();
+    let keychain = id.keychain.as_ref().unwrap().display().to_string();
+    let pkg_shown = pkg.display();
+    let seen = calls(dir.path());
+    let productbuild = seen
+        .iter()
+        .find(|c| c.starts_with("productbuild|"))
+        .unwrap();
+    assert!(
+        productbuild.ends_with(&format!(
+            "|--sign|{INSTALLER}|--timestamp|--keychain|{keychain}|{pkg_shown}"
+        )),
+        "{productbuild}"
+    );
+    let after: Vec<&String> = seen
+        .iter()
+        .skip_while(|c| !c.starts_with("productbuild|"))
+        .skip(1)
+        .collect();
+    assert_eq!(
+        after,
+        [
+            &format!("pkgutil|--check-signature|{pkg_shown}"),
+            &format!(
+                "xcrun|notarytool|submit|{pkg_shown}|--keychain-profile|acme-notary|--keychain|{keychain}|--wait|--timeout|1800s|--output-format|json"
+            ),
+            &format!("xcrun|stapler|staple|{pkg_shown}"),
+            &format!("xcrun|stapler|validate|{pkg_shown}"),
+            &format!("spctl|--assess|--type|install|--verbose|{pkg_shown}"),
+        ]
+    );
+    std::fs::remove_file(dir.path().join("calls")).unwrap();
+    id.installer_identity = None;
+    let err = build(&id).unwrap_err().to_string();
+    assert!(err.contains("installer-identity"), "{err}");
+    assert!(calls(dir.path()).is_empty(), "nothing ran");
+}
+
+/// `package --signing`: `[apple]` needs the pinned team, and a signed
+/// release of macOS outputs needs `[apple]` (checked before anything is
+/// packaged, on any host).
+#[test]
+fn a_signed_macos_release_needs_the_developer_id_and_its_team() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("seaworthy.toml"), DESKTOP).unwrap();
+    std::fs::write(
+        dir.path().join("signing.toml"),
+        format!("[apple]\nidentity = \"{IDENTITY}\"\nnotary-profile = \"acme-notary\"\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
+    let package = |dir: &Path| {
+        seaworthy(
+            dir,
+            &[
+                "package",
+                "--artifacts",
+                "artifacts",
+                "--out",
+                "dist",
+                "--release",
+                "1.4.0",
+                "--sequence",
+                "7",
+                "--platforms",
+                "macos",
+                "--signing",
+                "signing.toml",
+            ],
+        )
+    };
+    let out = package(dir.path());
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("pins no Developer ID team: set defaults.apple.team-id"),
+        "{}",
+        said(&out)
+    );
+    std::fs::write(dir.path().join("signing.toml"), "").unwrap();
+    let out = package(dir.path());
+    assert!(!out.status.success());
+    assert!(
+        said(&out)
+            .contains("product viewer ships macOS outputs (dmg) but signing.toml has no [apple]"),
+        "{}",
+        said(&out)
+    );
+}

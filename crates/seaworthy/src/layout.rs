@@ -714,6 +714,18 @@ fn inside(dir: &Path, relative: &Path) -> Result<PathBuf, DistError> {
     Ok(resolved)
 }
 
+/// A file `seaworthy.toml` names (`relative`, already checked for `..`):
+/// read once, a regular file inside `seaworthy.toml`'s directory and no
+/// link, as data files and icons are read.
+///
+/// # Errors
+/// As data files: [`DistError::Layout`] for a link, a file outside the
+/// directory, a special file, a file past the size limit or one carrying
+/// executable code; [`DistError::Io`].
+pub(crate) fn read_project_file(dir: &Path, relative: &Path) -> Result<Vec<u8>, DistError> {
+    read_data(&inside(dir, relative)?)
+}
+
 /// `seaworthy.toml`'s directory (`.` for a config parsed from text).
 fn base_dir(dir: &Path) -> &Path {
     if dir.as_os_str().is_empty() {

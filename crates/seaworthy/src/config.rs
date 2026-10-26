@@ -100,6 +100,11 @@ pub struct Defaults {
     /// sign with Authenticode.
     #[serde(default)]
     pub authenticode: Option<AuthenticodeIdentity>,
+    /// The Apple developer team whose Developer ID signs the macOS
+    /// outputs: every Developer ID signature is checked against it.
+    /// Required to sign with `signing.toml`'s `[apple]`.
+    #[serde(default)]
+    pub apple: Option<AppleIdentity>,
     /// The OpenPGP public key files package managers trust
     /// (ASCII-armored public key blocks, relative to `seaworthy.toml`): every rpm
     /// and pacman signature must verify against one of them alone, here
@@ -230,6 +235,27 @@ pub struct AuthenticodeIdentity {
     /// Signing's chains and Microsoft's timestamps both end in Microsoft
     /// Identity Verification Root Certificate Authority 2020.
     pub trust: PathBuf,
+}
+
+/// `[defaults.apple]`: who may Developer ID-sign the macOS outputs.
+/// Pinned by team, not by certificate: Developer ID certificates are
+/// renewed (and an app's identity survives them) while the team stays.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct AppleIdentity {
+    /// The team identifier every Developer ID signature must carry
+    /// (`codesign --display` prints it as `TeamIdentifier`): ten
+    /// characters of `[A-Z0-9]`.
+    pub team_id: String,
+}
+
+/// Whether `text` is an Apple team identifier: ten of `[A-Z0-9]`.
+#[must_use]
+pub fn is_team_id(text: &str) -> bool {
+    text.len() == 10
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// A release-manifest signature algorithm.
@@ -540,6 +566,13 @@ pub struct Macos {
     /// `LSApplicationCategoryType` (`public.app-category.utilities`).
     #[serde(default)]
     pub category: Option<String>,
+    /// The entitlements a Developer ID signature gives the app (an XML
+    /// property list, relative to `seaworthy.toml`): the hardened
+    /// runtime's exceptions it needs, such as
+    /// `com.apple.security.cs.allow-jit`. Signed into the main executable
+    /// alone; an ad hoc signature carries none.
+    #[serde(default)]
+    pub entitlements: Option<PathBuf>,
 }
 
 /// `[product.<id>.desktop]`: what a desktop app shows people.
@@ -1452,6 +1485,14 @@ impl Config {
                     .to_owned(),
             ));
         }
+        if let Some(apple) = &d.apple
+            && !is_team_id(&apple.team_id)
+        {
+            return Err(DistError::Config(format!(
+                "defaults.apple.team-id {:?} must be an Apple team identifier (ten of [A-Z0-9])",
+                apple.team_id
+            )));
+        }
         if !is_windows_name(&d.vendor) {
             return Err(DistError::Config(format!(
                 "defaults.vendor {:?} must be a directory name ([A-Za-z0-9][A-Za-z0-9._-]*)",
@@ -1802,6 +1843,21 @@ impl Config {
                     && extension_of(icon) != "icns"
                 {
                     return Err(at("macos.icon", "an .icns file"));
+                }
+                if let Some(entitlements) = &macos.entitlements
+                    && (!is_relative_path(entitlements)
+                        || !matches!(
+                            extension_of(entitlements).as_str(),
+                            "plist" | "entitlements"
+                        ))
+                {
+                    return Err(at(
+                        "macos.entitlements",
+                        &format!(
+                            "{} must be a .plist or .entitlements path relative to seaworthy.toml (no `..`, no `$`)",
+                            entitlements.display()
+                        ),
+                    ));
                 }
                 if let Some(category) = &macos.category
                     && !category

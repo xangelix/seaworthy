@@ -12,13 +12,26 @@
 //! too. Both tools are macOS's own, so `package` builds a dmg on a Mac
 //! only ([`Tools::find`]).
 //!
-//! The signature is **ad hoc** (`codesign --sign -`): Apple Silicon runs
-//! only signed code, and an ad hoc signature runs anywhere the copy wasn't
-//! quarantined. Gatekeeper refuses a downloaded one until Developer ID
-//! signing and notarization; testers clear the quarantine
-//! (`xattr -dr com.apple.quarantine <App>.app`). No hardened runtime yet:
-//! its library validation would refuse the ad hoc cores the launcher
-//! loads.
+//! Without a signer the signature is **ad hoc** (`codesign --sign -`):
+//! Apple Silicon runs only signed code, and an ad hoc signature runs
+//! anywhere the copy wasn't quarantined. Gatekeeper refuses a downloaded
+//! one; testers clear the quarantine (`xattr -dr com.apple.quarantine
+//! <App>.app`). No hardened runtime then: its library validation would
+//! refuse the ad hoc cores the launcher loads.
+//!
+//! With a **Developer ID** ([`DeveloperId`], `signing.toml`'s `[apple]`),
+//! every Mach-O in the bundle and then the bundle itself are signed with
+//! the identity, the hardened runtime (`--options runtime`; library
+//! validation accepts the cores, which carry the same team's signature)
+//! and a secure timestamp, the product's `macos.entitlements` on the main
+//! executable alone; each signature must satisfy the Developer ID
+//! requirement for `seaworthy.toml`'s `defaults.apple.team-id`
+//! ([`developer_id_requirement`]). The disk image is signed the same way,
+//! submitted to Apple's notary service (`xcrun notarytool submit --wait`
+//! with the `[apple]` keychain profile), its ticket stapled (`xcrun stapler`)
+//! and the result assessed as Gatekeeper will (`spctl --assess`). A
+//! service's pkg is signed by the Developer ID Installer identity
+//! (`productbuild --sign`), notarized, stapled and assessed likewise.
 //!
 //! A disk image isn't byte-reproducible (`hdiutil` writes timestamps and a
 //! UUID). The files inside it are, and the listing names the image by its
@@ -40,6 +53,7 @@
 //! `macos-minimum` or later, the startup volume only). Unsigned until
 //! Developer ID Installer signing; `sudo installer -pkg` installs it.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -60,6 +74,86 @@ pub const ICON_FILE: &str = "AppIcon.icns";
 /// How long one `codesign` or `hdiutil` run may take.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// How long Apple's notary service may take by default (`[apple]`
+/// `timeout-seconds`): 30 minutes.
+pub const DEFAULT_NOTARY_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// The longest notarization wait `[apple]` may set: the process runner's
+/// limit, less ten minutes for the upload.
+pub const MAX_NOTARY_TIMEOUT: Duration = Duration::from_secs(3000);
+
+/// The time `notarytool submit` gets beyond its own wait: the upload.
+const NOTARY_UPLOAD: Duration = Duration::from_secs(600);
+
+/// A Developer ID signer (`signing.toml`'s `[apple]`): the identities in
+/// the keychain that sign, and the notary service's credentials, which
+/// `xcrun notarytool store-credentials` keeps in a keychain profile
+/// (never in a file or on a command line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeveloperId {
+    /// The Developer ID Application identity: its common name
+    /// (`Developer ID Application: Acme Inc (ABCDE12345)`) or its
+    /// certificate's SHA-1 (40 hex characters).
+    pub identity: String,
+    /// The Developer ID Installer identity, which signs a pkg.
+    pub installer_identity: Option<String>,
+    /// The keychain holding the identities and the profile (default: the
+    /// user's search list).
+    pub keychain: Option<PathBuf>,
+    /// The `notarytool` keychain profile.
+    pub notary_profile: String,
+    /// How long notarization may take.
+    pub notary_timeout: Duration,
+}
+
+/// What signs a bundle and its container on a Mac: ad hoc, or a
+/// Developer ID with the team its signatures must carry and the product's
+/// entitlements.
+#[derive(Debug, Clone, Copy)]
+pub enum MacSigner<'a> {
+    /// `codesign --sign -`: no identity, no hardened runtime, no
+    /// notarization.
+    AdHoc,
+    /// A Developer ID.
+    DeveloperId {
+        /// The signer.
+        id: &'a DeveloperId,
+        /// `seaworthy.toml`'s `defaults.apple.team-id`.
+        team_id: &'a str,
+        /// The main executable's entitlements (a staged copy of
+        /// `macos.entitlements`).
+        entitlements: Option<&'a Path>,
+    },
+}
+
+/// The code requirement every Developer ID Application signature must
+/// satisfy (Apple's own for notarized Developer ID code): Apple's anchor,
+/// the Developer ID intermediate (OID 1.2.840.113635.100.6.2.6), a
+/// Developer ID Application leaf (1.2.840.113635.100.6.1.13), issued to
+/// `team_id`.
+#[must_use]
+pub fn developer_id_requirement(team_id: &str) -> String {
+    format!(
+        "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+         and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+         and certificate leaf[subject.OU] = \"{team_id}\""
+    )
+}
+
+/// Whether `text` names a codesign identity `[apple]` accepts: `prefix`
+/// and a plain name (`Developer ID Application: Acme Inc (ABCDE12345)`),
+/// or a certificate's SHA-1 (40 hex characters).
+#[must_use]
+pub fn is_identity(text: &str, prefix: &str) -> bool {
+    let sha1 = text.len() == 40 && text.bytes().all(|b| b.is_ascii_hexdigit());
+    let named = text.len() <= 256
+        && text
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.trim().is_empty())
+        && !text.chars().any(char::is_control);
+    sha1 || named
+}
+
 /// The app bundle's directory name: `<Display Name>.app`.
 #[must_use]
 pub fn bundle_name(product: &Product) -> String {
@@ -77,11 +171,18 @@ pub struct Tools {
     pub pkgbuild: PathBuf,
     /// `productbuild`.
     pub productbuild: PathBuf,
+    /// `xcrun` (`notarytool`, `stapler`; a Developer ID only).
+    pub xcrun: PathBuf,
+    /// `spctl` (Gatekeeper's assessment; a Developer ID only).
+    pub spctl: PathBuf,
+    /// `pkgutil` (a signed pkg's check; a Developer ID only).
+    pub pkgutil: PathBuf,
 }
 
 impl Tools {
-    /// macOS's own `codesign`, `hdiutil`, `pkgbuild` and `productbuild`
-    /// (`/usr/bin`); `None` on any other system.
+    /// macOS's own `codesign`, `hdiutil`, `pkgbuild`, `productbuild` and
+    /// `xcrun` (`/usr/bin`), `spctl` and `pkgutil` (`/usr/sbin`); `None` on
+    /// any other system.
     #[must_use]
     pub fn find() -> Option<Self> {
         if !cfg!(target_os = "macos") {
@@ -92,12 +193,18 @@ impl Tools {
             hdiutil: PathBuf::from("/usr/bin/hdiutil"),
             pkgbuild: PathBuf::from("/usr/bin/pkgbuild"),
             productbuild: PathBuf::from("/usr/bin/productbuild"),
+            xcrun: PathBuf::from("/usr/bin/xcrun"),
+            spctl: PathBuf::from("/usr/sbin/spctl"),
+            pkgutil: PathBuf::from("/usr/sbin/pkgutil"),
         };
         [
             &tools.codesign,
             &tools.hdiutil,
             &tools.pkgbuild,
             &tools.productbuild,
+            &tools.xcrun,
+            &tools.spctl,
+            &tools.pkgutil,
         ]
         .iter()
         .all(|tool| tool.is_file())
@@ -443,11 +550,15 @@ fn write_mode(path: &Path, text: &str, mode: u32) -> Result<(), DistError> {
 /// install path, the `daemons` in `/Library/LaunchDaemons`, 0644), the
 /// scripts, `pkgbuild` into a component package (identifier and
 /// `version`), then `productbuild` with [`distribution`]. Staged in
-/// `work`.
+/// `work`. With a Developer ID, `productbuild` signs it with the Developer
+/// ID Installer identity, and it's notarized, stapled and assessed as
+/// Gatekeeper will install it; without one it stays unsigned.
 ///
 /// # Errors
-/// [`DistError::Io`] staging; [`DistError::Tool`] when `pkgbuild` or
-/// `productbuild` fails.
+/// [`DistError::Io`] staging; [`DistError::Tool`] when `pkgbuild`,
+/// `productbuild` or a notarization tool fails; [`DistError::Sign`] for a
+/// Developer ID without an installer identity, a pkg signed by another
+/// team, or one Gatekeeper wouldn't install.
 #[allow(clippy::too_many_arguments)]
 pub fn build_pkg(
     tools: &Tools,
@@ -458,7 +569,21 @@ pub fn build_pkg(
     minimum: &str,
     pkg: &Path,
     work: &Path,
+    signer: &MacSigner<'_>,
 ) -> Result<(), DistError> {
+    let installer = match signer {
+        MacSigner::AdHoc => None,
+        MacSigner::DeveloperId { id, team_id, .. } => Some((
+            id,
+            *team_id,
+            id.installer_identity.as_deref().ok_or_else(|| {
+                DistError::Sign(
+                    "a Developer ID-signed pkg needs [apple]'s installer-identity (a Developer ID Installer identity)"
+                        .to_owned(),
+                )
+            })?,
+        )),
+    };
     let staging = work.join("pkg");
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(|e| DistError::io(&staging, e))?;
@@ -504,18 +629,52 @@ pub fn build_pkg(
         &distribution(names, version, minimum),
         0o644,
     )?;
-    run(
-        &tools.productbuild,
-        &[
-            "--distribution".as_ref(),
-            distribution_xml.as_os_str(),
-            "--package-path".as_ref(),
-            packages.as_os_str(),
-            pkg.as_os_str(),
-        ],
-        "productbuild",
-    )?;
+    let mut args: Vec<&std::ffi::OsStr> = vec![
+        "--distribution".as_ref(),
+        distribution_xml.as_os_str(),
+        "--package-path".as_ref(),
+        packages.as_os_str(),
+    ];
+    if let Some((id, _, identity)) = &installer {
+        args.extend([
+            OsStr::new("--sign"),
+            OsStr::new(identity),
+            OsStr::new("--timestamp"),
+        ]);
+        if let Some(keychain) = &id.keychain {
+            args.extend([OsStr::new("--keychain"), keychain.as_os_str()]);
+        }
+    }
+    args.push(pkg.as_os_str());
+    run(&tools.productbuild, &args, "productbuild")?;
     std::fs::remove_dir_all(&staging).map_err(|e| DistError::io(&staging, e))?;
+    if let Some((id, team_id, _)) = installer {
+        check_installer_signature(tools, pkg, team_id)?;
+        notarize(tools, id, pkg)?;
+        assess(tools, pkg, &["--type", "install"])?;
+    }
+    Ok(())
+}
+
+/// A pkg's signature (`pkgutil --check-signature`): a Developer ID
+/// Installer certificate of `team_id` must lead its chain.
+fn check_installer_signature(tools: &Tools, pkg: &Path, team_id: &str) -> Result<(), DistError> {
+    let shown = run(
+        &tools.pkgutil,
+        &["--check-signature".as_ref(), pkg.as_os_str()],
+        "pkgutil --check-signature",
+    )?;
+    let leaf = shown
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("1. "))
+        .unwrap_or_default();
+    if !(leaf.starts_with("Developer ID Installer:") && leaf.ends_with(&format!("({team_id})"))) {
+        return Err(DistError::Sign(format!(
+            "{}: not signed by a Developer ID Installer identity of team {team_id} (defaults.apple.team-id); pkgutil shows {leaf:?}",
+            pkg.display()
+        )));
+    }
     Ok(())
 }
 
@@ -600,41 +759,180 @@ fn run(tool: &Path, args: &[&std::ffi::OsStr], what: &str) -> Result<String, Dis
     crate::process::run_ok(&mut command, what, TOOL_TIMEOUT)
 }
 
-/// Signs a staged bundle ad hoc, from the inside out: each of `nested` (the
-/// cores, the helper), then the bundle, which signs its main executable and
-/// seals everything else; then checks the result (`codesign --verify
-/// --deep --strict`).
+/// `codesign --sign` of `target` by `signer`: ad hoc without a timestamp,
+/// or a Developer ID with a secure timestamp, the hardened runtime when
+/// `runtime` (code, never a disk image), and `entitlements` when given.
+fn codesign(
+    tools: &Tools,
+    signer: &MacSigner<'_>,
+    target: &Path,
+    runtime: bool,
+    entitlements: Option<&Path>,
+) -> Result<(), DistError> {
+    let mut args: Vec<&std::ffi::OsStr> = vec!["--force".as_ref(), "--sign".as_ref()];
+    match signer {
+        MacSigner::AdHoc => args.extend([OsStr::new("-"), OsStr::new("--timestamp=none")]),
+        MacSigner::DeveloperId { id, .. } => {
+            args.extend([OsStr::new(&id.identity), OsStr::new("--timestamp")]);
+            if runtime {
+                args.extend([OsStr::new("--options"), OsStr::new("runtime")]);
+            }
+            if let Some(keychain) = &id.keychain {
+                args.extend([OsStr::new("--keychain"), keychain.as_os_str()]);
+            }
+            if let Some(entitlements) = entitlements {
+                args.extend([OsStr::new("--entitlements"), entitlements.as_os_str()]);
+            }
+        }
+    }
+    args.push(target.as_os_str());
+    run(&tools.codesign, &args, "codesign").map(drop)
+}
+
+/// `codesign --verify --strict` of `target` (`--deep` for a bundle) and,
+/// for a Developer ID, its signature against the Developer ID requirement
+/// for the pinned team.
+fn verify_signature(
+    tools: &Tools,
+    signer: &MacSigner<'_>,
+    target: &Path,
+    deep: bool,
+) -> Result<(), DistError> {
+    let requirement = match signer {
+        MacSigner::AdHoc => None,
+        MacSigner::DeveloperId { team_id, .. } => Some(developer_id_requirement(team_id)),
+    };
+    let mut args: Vec<&std::ffi::OsStr> = vec!["--verify".as_ref(), "--strict".as_ref()];
+    if deep {
+        args.push("--deep".as_ref());
+    }
+    if let Some(requirement) = &requirement {
+        args.extend([OsStr::new("--test-requirement"), OsStr::new(requirement)]);
+    }
+    args.push(target.as_os_str());
+    run(&tools.codesign, &args, "codesign --verify").map_err(|e| match signer {
+        MacSigner::AdHoc => e,
+        MacSigner::DeveloperId { team_id, .. } => DistError::Sign(format!(
+            "{}: not signed by a Developer ID Application identity of team {team_id} (defaults.apple.team-id): {e}",
+            target.display()
+        )),
+    })?;
+    Ok(())
+}
+
+/// Signs a staged bundle from the inside out: each of `nested` (the cores,
+/// the helper, the sidecars), then the bundle, which signs its main
+/// executable and seals everything else; then checks the result
+/// (`codesign --verify --deep --strict`, and for a Developer ID every
+/// signature against the Developer ID requirement for the pinned team).
 ///
 /// # Errors
 /// [`DistError::Tool`] when `codesign` fails, or the signed bundle doesn't
-/// verify.
-pub fn sign_bundle(tools: &Tools, bundle: &Path, nested: &[PathBuf]) -> Result<(), DistError> {
-    let sign = |target: &Path| {
-        run(
-            &tools.codesign,
-            &[
-                "--force".as_ref(),
-                "--sign".as_ref(),
-                "-".as_ref(),
-                "--timestamp=none".as_ref(),
-                target.as_os_str(),
-            ],
-            "codesign",
-        )
-    };
+/// verify; [`DistError::Sign`] for a signature by another team or another
+/// kind of identity.
+pub fn sign_bundle(
+    tools: &Tools,
+    bundle: &Path,
+    nested: &[PathBuf],
+    signer: &MacSigner<'_>,
+) -> Result<(), DistError> {
     for code in nested {
-        sign(code)?;
+        codesign(tools, signer, code, true, None)?;
     }
-    sign(bundle)?;
+    let entitlements = match signer {
+        MacSigner::AdHoc => None,
+        MacSigner::DeveloperId { entitlements, .. } => *entitlements,
+    };
+    codesign(tools, signer, bundle, true, entitlements)?;
+    if matches!(signer, MacSigner::DeveloperId { .. }) {
+        for code in nested {
+            verify_signature(tools, signer, code, false)?;
+        }
+    }
+    verify_signature(tools, signer, bundle, true)
+}
+
+/// Submits `file` (a signed disk image or pkg) to Apple's notary service
+/// and waits for its verdict, then staples the ticket to it and checks the
+/// staple. A rejection names the service's log.
+///
+/// # Errors
+/// [`DistError::Sign`] when the service doesn't accept it (with its log),
+/// [`DistError::Tool`] when `notarytool` or `stapler` fails or answers
+/// something unreadable.
+pub fn notarize(tools: &Tools, id: &DeveloperId, file: &Path) -> Result<(), DistError> {
+    let timeout = format!("{}s", id.notary_timeout.as_secs());
+    let mut credentials: Vec<&std::ffi::OsStr> =
+        vec!["--keychain-profile".as_ref(), id.notary_profile.as_ref()];
+    if let Some(keychain) = &id.keychain {
+        credentials.extend([OsStr::new("--keychain"), keychain.as_os_str()]);
+    }
+    let mut args: Vec<&std::ffi::OsStr> = vec!["notarytool".as_ref(), "submit".as_ref()];
+    args.push(file.as_os_str());
+    args.extend(credentials.iter().copied());
+    args.extend([
+        OsStr::new("--wait"),
+        OsStr::new("--timeout"),
+        OsStr::new(&timeout),
+        OsStr::new("--output-format"),
+        OsStr::new("json"),
+    ]);
+    let deadline = id.notary_timeout.saturating_add(NOTARY_UPLOAD);
+    let mut command = Command::new(&tools.xcrun);
+    command.args(&args);
+    let finished = crate::process::run(&mut command, "notarytool submit", None, deadline, 1 << 20)?;
+    let answer: serde_json::Value = serde_json::from_slice(&finished.stdout).map_err(|_| {
+        DistError::Tool(format!(
+            "notarytool submit {}: no JSON answer (exit {}): {}",
+            file.display(),
+            finished.status,
+            finished.shown()
+        ))
+    })?;
+    let status = answer.get("status").and_then(serde_json::Value::as_str);
+    let submission = answer.get("id").and_then(serde_json::Value::as_str);
+    if status != Some("Accepted") || !finished.status.success() {
+        // The service's own account of the rejection, when it got that far.
+        let log = submission
+            .filter(|s| s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+            .map(|submission| {
+                let mut args: Vec<&std::ffi::OsStr> =
+                    vec!["notarytool".as_ref(), "log".as_ref(), submission.as_ref()];
+                args.extend(credentials.iter().copied());
+                let mut command = Command::new(&tools.xcrun);
+                command.args(&args);
+                crate::process::run(&mut command, "notarytool log", None, TOOL_TIMEOUT, 64 << 10)
+                    .map(|log| {
+                        String::from_utf8_lossy(&log.stdout)
+                            .chars()
+                            .filter(|c| !c.is_control() || *c == '\n')
+                            .take(4000)
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        return Err(DistError::Sign(format!(
+            "Apple's notary service didn't accept {} (status {}, submission {}): {}",
+            file.display(),
+            status.unwrap_or("none"),
+            submission.unwrap_or("none"),
+            if log.is_empty() {
+                finished.shown()
+            } else {
+                log
+            }
+        )));
+    }
     run(
-        &tools.codesign,
-        &[
-            "--verify".as_ref(),
-            "--deep".as_ref(),
-            "--strict".as_ref(),
-            bundle.as_os_str(),
-        ],
-        "codesign --verify",
+        &tools.xcrun,
+        &["stapler".as_ref(), "staple".as_ref(), file.as_os_str()],
+        "stapler staple",
+    )?;
+    run(
+        &tools.xcrun,
+        &["stapler".as_ref(), "validate".as_ref(), file.as_os_str()],
+        "stapler validate",
     )?;
     Ok(())
 }
@@ -665,17 +963,21 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), DistError> {
 
 /// Builds `dmg` from the signed `bundle`: a compressed (UDZO) HFS+ image
 /// named `volume`, holding the app and a link to `/Applications`, staged
-/// in `work`; then signs the image ad hoc.
+/// in `work`; then signs the image (ad hoc, or with the Developer ID,
+/// then notarized, stapled and assessed as Gatekeeper will open it).
 ///
 /// # Errors
-/// [`DistError::Io`] staging; [`DistError::Tool`] when `hdiutil` or
-/// `codesign` fails.
+/// [`DistError::Io`] staging; [`DistError::Tool`] when `hdiutil`,
+/// `codesign` or a notarization tool fails; [`DistError::Sign`] when the
+/// image's signature or notarization isn't the Developer ID's, or
+/// Gatekeeper wouldn't open it.
 pub fn build_dmg(
     tools: &Tools,
     bundle: &Path,
     volume: &str,
     dmg: &Path,
     work: &Path,
+    signer: &MacSigner<'_>,
 ) -> Result<(), DistError> {
     let staging = work.join("dmg");
     if staging.exists() {
@@ -705,18 +1007,31 @@ pub fn build_dmg(
         ],
         "hdiutil create",
     )?;
-    run(
-        &tools.codesign,
-        &[
-            "--force".as_ref(),
-            "--sign".as_ref(),
-            "-".as_ref(),
-            "--timestamp=none".as_ref(),
-            dmg.as_os_str(),
-        ],
-        "codesign",
-    )?;
     std::fs::remove_dir_all(&staging).map_err(|e| DistError::io(&staging, e))?;
+    codesign(tools, signer, dmg, false, None)?;
+    if let MacSigner::DeveloperId { id, .. } = signer {
+        verify_signature(tools, signer, dmg, false)?;
+        notarize(tools, id, dmg)?;
+        assess(
+            tools,
+            dmg,
+            &["--type", "open", "--context", "context:primary-signature"],
+        )?;
+    }
+    Ok(())
+}
+
+/// Gatekeeper's verdict on `file` (`spctl --assess`): accepted, or an error.
+fn assess(tools: &Tools, file: &Path, kind: &[&str]) -> Result<(), DistError> {
+    let mut args: Vec<&std::ffi::OsStr> = vec!["--assess".as_ref()];
+    args.extend(kind.iter().map(std::ffi::OsStr::new));
+    args.extend([OsStr::new("--verbose"), file.as_os_str()]);
+    run(&tools.spctl, &args, "spctl --assess").map_err(|e| {
+        DistError::Sign(format!(
+            "Gatekeeper refuses {} (notarized and stapled, still refused): {e}",
+            file.display()
+        ))
+    })?;
     Ok(())
 }
 

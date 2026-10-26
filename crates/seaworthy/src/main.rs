@@ -817,6 +817,39 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                             }
                         }
                     }
+                    // The same for macOS: a signed release's app is
+                    // Developer ID-signed and notarized, which Gatekeeper
+                    // requires of a download; the team is pinned.
+                    if signing.apple.is_some() && config.defaults.apple.is_none() {
+                        return Err(DistError::Sign(format!(
+                            "{} has [apple], but seaworthy.toml pins no Developer ID team: set defaults.apple.team-id",
+                            path.display()
+                        ))
+                        .into());
+                    }
+                    if signing.apple.is_none() && !args.authenticode_only {
+                        for id in &selected {
+                            let macos: Vec<&str> = config
+                                .products
+                                .get(id)
+                                .map(|p| {
+                                    p.outputs
+                                        .iter()
+                                        .filter(|o| o.is_macos())
+                                        .map(|o| o.name())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !macos.is_empty() {
+                                return Err(DistError::Sign(format!(
+                                    "product {id} ships macOS outputs ({}) but {} has no [apple]: a signed release signs its app with a Developer ID and notarizes it — add [apple] and pin defaults.apple, or package macOS unsigned (no --signing)",
+                                    macos.join(", "),
+                                    path.display()
+                                ))
+                                .into());
+                            }
+                        }
+                    }
                     signing
                 }
                 None => {

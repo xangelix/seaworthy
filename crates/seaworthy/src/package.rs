@@ -95,6 +95,10 @@ pub struct Signing {
     pub authenticode: Option<Box<dyn crate::codesign::AuthenticodeSigner>>,
     /// OpenPGP for the rpm and pacman packages.
     pub openpgp: Option<Box<dyn crate::codesign::OpenPgpSigner>>,
+    /// Apple's Developer ID for the macOS bundle and its disk image or
+    /// pkg, then notarization (`seaworthy.toml`'s `defaults.apple` pins the
+    /// team). Without it the macOS outputs are signed ad hoc.
+    pub apple: Option<crate::macos::DeveloperId>,
     /// The osslsigncode that checks Authenticode signatures against
     /// `seaworthy.toml`'s pins; default `osslsigncode` on `PATH`.
     pub osslsigncode: Option<PathBuf>,
@@ -116,7 +120,10 @@ impl Signing {
     /// Whether any signer is configured.
     #[must_use]
     pub fn is_signed(&self) -> bool {
-        !self.manifest.is_empty() || self.authenticode.is_some() || self.openpgp.is_some()
+        !self.manifest.is_empty()
+            || self.authenticode.is_some()
+            || self.openpgp.is_some()
+            || self.apple.is_some()
     }
 
     /// Whether this is a release's signing (`package --signing`, not a dev
@@ -144,6 +151,7 @@ impl std::fmt::Debug for Signing {
                 &self.authenticode.as_ref().map(|s| s.describe()),
             )
             .field("openpgp", &self.openpgp.as_ref().map(|s| s.describe()))
+            .field("apple", &self.apple)
             .field("osslsigncode", &self.osslsigncode)
             .field("gpg", &self.gpg)
             .field("authenticode_only", &self.authenticode_only)
@@ -357,8 +365,24 @@ pub fn package(
             &pins,
         )?;
     }
-    // The macOS bundle: its Info.plist, then signed ad hoc — on a Mac only.
+    // The macOS bundle: its Info.plist, then signed (ad hoc, or with the
+    // Developer ID of the pinned team) — on a Mac only.
     let mac_tools = crate::macos::Tools::find();
+    let team_id = match &signing.apple {
+        Some(_) => Some(
+            config
+                .defaults
+                .apple
+                .as_ref()
+                .map(|a| a.team_id.as_str())
+                .ok_or_else(|| {
+                    DistError::Sign(
+                        "[apple] signs with a Developer ID, but seaworthy.toml pins no team: set defaults.apple.team-id".to_owned(),
+                    )
+                })?,
+        ),
+        None => None,
+    };
     if product.outputs.iter().any(|o| o.is_macos())
         && let Some(macos) = layouts
             .iter_mut()
@@ -376,7 +400,23 @@ pub fn package(
                     .join(", ")
             ))
         })?;
-        prepare_macos(config, product, &options.release, macos, tools)?;
+        // The entitlements a Developer ID signature carries: read once,
+        // from seaworthy.toml's directory, into a copy beside the tree.
+        let entitlements = match (
+            &signing.apple,
+            product.macos.as_ref().and_then(|m| m.entitlements.as_ref()),
+        ) {
+            (Some(_), Some(path)) => Some(stage_entitlements(config, path, macos)?),
+            _ => None,
+        };
+        prepare_macos(
+            config,
+            product,
+            &options.release,
+            macos,
+            tools,
+            &mac_signer(signing.apple.as_ref(), team_id, entitlements.as_deref()),
+        )?;
     }
     let layouts = layouts;
     let layout_for = |triple: &str| {
@@ -513,6 +553,7 @@ pub fn package(
                     &product.display_name,
                     &path,
                     &work,
+                    &mac_signer(signing.apple.as_ref(), team_id, None),
                 )?;
                 artifacts.push(artifact(Kind::Dmg, path)?);
             }
@@ -531,6 +572,7 @@ pub fn package(
                     &config.defaults.macos_minimum,
                     &path,
                     &work,
+                    &mac_signer(signing.apple.as_ref(), team_id, None),
                 )?;
                 artifacts.push(artifact(Kind::Pkg, path)?);
             }
@@ -1275,8 +1317,52 @@ fn prepare_windows(
     crate::layout::write_manifest(layout)
 }
 
+/// The macOS signer: the Developer ID with its pinned team (and the main
+/// executable's entitlements), or ad hoc without one.
+fn mac_signer<'a>(
+    apple: Option<&'a crate::macos::DeveloperId>,
+    team_id: Option<&'a str>,
+    entitlements: Option<&'a Path>,
+) -> crate::macos::MacSigner<'a> {
+    match (apple, team_id) {
+        (Some(id), Some(team_id)) => crate::macos::MacSigner::DeveloperId {
+            id,
+            team_id,
+            entitlements,
+        },
+        _ => crate::macos::MacSigner::AdHoc,
+    }
+}
+
+/// `macos.entitlements`, read once from `seaworthy.toml`'s directory (a
+/// regular file inside it, as data files are read) and checked to be an
+/// XML property list, copied beside the macOS tree (outside the bundle, so
+/// its seal never covers it) for `codesign`. Returns the copy's path.
+fn stage_entitlements(
+    config: &Config,
+    relative: &Path,
+    layout: &Layout,
+) -> Result<PathBuf, DistError> {
+    let bytes = crate::layout::read_project_file(&config.dir, relative)?;
+    let text = std::str::from_utf8(&bytes).unwrap_or_default();
+    let body = text.trim_start_matches('\u{feff}').trim_start();
+    if !body.starts_with("<?xml") || !body.contains("<plist") || !body.contains("</plist>") {
+        return Err(DistError::Layout(format!(
+            "{}: not an XML property list (macos.entitlements)",
+            relative.display()
+        )));
+    }
+    let dir = layout.tree.parent().ok_or_else(|| {
+        DistError::Layout(format!("{} has no parent directory", layout.tree.display()))
+    })?;
+    let staged = dir.join("entitlements.plist");
+    write(&staged, &bytes)?;
+    Ok(staged)
+}
+
 /// Completes the macOS bundle in place: writes `Contents/Info.plist`,
-/// signs the bundle ad hoc from the inside out (`crate::macos`), checks
+/// signs the bundle from the inside out (`crate::macos`: ad hoc, or with
+/// the Developer ID `signer` names), checks
 /// every signed binary still carries its record, lists the plist and the
 /// signature seal with the bundle's files, and rewrites `layout.json`.
 fn prepare_macos(
@@ -1285,6 +1371,7 @@ fn prepare_macos(
     release: &Release,
     layout: &mut Layout,
     tools: &crate::macos::Tools,
+    signer: &crate::macos::MacSigner<'_>,
 ) -> Result<(), DistError> {
     use crate::layout::{File, Role};
     let bundle = layout.tree.join(crate::macos::bundle_name(product));
@@ -1329,7 +1416,7 @@ fn prepare_macos(
         .filter(|f| matches!(f.role, Role::Core { .. } | Role::Helper | Role::Sidecar))
         .map(|f| f.staged.clone())
         .collect();
-    crate::macos::sign_bundle(tools, &bundle, &nested)?;
+    crate::macos::sign_bundle(tools, &bundle, &nested, signer)?;
     let seal = bundle
         .join("Contents")
         .join("_CodeSignature")

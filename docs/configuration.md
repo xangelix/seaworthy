@@ -112,6 +112,14 @@ while the identity and its CA stay:
 | `subject` | The signing certificate's subject exactly as `osslsigncode verify` prints it: RFC 2253 form, the last RDN first (`O=Acme,CN=Acme Code Signing`). |
 | `trust` | A PEM file of the trust anchors the signer's chain, and its timestamp's, must verify to. |
 
+`[defaults.apple]` pins who may Developer ID-sign the macOS outputs (required to sign with
+`signing.toml`'s `[apple]`). It pins the team, not the certificate: Developer ID certificates are
+renewed while the team stays.
+
+| Key | Meaning |
+|---|---|
+| `team-id` | The Apple team identifier every Developer ID signature must carry (ten of `[A-Z0-9]`, as `codesign --display` prints `TeamIdentifier`). Each signature `package` makes is checked against Apple's Developer ID requirement for this team. |
+
 `[defaults.repository]` (optional) is where the packages are published:
 
 | Key | Meaning |
@@ -214,6 +222,7 @@ and nothing else):
 | `bundle-id` | `CFBundleIdentifier`, reverse-DNS (`com.example.acme.viewer`). Required and never derived: macOS keys an app's permissions, preferences and notarization to it, so it must never change. |
 | `icon` | The app icon (`.icns`). |
 | `category` | `LSApplicationCategoryType` (`public.app-category.utilities`). |
+| `entitlements` | An XML property list (`.plist` or `.entitlements`, relative to `seaworthy.toml`) of the entitlements a Developer ID signature gives the main executable: the hardened runtime's exceptions the app needs (`com.apple.security.cs.allow-jit`, …). Ad hoc signatures carry none. |
 
 `[[product.<id>.files]]`: a data file, or a directory with everything below it, installed under the
 install root (data only: see [packaging.md](packaging.md#layout)):
@@ -254,6 +263,12 @@ timeout-seconds = 600
 [openpgp]                             # rpm (embedded) and pacman (.sig)
 secret-key-env = "ACME_PACKAGES_KEY_ASC"   # an armored, unprotected secret key in this variable
 key = "<the key's 40- or 64-hex fingerprint>"
+
+[apple]                               # macOS: Developer ID signing, then notarization
+identity = "Developer ID Application: Acme Inc (ABCDE12345)"
+installer-identity = "Developer ID Installer: Acme Inc (ABCDE12345)"   # a service's pkg
+keychain = "/Users/runner/acme-build.keychain-db"
+notary-profile = "acme-notary"
 ```
 
 `[[manifest]]`, one per algorithm in `release-signatures`:
@@ -289,6 +304,24 @@ key = "<the key's 40- or 64-hex fingerprint>"
 | `secret-key-file` | Or: a file holding the armored secret key. For the CI test keys only (public test keys kept in the repository), never a real key. |
 | `gpg`, `rpmsign` | The binaries (default `gpg`, `rpmsign`). |
 | `timeout-seconds` | One signature's deadline (default 600; at most 3600). |
+
+`[apple]`, on a Mac (`package --platforms macos`):
+
+| Key | Meaning |
+|---|---|
+| `identity` | The Developer ID Application identity in the keychain: its common name (`Developer ID Application: <name> (<team>)`) or its certificate's SHA-1 (40 hex characters). Required. |
+| `installer-identity` | The Developer ID Installer identity, which signs a service's pkg (required for a pkg). |
+| `keychain` | The keychain holding the identities and the notary profile (default: the user's search list). |
+| `notary-profile` | The `xcrun notarytool store-credentials` profile holding the notary service's credentials (an App Store Connect API key, or an Apple ID with an app-specific password), kept in the keychain, never in a file `seaworthy` reads. Required: a Developer ID-signed download that isn't notarized is refused by Gatekeeper anyway. |
+| `timeout-seconds` | How long notarization may take (default 1800; at most 3000). |
+
+With `[apple]`, every Mach-O in the bundle and then the bundle are signed with the identity, the
+hardened runtime and a secure timestamp (`macos.entitlements` on the main executable), and every
+signature must satisfy Apple's Developer ID requirement for `defaults.apple.team-id`. The dmg (or
+the pkg, signed by the installer identity) is then signed, notarized (`notarytool submit --wait`;
+a rejection reports the service's log), its ticket stapled and validated, and Gatekeeper's
+assessment (`spctl --assess`) must accept it. A signed release (`--signing`) with macOS outputs
+refuses to run without `[apple]`. Dev builds (`--authenticode-only`) never use it.
 
 Variables named by `key-env` and `secret-key-env` are taken out of the process environment before any
 tool runs; a variable the command needs that's unset or empty stops the run. `repo` uses only
