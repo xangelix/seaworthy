@@ -84,8 +84,9 @@
 //! `dpkg-scanpackages`, `createrepo_c` and `repo-add` from `PATH`.
 //! `--previous` is the last publication's plan: no immutable file it lists
 //! may get other bytes, the indexes must be newer, and no release may be
-//! older than its (by sequence) without `--allow-older` (a deliberate
-//! rollback, which the plan records for `publish`). `--date` is the
+//! older than its (by version, then sequence, as clients order releases)
+//! without `--allow-older` (a deliberate rollback, which the plan records
+//! for `publish`). `--date` is the
 //! indexes' date (default: now; never in the future, which apt refuses).
 //!
 //! `publish` uploads what `repo` built (`--repo`, its `publish-plan.json`)

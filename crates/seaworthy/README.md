@@ -54,7 +54,7 @@ seaworthy glibc-check      [--floor X.Y] FILE…
 | `verify` | Checks the built artifacts against the configuration and reports every finding at once. |
 | `layout` | `verify`, then each platform's install tree, stripped, with `layout.json`. |
 | `package` | `verify` and `layout`, then every output, signed with `--signing`, listed in `packages.json`. |
-| `adopt-msi` | Takes back an MSI WiX built on Windows from `package`'s `.wxs`: payload checked against the signed tree, signed, listed. |
+| `adopt-msi` | Takes back an MSI WiX built on Windows from `package`'s `.wxs`: payload checked against the signed tree, its security-relevant tables against the `.wxs`, signed, listed. |
 | `repo` | Every product's release as signed APT, DNF and pacman repositories, the release tree and `publish-plan.json`. |
 | `publish` | Uploads what `repo` built to an S3-compatible store (feature `publish-s3`, on by default). |
 | `build-plan` | The build steps one target triple needs: the launcher and helper once, the core per CPU target. |
@@ -149,9 +149,10 @@ for tree in seaworthy::layout::layout(
     each release as the clients will, signs the indexes, and, given the last publication's plan,
     refuses a build that would give an immutable path other bytes or isn't newer.
 12. **The bucket is the truth.** `publish` checks everything before it uploads anything, uploads
-    immutable files create-only, the indexes after them and the plan last, reads every upload back,
-    fetches the result through the public URL, and prunes only files no published plan has
-    referenced for the retention period.
+    immutable files create-only, the indexes after them and the plan last (only over the version it
+    read), reads every upload back by the store's checksum or its bytes, fetches the result through
+    the public URL, and prunes only files no published plan has referenced for the retention
+    period, never a file from before its first plan there.
 
 The details are in [docs/packaging.md](../../docs/packaging.md).
 
@@ -167,6 +168,7 @@ The details are in [docs/packaging.md](../../docs/packaging.md).
 | `DESKTOP_FILE_VALIDATE` | `package` | The menu-entry validator (default `desktop-file-validate`, when on `PATH`). |
 | `SEAWORTHY_S3_ACCESS_KEY_ID`, `SEAWORTHY_S3_SECRET_ACCESS_KEY`, `SEAWORTHY_S3_SESSION_TOKEN` | `publish` | The store's credentials (the session token optional); never read from a file, never printed. |
 | variables named by `signing.toml` | `package`, `adopt-msi`, `repo` | Keys a custody system hands over (`key-env`, `secret-key-env`), taken out of the environment before any tool runs. |
+| `SEAWORTHY_TOOL_ENV` | every command running tools | More variable names (comma- or space-separated) the packaging tools get beside the system's own; never a `SEAWORTHY_*`, `ACTIONS_*`, `AZURE_*` or `AWS_*` one or a CI token, which only signing commands see. |
 | `SEAWORTHY_REQUIRE_PACKAGE_TOOLS` | the tests | `1` turns a missing packaging tool (nFPM, dpkg, rpm, WiX, osslsigncode, …) from a loud skip into a failure. |
 | `SEAWORTHY_BLESS` | the tests | `1` rewrites the golden files. |
 

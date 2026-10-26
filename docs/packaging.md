@@ -216,10 +216,26 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
 With `SEAWORTHY_WIX` naming WiX v5.0.2, `package` builds the MSI itself. Otherwise a Windows runner
 builds it from the `.wxs` (`wix build -arch x64 -bindpath tree=<tree> -o <name>.msi <name>.wxs`, then
 `wix msi validate`), and **`seaworthy adopt-msi`** takes it back: the MSI must carry exactly the
-signed Windows tree, byte for byte, at the release's ProductVersion and the product's UpgradeCode;
-then it's signed with the same signers, its manifest and SBOM are written, and it joins
-`packages.json`. The check catches an MSI that isn't the release's; the Windows runner, which builds
-the binaries that are signed, is trusted for the MSI's tables.
+signed Windows tree, byte for byte, at the release's ProductVersion and the product's UpgradeCode,
+and its security-relevant tables must be exactly what the `.wxs` declares (read with msitools'
+`msiinfo export -s`, compared by what each row resolves to, never by the ids a tool chose):
+
+- every custom action (its type, source and command line), service (name, account, start type,
+  type, error control, arguments and the binary it runs), service control, registry value,
+  `MsiLockPermissionsEx` descriptor (the directory or service it's on, and its SDDL) and shortcut
+  (folder, name, target, arguments, working directory): no row more, none less, none other;
+- every sequence action is a standard action (never `ForceReboot` or `ScheduleReboot`) or a custom
+  action the `.wxs` schedules in that sequence, on its condition;
+- no row in a table a seaworthy MSI never uses (`Binary`, `SelfReg`, `MsiEmbeddedChainer`,
+  `MsiEmbeddedUI`, COM and file-type registrations, `Environment`, INI files, `MoveFile`,
+  `DuplicateFile`, `RemoveFile`, ODBC, `LockPermissions`, the service failure-action tables,
+  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode;
+- a `.wxs` with an element the check doesn't model (a WiX extension's, `Environment`, …) is
+  refused, so the check grows with the `.wxs`, never behind it.
+
+Then it's signed with the same signers, its manifest and SBOM are written, and it joins
+`packages.json`. The Windows runner still builds the binaries that are signed, so it's trusted for a
+Windows release; the checks keep its MSI from doing more than the release declares.
 
 The Group Policy templates define two machine policies under `HKLM\SOFTWARE\Policies\<Vendor>\…`:
 `UpdatePolicy` (`auto`, `notify`, `off`), which overrides the MSI's default, and `Server`, the
@@ -306,7 +322,19 @@ secret unless you sign with a local key file. The full schema is in
   (`{file}`, `{description}`), such as `scripts/ci/azure-sign.sh` for Azure Artifact Signing. Every
   signature, and its timestamp, must verify to `[defaults.authenticode]`'s subject and trust
   anchors. A signed release with Windows outputs refuses to run without an Authenticode signer:
-  unsigned executables under signed manifests are what SmartScreen, AppLocker and WDAC refuse.
+  unsigned executables under signed manifests are what SmartScreen, AppLocker and WDAC refuse. A
+  sidecar that arrives already signed keeps its signature only when it verifies to that same pinned
+  identity; one signed by anyone else (a vendor's redistributable) is refused: ship it unsigned and
+  seaworthy signs it.
+- **The programs it runs**: packaging and checking tools (nFPM, strip, WiX, msitools, gpg, rpmsign,
+  osslsigncode, the repository and macOS tools) start with an allowlisted environment (the
+  system's variables: the path, home and temporary directories, locale, proxies, Windows' folders;
+  never a `SEAWORTHY_*`, `ACTIONS_*`, `AZURE_*` or `AWS_*` variable or a CI token).
+  `SEAWORTHY_TOOL_ENV` names more variables a site's tools need (never one of those). Signing
+  commands (`[[manifest]]` and `[authenticode]` `command`s) inherit the environment, less the keys
+  `key-env` and `secret-key-env` hand over, and are the only programs given the runner's OIDC
+  request token and cloud credentials. An OpenPGP key behind a gpg-agent that needs cloud
+  credentials has its agent started by the custody wrapper beforehand.
 - **Developer ID** (`[apple]`): the macOS bundle, then the dmg or pkg, signed by the identities
   in a keychain and notarized through a `notarytool` keychain profile; every signature checked
   against `defaults.apple.team-id` and the result assessed as Gatekeeper will. A signed release
@@ -370,7 +398,9 @@ CI test build are refused.
 - **`--previous publish-plan.json`**: the last publication's plan. No immutable path may get other
   bytes (a retried pipeline that re-signed a published version token is refused), the indexes'
   date must move forward (apt silently keeps a `Release` that's newer than the one it's offered),
-  and no release may be older than the last one's by sequence.
+  and no release may be older than the last one's, ordered as clients order releases: by version,
+  then sequence (a maintenance release of an older line cut later, 1.2.1 after 1.3.0, is older
+  whatever its sequence).
 - **`--allow-older`**: a deliberate rollback (the older release's packages published again, dated
   now); the plan records it for `publish`.
 - **`--date`**: the indexes' date (default now; never in the future, which apt refuses).
@@ -404,27 +434,35 @@ what `repo` built to an S3-compatible store, under `publish.toml`'s prefix. The 
    file against the plan (nothing unplanned, every path under the repository's own directories), the
    repository package's URL against `public-url`, the published plans (the current one and the
    history in `plans/`) for this repository and an older date (an identical current plan means
-   already published), and every immutable path against the bucket by the SHA-256 `publish` stored
-   as its metadata (else the store's checksum, else its bytes, read under a deadline sized by the
-   object and never past its stated size): present with the same bytes, it's skipped; with other
-   bytes, the publication is refused.
+   already published) and no older release by (version, sequence); no path any of those plans
+   published as immutable gets other bytes or another class (the plans outlive pruning, so a pruned
+   path is never republished with other bytes); and every immutable path against the bucket by the
+   store's own checksum of the object (`x-amz-checksum-sha256`), else its bytes, read under a
+   deadline sized by the object and never past its stated size (never the `x-amz-meta-sha256`
+   metadata `publish` writes beside it, which whoever writes the bucket sets): present with the same
+   bytes, it's skipped; with other bytes, the publication is refused.
 2. **Then, in order:** the missing immutable files, create-only (`If-None-Match: *`) with
    `Cache-Control: public, max-age=31536000, immutable`; the plan into `plans/` (from here on it may
    be live); the indexes in the plan's order with a short `max-age` (`index-max-age-seconds`,
-   default 60); and last `publish-plan.json`, after checking no other publication moved it meanwhile.
+   default 60); and last `publish-plan.json`, after checking no other publication moved it meanwhile,
+   written with `If-Match` on the version read at the start (create-only when there was none).
    Every upload carries its SHA-256, which the store verifies, and is read back at once: its size,
-   SHA-256 metadata, `Content-Type` and `Cache-Control` must be what was sent.
-3. **Afterwards**, every index, every release manifest and the plan are fetched back through
-   `public-url` (with a cache-busting query) and compared byte for byte. Every transfer, upload,
-   read or fetch-back, has a deadline of two minutes plus its size at 256 KiB/s.
+   `Content-Type` and `Cache-Control` must be what was sent, and its bytes that SHA-256 (the
+   store's checksum, else read and hashed).
+3. **Afterwards**, every index, every release manifest, every file this run uploaded (packages
+   included) and the plan are fetched back through `public-url` (with a cache-busting query) and
+   compared byte for byte. Every transfer, upload, read or fetch-back, has a deadline of two minutes
+   plus its size at 256 KiB/s.
 4. **Pruning:** a file the current plan doesn't list is deleted once the retention period
    (`retention-days`, default 30) has passed since the plan after the last one listing it went live;
-   a file no plan ever listed, since it was written. Only keys under the repository's own
-   directories are ever deleted, and `plans/` is kept. A pruning failure is reported apart (exit 1
-   after the publication is reported) and doesn't undo the publication; `--no-prune` skips it.
+   a file no plan ever listed, since it was written, unless it predates the first plan in `plans/`
+   (on a first publication into a non-empty prefix, every such file): that's not this publisher's,
+   never deleted, only named. Only keys under the repository's own directories are ever deleted,
+   and `plans/` is kept. A pruning failure is reported apart (exit 1 after the publication is
+   reported) and doesn't undo the publication; `--no-prune` skips it.
 
 `--dry-run` checks everything (the files, the store, the public URL) and reports what would be
-uploaded and deleted, uploading and deleting nothing. A failed publication is re-run as is: files
+uploaded and pruned, uploading and deleting nothing. A failed publication is re-run as is: files
 already up are skipped, and the indexes and the pointer go up. Run one publication at a time (a CI
 resource group): create-only uploads stop two writers from overwriting each other's immutable files,
 but two plans racing for the indexes would interleave.
