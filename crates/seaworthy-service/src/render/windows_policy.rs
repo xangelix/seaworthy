@@ -191,13 +191,14 @@ pub(crate) fn install_dir_sddl(account_sid: Option<&str>) -> String {
 /// The security descriptor of a packaged directory under `%ProgramData%`:
 /// owner SYSTEM (`O:SY`), and a protected DACL of SYSTEM + Administrators
 /// full and OWNER RIGHTS read-control only (`OW`, inherited). ProgramData
-/// lets any user create a directory, so one can exist, owned by that user,
-/// before the installer applies this. The installer takes the owner back
-/// (an untrusted owner would make the update helper refuse its
-/// staging directory, and the service its state, a denial of service), and
-/// the OWNER RIGHTS entry strips an owner's implicit `WRITE_DAC` in any
-/// case, so a squatter can't re-grant themselves anything, on the directory
-/// or on anything planted inside it.
+/// lets any user create a directory, so one can exist, owned by that user
+/// and filled, before the installer applies this. The seaworthy CLI's MSI
+/// applies it through the launcher's guard, by handle: the owner taken
+/// back, and the install refused when anything below holds a reparse
+/// point or an object someone else owns or may write (a lock on a folder
+/// doesn't reach a child with its own protected DACL). The OWNER RIGHTS
+/// entry strips an owner's implicit `WRITE_DAC`, so whoever owns the
+/// folder can't re-grant themselves anything on it.
 pub(crate) fn programdata_dir_sddl() -> String {
     format!("O:SY{}(A;OICI;RC;;;OW)", created_dir_sddl())
 }

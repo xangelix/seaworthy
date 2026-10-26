@@ -14,7 +14,7 @@
 //!   must be no reparse point, owned by SYSTEM, Administrators,
 //!   TrustedInstaller or the service's own account (the process token's
 //!   user: `NT SERVICE\<name>` for a virtual account), and writable by no
-//!   one else. [`crate::run_windows_service`] runs this on the MSI's state
+//!   one else. `run_windows_service` runs this on the MSI's state
 //!   directory before `init` (a service installed under
 //!   `%ProgramFiles%\<Vendor>\<Directory>`), failing the start as a fatal
 //!   error.
