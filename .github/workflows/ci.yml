@@ -480,7 +480,7 @@ jobs:
       - name: Install linters (pinned, SHA-256 verified)
         run: scripts/ci/install-tool.sh actionlint zizmor shellcheck
       - name: shellcheck
-        run: shellcheck scripts/*.sh scripts/ci/*.sh
+        run: shellcheck -x scripts/*.sh scripts/ci/*.sh scripts/lib/*.sh
       - name: actionlint
         run: actionlint
       # Online audits (impostor commits, known-vulnerable actions, stale
