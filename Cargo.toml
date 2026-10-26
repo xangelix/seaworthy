@@ -45,7 +45,7 @@ futures-util = { version = "0.3.34", default-features = false }
 hex = "0.4.3"
 libc = "0.2.189"
 miniz_oxide = "0.8.9"
-object = { version = "0.37.3", default-features = false }
+object = { version = "0.40.0", default-features = false }
 quick-xml = "0.42.0"
 # The lab's throwaway CA (seaworthy-lab): X.509 encoding only, no crypto
 # backend of its own (every key and signature is seaworthy-crypto's).
