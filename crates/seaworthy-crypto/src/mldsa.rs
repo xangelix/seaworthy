@@ -14,8 +14,16 @@
 //!   an approved service (EdDSA, FIPS 186-5), on the validated AWS-LC 3
 //!   certificate too (see [`crate::fips_policy`]).
 //!
-//! Public keys are validated ([`validate_public_key`]) at intake and inside
-//! [`verify`]: an all-zero `t1` would let anyone forge.
+//! **Public keys.** FIPS 204 defines no public-key validation: any 2592
+//! bytes are a key to the verifier, and many of them (an all-zero `t1`, a
+//! single non-zero coefficient, every coefficient 512, ...) verify a
+//! signature anyone can compute from public data. [`validate_public_key`]
+//! runs seaworthy's intake test, at intake and inside every [`verify`]: it
+//! refuses those known forgery classes and any key whose forgeability is
+//! measurable (the `intake` module documents the test and its false-reject
+//! bound). It is defense in depth: trust only keys from your own
+//! `seaworthy keygen` or HSM, or from their holder over an authenticated
+//! channel.
 //!
 //! Key custody: the 32-byte seed ([`SigningKey::from_seed`]) is the root
 //! secret; compromise of the seed is compromise of the key. That is also
@@ -28,6 +36,8 @@ use aws_lc_rs::signature::{
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
+
+mod intake;
 
 /// Seed length in bytes (FIPS 204: all ML-DSA variants use 32-byte seeds).
 pub const SEED_LEN: usize = 32;
@@ -123,42 +133,43 @@ impl SigningKey {
     }
 }
 
-/// The seed-of-`A` prefix (`ρ`) of a raw public key; the rest is `t1`.
-const RHO_LEN: usize = 32;
-
 /// Validate a raw ML-DSA-87 public key at INTAKE (enrollment, config/key
-/// install) — and, defense in depth, inside every [`verify`].
+/// install) and, defense in depth, inside every [`verify`].
 ///
-/// FIPS 204 requires no public-key validation, and AWS-LC performs none
-/// that catches the one degenerate shape that matters: a key whose `t1`
-/// half (bytes `32..2592`) is all zeros. Verification then computes
-/// `w1' = UseHint(h, A·z − c·t1·2^d) = UseHint(h, A·z)` — the challenge
-/// drops out, so `z = 0`, `h = 0` plus a `c̃` computed from PUBLIC data
-/// verifies over EVERY message: a keyless forgery (reproduced and pinned in
-/// `tests/mldsa.rs`). Refusing `t1 = 0` is the one check that keeps the
-/// challenge in the equation.
+/// FIPS 204 defines no public-key validation, and AWS-LC performs none.
+/// The verifier computes `w1' = UseHint(h, A·z − c·t1·2^d)`, so with
+/// `z = 0` and `h = 0` a signature `(c̃ = H(μ ‖ w1Encode(0)), 0, 0)`, which
+/// anyone can compute, verifies whenever `HighBits(−c·t1·2^d)` is zero for
+/// the challenge `c` it derives: always for an all-zero `t1`, for a `t1`
+/// with one coefficient `1`, for every coefficient `512`, and for other
+/// structured keys (reproduced against AWS-LC and pinned in
+/// `tests/mldsa.rs`).
+///
+/// The intake test refuses, after fast pre-filters (all-zero, low-weight
+/// and periodic `t1` polynomials), any key under which `HighBits(−c·t1·2^d)`
+/// has too few non-zero coefficients for any of 128 fixed challenges: a
+/// genuine key has about 1920 of 2048, a forgeable one (nearly) none. A
+/// genuine key is refused with probability below `2^-147` (the derivation
+/// is in the `intake` module). It refuses the known forgery classes and
+/// keys whose forgeability is measurable, but cannot rule out every
+/// conceivable weak key: trust keys only from your own `seaworthy keygen`
+/// or HSM, or from their holder over an authenticated channel.
+///
+/// Costs about a millisecond (pure arithmetic over the public key).
 ///
 /// # Errors
-/// [`CryptoError::InvalidKey`] for a wrong-length key or an all-zero `t1`.
+/// [`CryptoError::InvalidKey`] for a wrong-length key or one the intake
+/// test refuses.
 pub fn validate_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
-    if public_key.len() != PUBLIC_KEY_LEN {
-        return Err(CryptoError::InvalidKey);
-    }
-    // The length check above makes the slice infallible; a missing `t1`
-    // would read as empty, i.e. all zeros, and fail closed.
-    let t1 = public_key.get(RHO_LEN..).unwrap_or_default();
-    if t1.iter().all(|&byte| byte == 0) {
-        return Err(CryptoError::InvalidKey);
-    }
-    Ok(())
+    intake::check(public_key).map_err(|_| CryptoError::InvalidKey)
 }
 
 /// Verify `signature` over `message` against a raw [`PUBLIC_KEY_LEN`]-byte
 /// public key. The key is [validated][validate_public_key] first (defense
-/// in depth — a degenerate key that slipped past intake stops verifying).
+/// in depth: a forgeable key that slipped past intake stops verifying).
 ///
 /// # Errors
-/// [`CryptoError::InvalidKey`] for wrong-length or degenerate
+/// [`CryptoError::InvalidKey`] for wrong-length or forgeable
 /// ([`validate_public_key`]) key material or a wrong-length signature;
 /// [`CryptoError::InvalidSignature`] when verification fails (including
 /// valid-length garbage keys, which ML-DSA cannot distinguish from a wrong

@@ -10,7 +10,7 @@ distribution stack needs, and nothing else:
 | Module | What |
 |---|---|
 | `digest` | SHA-256 and SHA-512, one-shot (`sha256`, `sha512`, `_hex` forms) and streaming (`Sha256`, `Sha512`); `sha1_for_identifiers` for identifiers whose definition fixes SHA-1 |
-| `mldsa` | ML-DSA-87 (FIPS 204): seed-deterministic `SigningKey`, `verify`, `validate_public_key` |
+| `mldsa` | ML-DSA-87 (FIPS 204): seed-deterministic `SigningKey`, `verify`, `validate_public_key` (the forgeable-key intake test) |
 | `ecdsa` | ECDSA P-256/SHA-256 (DER signatures, SPKI public keys) |
 | `ed25519` | Ed25519, with small-order and non-canonical key rejection |
 | `rand` | `fill` from the AWS-LC DRBG |
@@ -37,10 +37,19 @@ validated predecessor is AWS-LC 3, certificate #5314), pinned with `=` and asser
    environment would link a pre-installed AWS-LC or alter the module build; `is_fips()`
    answers `true` only when the backend AND the TLS provider report FIPS; the module version
    is asserted at runtime (`module::ensure_expected_module`).
-3. **Keys are validated at intake.** `mldsa::validate_public_key` refuses the all-zero `t1`
-   key and `ed25519::validate_public_key` the small-order and non-canonical points, both of
-   which would otherwise let anyone forge a signature without a secret; both checks also run
-   inside `verify`. ECDSA points are validated by AWS-LC itself.
+3. **Keys are validated at intake.** `ed25519::validate_public_key` refuses the small-order
+   and non-canonical points, under which anyone can forge a signature without a secret.
+   FIPS 204 defines no ML-DSA public-key validation at all, and many ML-DSA-87 keys verify a
+   signature computed from public data alone (an all-zero `t1`, one non-zero coefficient,
+   every coefficient 512, ...). `mldsa::validate_public_key` runs seaworthy's intake test:
+   fast shape pre-filters, then a measurement of `HighBits(−c·t1·2^d)` under 128 fixed
+   challenges, which a forgery needs to be (nearly) zero and a genuine key leaves about 94%
+   non-zero (a genuine key is refused with probability below 2^-147; 10,000 generated keys
+   measured: none refused, every count 15 or more standard deviations clear of its
+   threshold). It refuses the known forgery classes and keys whose forgeability is
+   measurable, but it is **defense in depth**: trust ML-DSA keys only from your own
+   `seaworthy keygen` or HSM, or from their holder over an authenticated channel. Both
+   checks also run inside `verify`. ECDSA points are validated by AWS-LC itself.
 4. **The crate takes key bytes; custody is the caller's.** PKCS#8 documents come back in
    `Zeroizing` buffers; where seeds and documents live (a KMS, an HSM, a sealed secret store)
    is the deployment's decision.

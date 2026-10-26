@@ -230,15 +230,210 @@ fn validate_public_key_refuses_zero_t1_and_admits_real_keys() {
     // Wrong lengths are refused too.
     assert!(validate_public_key(&[1u8; PUBLIC_KEY_LEN - 1]).is_err());
     assert!(validate_public_key(&[]).is_err());
-    // A single non-zero t1 byte anywhere is not the degenerate shape.
-    let mut key = zero_t1_key();
-    key[PUBLIC_KEY_LEN - 1] = 1;
-    assert!(validate_public_key(&key).is_ok());
+    // A single non-zero t1 byte anywhere is still a forgeable key.
+    for at in [32, 33, PUBLIC_KEY_LEN / 2, PUBLIC_KEY_LEN - 1] {
+        let mut key = zero_t1_key();
+        key[at] = 1;
+        assert!(validate_public_key(&key).is_err(), "byte {at}");
+    }
     // Real keys pass, and the forged signature never verifies under one.
     let real = SigningKey::generate().expect("keygen").public_key();
     validate_public_key(&real).expect("a generated key is valid");
     assert!(matches!(
         verify(&real, FORGED_MESSAGE, &forged_signature()),
         Err(CryptoError::InvalidSignature)
+    ));
+}
+
+// ---------- the intake test against real forgeries ----------
+
+#[allow(
+    dead_code,
+    reason = "shared with the fuzz crate, which uses all of it; these tests use most"
+)]
+mod support {
+    pub(crate) mod keyless_forgery;
+}
+
+use support::keyless_forgery::{keyless_forgery, pack_public_key, shake256};
+
+/// Verification by AWS-LC alone, without seaworthy's key validation: what
+/// a verifier that skipped the intake test would accept.
+fn raw_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ML_DSA_87, public_key)
+        .verify(message, signature)
+        .is_ok()
+}
+
+#[test]
+fn the_test_shake_matches_known_answers() {
+    // FIPS 202 SHAKE256("").
+    assert_eq!(
+        hex_decode("46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f"),
+        shake256(&[], 32)
+    );
+    // Multi-block input and output.
+    let long = vec![0xa3u8; 200];
+    assert_eq!(shake256(&[&long], 500).len(), 500);
+    assert_eq!(
+        shake256(&[&long[..100], &long[100..]], 300),
+        shake256(&[&long], 300)
+    );
+    // The forgery helper reproduces the Python-pinned zero-t1 vector.
+    assert_eq!(
+        keyless_forgery(&zero_t1_key(), FORGED_MESSAGE),
+        forged_signature()
+    );
+}
+
+fn t1_from(f: impl Fn(usize, usize) -> u16) -> [[u16; 256]; 8] {
+    std::array::from_fn(|row| std::array::from_fn(|i| f(row, i)))
+}
+
+/// The reviewer's key: ρ = `5a 00 …`, `t1` all zero but its first
+/// coefficient, 1.
+fn reviewer_key() -> Vec<u8> {
+    let mut key = zero_t1_key();
+    key[0] = 0x5a;
+    key[32] = 0x01;
+    key.to_vec()
+}
+
+/// Forgeable public keys, each verified against AWS-LC itself: the
+/// keyless forgery verifies under it (for every message, or for some, as
+/// noted), and seaworthy refuses the key at intake and in `verify`.
+#[test]
+fn forgeable_key_classes_verify_keyless_forgeries_and_are_refused() {
+    let rho = {
+        let mut rho = [0u8; 32];
+        rho[0] = 0x5a;
+        rho
+    };
+    // (name, key, forges every message)
+    let cases: Vec<(&str, Vec<u8>, bool)> = vec![
+        (
+            "t1 = 0, ρ ≠ 0",
+            pack_public_key(rho, &t1_from(|_, _| 0)),
+            true,
+        ),
+        (
+            "one coefficient 1 (the reviewer's key)",
+            reviewer_key(),
+            true,
+        ),
+        (
+            "one coefficient 1023 in each polynomial",
+            pack_public_key(rho, &t1_from(|_, i| if i == 9 { 1023 } else { 0 })),
+            true,
+        ),
+        // 512·2^d = (q + 8191)/2, so a challenge's 60 terms (an even
+        // count) sum to 8191·m/2 modulo q with |m| ≤ 60: below γ2 for
+        // EVERY challenge, though no coefficient is small.
+        (
+            "every coefficient 512",
+            pack_public_key(rho, &t1_from(|_, _| 512)),
+            true,
+        ),
+        (
+            "every coefficient 511",
+            pack_public_key(rho, &t1_from(|_, _| 511)),
+            true,
+        ),
+        // 1023·2^d = q − 1: every term is ±1.
+        (
+            "every coefficient 1023",
+            pack_public_key(rho, &t1_from(|_, _| 1023)),
+            true,
+        ),
+        (
+            "every coefficient 1",
+            pack_public_key(rho, &t1_from(|_, _| 1)),
+            false,
+        ),
+        // (X + 1)^254 over GF(2), times 512: the forgery works whenever the
+        // challenge is divisible by (X + 1)^2 over GF(2), about half of
+        // them (a forger tries messages).
+        (
+            "512 on even positions",
+            pack_public_key(rho, &t1_from(|_, i| if i % 2 == 0 { 512 } else { 0 })),
+            false,
+        ),
+    ];
+    for (name, key, every_message) in cases {
+        let mut forged = 0;
+        for n in 0..16u8 {
+            let message = [b"seaworthy forged release ".as_slice(), &[n]].concat();
+            let signature = keyless_forgery(&key, &message);
+            if raw_verify(&key, &message, &signature) {
+                forged += 1;
+            }
+            // seaworthy never verifies it: the key itself is refused.
+            assert!(
+                matches!(
+                    verify(&key, &message, &signature),
+                    Err(CryptoError::InvalidKey)
+                ),
+                "{name}"
+            );
+        }
+        if every_message {
+            assert_eq!(forged, 16, "{name}: AWS-LC accepts every forgery");
+        } else {
+            assert!(
+                forged >= 1,
+                "{name}: AWS-LC accepts some forgeries ({forged}/16)"
+            );
+        }
+        assert!(
+            matches!(
+                seaworthy_crypto::mldsa::validate_public_key(&key),
+                Err(CryptoError::InvalidKey)
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn keys_from_key_generation_pass_the_intake_test() {
+    use seaworthy_crypto::mldsa::validate_public_key;
+    for n in 0..48u8 {
+        let mut seed = [0u8; SEED_LEN];
+        seed[0] = n;
+        seed[1..9].copy_from_slice(b"genuine!");
+        let key = SigningKey::from_seed(&seed)
+            .expect("from_seed")
+            .public_key();
+        validate_public_key(&key).expect("a generated key passes");
+        // And the keyless forgery never verifies under one, even raw.
+        assert!(!raw_verify(&key, b"m", &keyless_forgery(&key, b"m")));
+    }
+    for _ in 0..16 {
+        let key = SigningKey::generate().expect("keygen").public_key();
+        validate_public_key(&key).expect("a generated key passes");
+    }
+}
+
+/// The statement `seaworthy-formats`' forged-manifest regression signs
+/// (`manifest.rs`, `a_forgeable_release_key_never_verifies_a_forged_manifest`).
+const MANIFEST_STATEMENT: &str = "seaworthy-release-manifest:1\nproduct=10:acme-agent\nchannel=0:\n\
+    version=5:2.0.0\nbuild=0:\nsequence=1\ntarget=24:x86_64-unknown-linux-gnu\nformat=deb\n\
+    size=42\ndigest=sha256:abababababababababababababababababababababababababababababababab\n";
+
+/// `c̃` of the keyless forgery of [`MANIFEST_STATEMENT`] under
+/// [`reviewer_key`], as `seaworthy-formats` pins it (Python's hashlib
+/// reproduces it as the zero-t1 vector above describes).
+const MANIFEST_CTILDE: &str = "6f15478fdefe55ed4b1fc87ead42df0cc5d475fce152c6a843e33f77ad5a73e769de9789f14faeb787109997a0408f6fec8fc468ab70c1d7db6a3ff8af6b9f5c";
+
+#[test]
+fn the_formats_regression_vector_is_a_real_forgery() {
+    let key = reviewer_key();
+    let statement = MANIFEST_STATEMENT.as_bytes();
+    let signature = keyless_forgery(&key, statement);
+    assert_eq!(hex::encode(&signature[..64]), MANIFEST_CTILDE);
+    assert!(raw_verify(&key, statement, &signature), "AWS-LC accepts it");
+    assert!(matches!(
+        verify(&key, statement, &signature),
+        Err(CryptoError::InvalidKey)
     ));
 }

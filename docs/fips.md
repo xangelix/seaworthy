@@ -34,6 +34,15 @@ by the module's service indicator.
 A deployment that must use only what a validated certificate lists today installs
 `fips_policy::AlgorithmPolicy::CERTIFIED_ONLY` at boot; intake points then refuse ML-DSA-87.
 
+FIPS 204 defines no ML-DSA public-key validation, and the module performs none: any 2592 bytes
+are a key it verifies under, including keys under which a signature computed from public data
+verifies. `mldsa::validate_public_key` (run at intake and inside every `mldsa::verify`) adds
+seaworthy's intake test, plain arithmetic over the public key outside the module (its fixed
+challenges are drawn with the module's SHA-512). It is not part of any validated service and
+changes nothing about the module's approval; it refuses the known forgery classes and keys
+whose forgeability is measurable, as defense in depth. Trust only keys from your own
+`seaworthy keygen` or HSM, or from their holder over an authenticated channel.
+
 ### HMAC
 
 HMAC-SHA-256 (the S3 publisher's AWS Signature Version 4) is approved with keys of at least 112
