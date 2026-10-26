@@ -371,9 +371,13 @@ fn check_unit(unit: &str, spec: &ServiceSpec, user_unit: bool) -> Result<(), Str
     Ok(())
 }
 
+/// A parsed unit: its section names in order, and each `(section, key)`'s
+/// values in order.
+type ParsedUnit = (Vec<String>, HashMap<(String, String), Vec<String>>);
+
 /// Splits a rendered unit into `(sections, key → values)`, refusing
 /// anything that isn't a section header or a plain `Key=value` line.
-fn parse_unit(unit: &str) -> Result<(Vec<String>, HashMap<(String, String), Vec<String>>), String> {
+fn parse_unit(unit: &str) -> Result<ParsedUnit, String> {
     if unit.chars().any(|c| c.is_control() && c != '\n') {
         return Err("a control character".into());
     }
