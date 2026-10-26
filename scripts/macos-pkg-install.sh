@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # scripts/macos-pkg-install.sh — a macOS service's pkg installed for real:
 # the e2e fixture as a service product with seaworthy-updater's real update
-# helper (demo_helper, a throwaway release key compiled in), built with the
-# CI template's build step, packaged by the seaworthy CLI with signed
-# manifests, then installed on this Mac with sudo:
+# helper (demo_helper, a throwaway release key and the lane's CI test key
+# compiled in), built with the CI template's build step, packaged by the
+# seaworthy CLI as a CI test build (manifests signed with the CI test key: a
+# lab build is never a release, which would also need Developer ID signing
+# and notarization), then installed on this Mac with sudo:
 #
 #   1. release 1.0.0-rc.1 (pkg version `1.0.0~rc.1-1`) installed by hand:
 #      the receipt names it; launchd runs the service (its log shows the
@@ -155,13 +157,17 @@ mkdir -p "$OUT/keys"
 [ ! -e "$APP" ] || fail "$APP is already installed: run on a clean machine"
 [ ! -e "$POLICY_VENDOR" ] || fail "$POLICY_VENDOR exists: run on a clean machine"
 
-# The tool, a throwaway release key and the product.
+# The tool, a throwaway release key, the CI test key and the product.
 CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --quiet --locked -p seaworthy --bin seaworthy
 CARGO_TARGET_DIR="$TARGET_ROOT" cargo build --quiet --locked -p seaworthy-updater --example sign_release
 TOOL="$TARGET_ROOT/debug/seaworthy"
 SIGN="$TARGET_ROOT/debug/examples/sign_release"
 "$TOOL" keygen --algorithm ml-dsa-87 --secret "$OUT/keys/release.key" --public "$OUT/keys/release.pub" >/dev/null
-printf '[[manifest]]\nalgorithm = "ml-dsa-87"\nkey = "keys/release.key"\n' > "$OUT/signing.toml"
+# The packages are a CI test build's, signed with the CI test key (which the
+# CLI refuses to equal a release key), and the helper trusts it under the
+# switch; the lane's own manifests below stay the release key's.
+"$TOOL" keygen --algorithm ml-dsa-87 --secret "$OUT/keys/ci-test.key" --public "$OUT/keys/ci-test.pub" >/dev/null
+printf '[[manifest]]\nalgorithm = "ml-dsa-87"\nkey = "keys/ci-test.key"\n' > "$OUT/signing.ci-test.toml"
 cat > "$OUT/seaworthy.toml" <<'TOML'
 [defaults]
 vendor = "Acme"
@@ -172,6 +178,9 @@ release-signatures = ["ml-dsa-87"]
 release-keys = [{ algorithm = "ml-dsa-87", public-key = "keys/release.pub" }]
 maintainer = "Acme Packaging <conformance@example.com>"
 license = "MIT OR Apache-2.0"
+
+[defaults.ci-test-keys]
+release-keys = [{ algorithm = "ml-dsa-87", public-key = "keys/ci-test.pub" }]
 
 [product.agent]
 display-name = "Acme Agent"
@@ -210,18 +219,19 @@ mkdir -p "$WORK"
 SEAWORTHY_WORK="$WORK" SEAWORTHY_MANIFEST="$FIXTURE/Cargo.toml" SEAWORTHY_TARGET_DIR="$OUT/target" \
     SEAWORTHY_VERSION=1.0.0 SEAWORTHY_BUILD_COMMAND="printf %s conformance" \
     SEAWORTHY_LAB_CONFIG="$OUT/seaworthy.toml" SEAWORTHY_LAB_RELEASE_PUB="$OUT/keys/release.pub" \
+    SEAWORTHY_LAB_CI_TEST_PUB="$OUT/keys/ci-test.pub" SEAWORTHY_ALLOW_CI_TEST_KEYS=1 \
     bash scripts/ci/seaworthy.sh build "$TARGET" >/dev/null
 CARGO_TARGET_DIR="$OUT/target/server" cargo build --quiet --release --locked \
     --manifest-path "$FIXTURE/Cargo.toml" -p conformance_server
 SERVER="$OUT/target/server/release/conformance_server"
-ok "built the service, its cores, the update helper (the release key compiled in) and the lab server"
+ok "built the service, its cores, the update helper (the release and CI test keys compiled in) and the lab server"
 
-# Five releases of the same binaries, signed: 1.0.0-rc.1 (pkg version
+# Five releases of the same binaries, CI-test-signed: 1.0.0-rc.1 (pkg version
 # 1.0.0~rc.1-1), 1.0.0, then 1.0.1 to 1.0.3 for the refused, broken and
 # recovering updates.
 package() { # <version> <sequence>
     "$TOOL" package --config "$OUT/seaworthy.toml" --artifacts "$WORK/artifacts" --out "$OUT/$1" \
-        --release "$1" --sequence "$2" --build conformance --signing "$OUT/signing.toml" >/dev/null
+        --release "$1" --sequence "$2" --build conformance --ci-test-signing "$OUT/signing.ci-test.toml" >/dev/null
     echo "$OUT/$1/agent/packages/$PACKAGE-$1-$2-macos-arm64.pkg"
 }
 V1="$(package 1.0.0-rc.1 1)"
