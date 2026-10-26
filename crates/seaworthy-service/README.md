@@ -165,7 +165,9 @@ fn main() {
   (passwordless, a per-service SID that `render::windows::virtual_account_sid` computes at
   packaging time). `LocalSystem` is an explicit opt-in. The state directory grants the account
   Modify, never `WRITE_DAC` or `WRITE_OWNER`; the `%ProgramData%` parents are owned by SYSTEM
-  and strip a squatting owner's implicit rights.
+  and strip an owner's implicit rights. At run time the service audits its own state directory
+  (`run::audit_state_directory`; automatic on Windows for an MSI-installed service) and refuses
+  to run on anything it can't trust.
 - **launchd.** A `UnixIdentity::User` maps to `UserName`/`GroupName`, `UnixIdentity::Root`
   to no `UserName`; environment files are refused (a plist is world-readable).
 

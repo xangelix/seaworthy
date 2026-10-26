@@ -150,15 +150,17 @@ them it is "EXPOSED".
   `%ProgramData%\<Vendor>\<Product>\state`: owner SYSTEM, SYSTEM and Administrators full
   control, OWNER RIGHTS read-control only, the service account Modify (`0x1301bf`: never
   `WRITE_DAC` or `WRITE_OWNER`).
-- `render::windows::data_dir_sddl()` and `updates_dir_sddl()`: the `%ProgramData%` parents and
-  the update helper's staging directory: owner SYSTEM, SYSTEM and Administrators only, OWNER
-  RIGHTS read-control. Any user may create a directory under `%ProgramData%`; the installer
-  takes the owner back, and the OWNER RIGHTS entry strips a squatting owner's implicit
-  `WRITE_DAC`.
+- `render::windows::data_dir_sddl()`, `updates_dir_sddl()` and `helper_log_dir_sddl()`: the
+  `%ProgramData%` parents and the update helper's staging and log directories: owner SYSTEM,
+  SYSTEM and Administrators only, OWNER RIGHTS read-control (which strips an owner's implicit
+  `WRITE_DAC`). Any user may create a directory under `%ProgramData%`, and fill it, before the
+  product is installed, so the seaworthy CLI's MSI applies these descriptors through the
+  launcher's guard, by handle: each folder taken back, everything below the product's folder
+  audited, the install refused over anything planted ([packaging.md](packaging.md)).
 - `render::windows::helper_service_sddl(grantee)`: the update helper service's DACL: SYSTEM and
-  Administrators get Windows' default service rights; the grantee (the main service's account
-  — `SY`, `LS`, `NS` or a virtual account's SID, never a broad principal — or interactive
-  users for a desktop product) may query and **start** it, never stop, reconfigure or delete
+  Administrators get Windows' default service rights; the grantee (the main service's own
+  account — `SY` or a virtual account's SID, never a shared `LS`/`NS` or a broad principal — or
+  interactive users for a desktop product) may query and **start** it, never stop, reconfigure or delete
   it. The helper takes no input, so starting it can only make the machine install the release
   the product's server names.
 
@@ -253,6 +255,16 @@ same call runs the foreground shape instead: Ctrl-C stops it, no status protocol
 admits one dispatcher call per process, so the process remembers the 1063 and later runs take
 the foreground shape directly. `run_service` remains the ServiceMain body for an application
 that wires its own dispatcher (the name it registers under must match the installed service).
+
+Before `init`, once `Running` is reported, `run_windows_service` audits the state directory the
+seaworthy CLI's MSI made for the program (`%ProgramData%\<Vendor>\<Directory>\state` for a
+program installed in `%ProgramFiles%\<Vendor>\<Directory>`): opened without following a reparse
+point, at the final path asked for (no junction on the way), and it and everything below it (at
+most 100000 objects, 32 levels) no reparse point, owned by SYSTEM, Administrators,
+TrustedInstaller or the service's own account, writable by no one else. Anything else fails the
+start like a fatal error (the reason in the log), and the failure actions retry. On Unix a
+service calls `run::audit_state_directory(path)` itself (no symlink, owned by root or its
+effective user, not group- or world-writable); a Windows service may too, for another directory.
 
 Two Windows traps the design avoids: arguments never go into the image path (Code 5, Access
 Denied), and a missing DLL the program imports reads as an instant start timeout (Code 1053),

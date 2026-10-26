@@ -172,8 +172,11 @@ exits (`HelperOutcome::HandedOff`); the next run confirms the release. The helpe
 `<service>-update` service (LocalSystem) under the Service Control Manager, stages in
 `%ProgramData%\<Vendor>\<Directory>\updates`, and refuses a staging directory (or any directory
 above it up to `%ProgramData%`) that is a reparse point or that anyone but SYSTEM,
-Administrators or TrustedInstaller owns or can write. `helper::log_file` opens its log in the
-product's locked log directory.
+Administrators or TrustedInstaller owns or can write. `helper::log_file` opens its log in its
+own `%ProgramData%\<Vendor>\<Directory>\update-logs` (SYSTEM and Administrators only, audited
+like the staging directory; never the service's `logs`, which the service's account may
+modify), without following a reparse point, and only as a regular file with one link that only
+SYSTEM, Administrators or TrustedInstaller own and can write.
 
 ## The rules
 

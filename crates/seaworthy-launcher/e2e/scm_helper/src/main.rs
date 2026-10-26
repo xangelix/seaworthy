@@ -16,8 +16,9 @@
 //! <token>/<target>/<package>.<format>` and its `.manifest`.
 //!
 //! Under the Service Control Manager a service has no stderr, so it also
-//! logs to `%ProgramData%\<Vendor>\<Directory>\logs\scm_helper.log`, the
-//! MSI's locked logs directory (`seaworthy_updater::helper::log_file`).
+//! logs to `%ProgramData%\<Vendor>\<Directory>\update-logs\scm_helper.log`,
+//! the helper's own directory, SYSTEM and Administrators only
+//! (`seaworthy_updater::helper::log_file`).
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -62,8 +63,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Windows: the MSI's logs directory; elsewhere `None` (the service
-/// manager keeps stderr).
+/// Windows: the helper's own log directory (`update-logs`); elsewhere
+/// `None` (the service manager keeps stderr).
 fn log_file() -> Option<std::fs::File> {
     let product = Product::from_config(CONFIG, PRODUCT).ok()?;
     seaworthy_updater::helper::log_file(&product, "scm_helper")

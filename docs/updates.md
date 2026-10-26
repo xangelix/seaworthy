@@ -146,6 +146,15 @@ descriptor, and renamed to the name the installer needs. Between runs the direct
 `.lock`, `failure-memo` (`seaworthy-update-memo:1`, written atomically) and `last-run`, plus
 msiexec's last log on Windows.
 
+The helper's own log (Windows: no stderr under the Service Control Manager) is
+`%ProgramData%\<Vendor>\<Directory>\update-logs\<stem>.log` (`helper::log_file`): a directory of
+its own, SYSTEM and Administrators only and audited like the staging directory, because the
+helper appends as LocalSystem and the service's `logs` is the service account's to modify. The
+file is opened without following a reparse point and kept only as a regular file with one link,
+at the path asked for, that no one but SYSTEM, Administrators or TrustedInstaller owns or can
+write. On Linux the helper logs to the journal; on macOS launchd appends its output to
+`/Library/Logs/<Vendor>/<Directory>`, which only root writes (a macOS service runs as root).
+
 ### Installers
 
 | Platform | Installer | Only our package, because |

@@ -25,9 +25,10 @@
 #             demand-start and stopped, its DACL the .wxs's (start and query for the
 #             service's account, nothing more); HKLM\SOFTWARE\<Vendor>\<Directory> holds
 #             Release = 1.0.0~rc.1-1 and UpdatePolicy = auto; %ProgramData%\<Vendor>,
-#             ...\<Directory>, its state and its updates directory (the helper's staging)
-#             are owned by SYSTEM or Administrators, grant no one else a write and aren't
-#             reparse points; Programs and Features names the product by its non-ASCII
+#             ...\<Directory>, its updates directory (the helper's staging), its
+#             update-logs (the helper's log) and its state (which the service's account may
+#             also write) are owned by SYSTEM or Administrators, grant no one else a write
+#             and aren't reparse points; Programs and Features names the product by its non-ASCII
 #             display name, whole (the MSI's UTF-8 code page); every installed binary
 #             carries the release's version resource (FileVersion 1.0.0.1, ProductVersion
 #             1.0.0-rc.1) and an Authenticode signature Windows accepts (the lane's
@@ -61,12 +62,16 @@
 #             stopped and its DACL is the .wxs's again (the rollback actions)
 #   remove    msiexec /x: both services, the program directory, the registry values and
 #             the Programs and Features entry gone
-#   squat     (on its own, last) a standard user creates %ProgramData%\<Vendor>,
+#   squat     (on its own) a standard user creates %ProgramData%\<Vendor>,
 #             ...\<Directory> and its state first, owning them (any user may create a
-#             directory in ProgramData); 1.0.0-rc.1 installs over them and takes them back
-#             (SYSTEM owns them: the .wxs's O:SY), and the helper updates to 1.0.0 from its
-#             staging there (its audit accepts them); then removed
-# The helper logs to %ProgramData%\<Vendor>\<Directory>\logs\scm_helper.log (the SCM
+#             directory in ProgramData); 1.0.0-rc.1 installs over them and its launcher's
+#             guard takes them back (SYSTEM owns them), and the helper updates to 1.0.0 from
+#             its staging there (its audit accepts them); then removed
+#   squat-content  (on its own, last) the same user also creates a directory of their own
+#             inside the state directory: the guard refuses the install (1603, msiexec's
+#             log names ProgramDataFolders), nothing is installed, and the planted
+#             directory is left as it was
+# The helper logs to %ProgramData%\<Vendor>\<Directory>\update-logs\scm_helper.log (the SCM
 # gives a service no stderr); a failure prints it, msiexec's log, the server's output and
 # both services' states. Every log is kept under target\windows-msi-update\evidence.
 #
@@ -216,7 +221,11 @@ $WriteRights = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x4
 function Get-Owner([string]$Path) {
     (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
 }
-function Assert-PrivateDirectory([string]$Path) {
+# The service's virtual account, which its state directory admits as a writer.
+function Get-ServiceSid {
+    (New-Object Security.Principal.NTAccount("NT SERVICE\$Service")).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+function Assert-PrivateDirectory([string]$Path, [string[]]$Also = @()) {
     $item = Get-Item -LiteralPath $Path -Force
     # FILE_ATTRIBUTE_REPARSE_POINT: a junction or a link.
     Assert-True ((([int]$item.Attributes) -band 0x400) -eq 0) "$Path is not a reparse point"
@@ -228,7 +237,7 @@ function Assert-PrivateDirectory([string]$Path) {
         # InheritOnly: applies to children only, not to the directory.
         if ((([int]$rule.PropagationFlags) -band 2) -ne 0) { continue }
         $sid = $rule.IdentityReference.Value
-        if ($TrustedSids -contains $sid) { continue }
+        if ($TrustedSids -contains $sid -or $Also -contains $sid) { continue }
         $rights = [int]$rule.FileSystemRights
         Assert-True (($rights -band $WriteRights) -eq 0) "$Path grants $sid no write access (it grants $($rule.FileSystemRights))"
     }
@@ -241,7 +250,8 @@ $VendorData = Join-Path $env:ProgramData $Vendor
 $Support = Join-Path $VendorData $Directory
 $State = Join-Path $Support 'state'
 $Staging = Join-Path $Support 'updates'
-$HelperLog = Join-Path $Support "logs\$HelperExe.log"
+$HelperLogs = Join-Path $Support 'update-logs'
+$HelperLog = Join-Path $HelperLogs "$HelperExe.log"
 $MsiexecLog = Join-Path $Staging 'msiexec-last.log'
 $ServerExe = Join-Path $Bundle 'bin\windows_scm_e2e.exe'
 $Www = Join-Path ([IO.Path]::GetTempPath()) 'seaworthy-msi-update-www'
@@ -354,7 +364,13 @@ function Assert-MsiSequence([string]$Msi) {
         Assert-True ($sequence[$action].Condition -eq 'Installed AND REMOVE="ALL"') "${name}: $action runs on a removal only (condition '$($sequence[$action].Condition)')"
         Assert-True ((& $at 'StopServices') -lt (& $at $action) -and (& $at $action) -lt (& $at 'DeleteServices')) "${name}: $action sits before DeleteServices, in the removal's sequence"
     }
-    Write-Log "${name}: RemoveExistingProducts at $(& $at 'RemoveExistingProducts') right after InstallInitialize; the recovery and rollback actions in place"
+    # The %ProgramData% guard: the installed launcher (18) in the script (1024) as SYSTEM
+    # (2048), after the files and before the services, on a first install or an upgrade.
+    Assert-True ($actions.ContainsKey('ProgramDataFolders') -and $actions['ProgramDataFolders'].Type -eq '3090') "${name}: ProgramDataFolders runs the installed launcher, deferred, as SYSTEM (type 3090)"
+    Assert-True ($actions['ProgramDataFolders'].Target.StartsWith('--seaworthy-install-programdata ')) "${name}: ProgramDataFolders passes the guard's argument (target '$($actions['ProgramDataFolders'].Target)')"
+    Assert-True ($sequence['ProgramDataFolders'].Condition -eq 'NOT Installed AND NOT REMOVE="ALL"') "${name}: ProgramDataFolders runs on a first install or an upgrade only"
+    Assert-True ((& $at 'RemoveExistingProducts') -lt (& $at 'InstallFiles') -and (& $at 'InstallFiles') -lt (& $at 'ProgramDataFolders') -and (& $at 'ProgramDataFolders') -lt (& $at 'InstallServices')) "${name}: ProgramDataFolders runs after InstallFiles and before InstallServices"
+    Write-Log "${name}: RemoveExistingProducts at $(& $at 'RemoveExistingProducts') right after InstallInitialize; the recovery, rollback and %ProgramData% actions in place"
 }
 
 # ---------------------------------------------------------------------------
@@ -747,7 +763,8 @@ Invoke-Step 'install' {
     Assert-True ((Get-RegValue 'Release') -eq '1.0.0~rc.1-1') "$Key\Release is 1.0.0~rc.1-1 (it is '$(Get-RegValue 'Release')')"
     Assert-True ((Get-Item -LiteralPath $Key).GetValueKind('Release') -eq [Microsoft.Win32.RegistryValueKind]::String) "$Key\Release is a REG_SZ"
     Assert-True ((Get-RegValue 'UpdatePolicy') -eq 'auto') "$Key\UpdatePolicy is auto (it is '$(Get-RegValue 'UpdatePolicy')')"
-    foreach ($dir in @($VendorData, $Support, $State, $Staging)) { Assert-PrivateDirectory $dir }
+    foreach ($dir in @($VendorData, $Support, $Staging, $HelperLogs)) { Assert-PrivateDirectory $dir }
+    Assert-PrivateDirectory $State @(Get-ServiceSid)
     $entries = @(Get-Entries)
     if ($entries.Count -ne 1) { Show-NearEntries }
     Assert-True ($entries.Count -eq 1) "one Programs and Features entry named $DisplayName, whole (found $($entries.Count))"
@@ -785,6 +802,8 @@ Invoke-Step 'update' {
         $s = Get-Svc $Service; $s -and $s.State -eq 'Running' -and $s.ProcessId -ne $script:firstPid
     }
     Assert-True (Test-Path -LiteralPath $HelperLog -PathType Leaf) "the helper logged to $HelperLog"
+    $logOwner = Get-Owner $HelperLog
+    Assert-True ($TrustedSids -contains $logOwner) "the helper's log is SYSTEM's or Administrators' (it is owned by $logOwner)"
     Assert-True ([bool](Select-String -LiteralPath $HelperLog -Pattern "handed $([regex]::Escape($Package)) .* to its installer" -Quiet)) "the helper's log says it handed $Package to its installer"
     Assert-True (Test-Path -LiteralPath $MsiexecLog -PathType Leaf) "msiexec logged to $MsiexecLog"
     Assert-True ([bool](Select-String -LiteralPath $MsiexecLog -Pattern 'success or error status: 0' -Quiet)) "msiexec's log reports success"
@@ -794,7 +813,8 @@ Invoke-Step 'update' {
     Assert-True ([bool]$helper) "$HelperService is still installed after the upgrade"
     Assert-True ($helper.State -eq 'Stopped' -and $helper.StartMode -eq 'Manual') "$HelperService waits, demand-start (it is $($helper.State), $($helper.StartMode))"
     Assert-HelperDacl 'after the upgrade'
-    foreach ($dir in @($VendorData, $Support, $State, $Staging)) { Assert-PrivateDirectory $dir }
+    foreach ($dir in @($VendorData, $Support, $Staging, $HelperLogs)) { Assert-PrivateDirectory $dir }
+    Assert-PrivateDirectory $State @(Get-ServiceSid)
     Assert-InstalledBinaries '1.0.0.2' '1.0.0' $false
     Assert-Signed $script:v1
     Assert-Recovery 'after the upgrade'
@@ -843,7 +863,8 @@ Invoke-Step 'rollback' {
     Assert-True ($entries.Count -eq 1 -and $entries[0].Version -eq '1.0.0') "one Programs and Features entry, at 1.0.0 (found $($entries.Count): $(($entries | ForEach-Object { $_.Version }) -join ', '))"
     $helper = Get-Svc $HelperService
     Assert-True ([bool]$helper -and $helper.State -eq 'Stopped' -and $helper.StartMode -eq 'Manual') "$HelperService is installed, demand-start and stopped after the rollback"
-    foreach ($dir in @($VendorData, $Support, $State, $Staging)) { Assert-PrivateDirectory $dir }
+    foreach ($dir in @($VendorData, $Support, $Staging, $HelperLogs)) { Assert-PrivateDirectory $dir }
+    Assert-PrivateDirectory $State @(Get-ServiceSid)
     Assert-Recovery 'after a rolled-back upgrade'
     Assert-HelperDacl 'after a rolled-back upgrade'
 }
@@ -887,7 +908,8 @@ Invoke-Step 'squat' -Independent {
         $owner = Get-Owner $dir
         Assert-True ($owner -eq 'S-1-5-18') "the install took $dir back from $($SquatUser): SYSTEM owns it (it is owned by $owner)"
     }
-    foreach ($dir in @($VendorData, $Support, $State, $Staging)) { Assert-PrivateDirectory $dir }
+    foreach ($dir in @($VendorData, $Support, $Staging, $HelperLogs)) { Assert-PrivateDirectory $dir }
+    Assert-PrivateDirectory $State @(Get-ServiceSid)
     Assert-HelperDacl 'after the install over the squatter''s directories'
     # The helper's staging audit accepts them: it updates to 1.0.0.
     & sc.exe start $HelperService | Out-Host
@@ -898,6 +920,34 @@ Invoke-Step 'squat' -Independent {
     Assert-True ($entries.Count -eq 1) 'one entry to remove'
     $code = Invoke-Msiexec @('/x', $entries[0].Code) (Join-Path $Evidence 'squat-remove.log')
     Assert-True ($code -eq 0) "msiexec /x exited $code"
+}
+
+# After the squat: a standard user creates the product's ProgramData directories and,
+# inside the state directory, one of their own. The guard takes the directories back but
+# can't trust what the user planted below them, so the install is refused (1603) and
+# rolled back, and the planted directory is left as it was: nothing is rewritten.
+Invoke-Step 'squat-content' -Independent {
+    if (Test-Path -LiteralPath $VendorData) { Remove-Item -LiteralPath $VendorData -Recurse -Force }
+    $exists = if (Get-Command -Name 'Get-LocalUser' -ErrorAction SilentlyContinue) { [bool](Get-LocalUser -Name $SquatUser -ErrorAction SilentlyContinue) } else { [bool]$script:SquatSid }
+    if (-not $exists) { New-LaneUser $SquatUser $SquatPassword }
+    $planted = Join-Path $State 'planted'
+    $logon = [SeaworthyMsiLane]::LogOn($SquatUser, $SquatPassword)
+    try {
+        $script:SquatSid = [SeaworthyMsiLane]::UserSid($logon)
+        [SeaworthyMsiLane]::CreateDirectories($logon, [string[]]@($VendorData, $Support, $State, $planted))
+    } finally {
+        $logon.Dispose()
+    }
+    Assert-True ((Get-Owner $planted) -eq $script:SquatSid) "$planted was created by $SquatUser"
+    $log = Join-Path $Evidence 'squat-content-install.log'
+    $code = Invoke-Msiexec @('/i', "`"$script:rc1`"") $log
+    Assert-True ($code -eq 1603) "the install over planted content is refused (1603) (it exited $code)"
+    Assert-True ([bool](Select-String -LiteralPath $log -Pattern 'ProgramDataFolders' -Quiet)) "the guard's custom action ran and failed (msiexec's log names ProgramDataFolders)"
+    Assert-True (-not (Get-Svc $Service)) "$Service isn't installed after the refused install"
+    Assert-True (@(Get-Entries).Count -eq 0) 'no Programs and Features entry after the refused install'
+    Assert-True ((Get-Owner $planted) -eq $script:SquatSid) "the planted directory is left as it was: still $SquatUser's"
+    Write-Log "the install over $SquatUser's planted $planted was refused and rolled back"
+    Remove-Item -LiteralPath $VendorData -Recurse -Force
 }
 
 if ($Server -and -not $Server.HasExited) { Stop-Process -Id $Server.Id -Force -ErrorAction SilentlyContinue }

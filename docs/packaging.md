@@ -191,7 +191,19 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
 - applies the service renderers' DACLs with `MsiLockPermissionsEx`, registers the service and the
   update helper with `ServiceInstall`, and grants the service's account only the right to start the
   helper (a desktop product grants that to interactive users);
-- creates its `%ProgramData%` directories owned by SYSTEM;
+- leaves its `%ProgramData%` directories to the installed launcher, run as SYSTEM after
+  `InstallFiles` on a first install or an upgrade (a deferred, no-impersonate custom action;
+  never in a repair): `%ProgramData%\<Vendor>\<Directory>` and its `state` and `logs` (the
+  service's account may modify them) and `updates` and `update-logs` (the helper's staging and
+  log, SYSTEM and Administrators only). Windows Installer's `CreateFolder` works by path and
+  follows a junction a user put in a folder's place, and a lock on a folder doesn't reach a child
+  with its own protected DACL, so the launcher's guard makes each folder with its descriptor or
+  takes an existing one back on a handle (never through a reparse point), audits everything below
+  the product's directory, and **refuses the install** when anything there is a reparse point or
+  was owned or could be written by anyone but SYSTEM, Administrators, TrustedInstaller or the
+  service's account (a local user who created and filled the folders before the install; the
+  Application event log names the object). The folders stay on removal, so the state survives an
+  upgrade; one deleted by hand comes back with the next upgrade, not with a repair;
 - runs the system's `sc.exe` for the recovery settings, on a first install or an upgrade, never in a
   repair a standard user can start (`MsiServiceConfigFailureActions` is documented as broken);
 - writes the installed release (in deb's spelling) and, with `UPDATES=` and `SERVER=`, the update

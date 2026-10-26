@@ -58,8 +58,10 @@
 # the policy key removed, the product uninstalled and its %ProgramData% directory
 # removed. `-Phase Cleanup` undoes the same from what is left on the machine (the
 # workflow runs it in an always-run step, for a run killed before its `finally`). The
-# helper logs to %ProgramData%\<Vendor>\<Directory>\logs\scm_helper.log; a failure prints
-# it, msiexec's log and the lab server's, and every log is kept under <EvidenceDir>.
+# helper logs to %ProgramData%\<Vendor>\<Directory>\update-logs\scm_helper.log (a previous
+# build from before the helper had a log directory of its own, to ...\logs\scm_helper.log:
+# both are read); a failure prints them, msiexec's log and the lab server's, and every log is
+# kept under <EvidenceDir>.
 #
 # A throwaway machine (a GitHub-hosted runner), as an administrator. Windows PowerShell
 # 5.1 or PowerShell 7: this file is ASCII, so the display name is built from its
@@ -275,8 +277,15 @@ function Get-RegValue([string]$Name) {
 
 # How many lines of the helper's log hold $Text.
 function Get-SaidCount([string]$Text) {
-    if (-not (Test-Path -LiteralPath $HelperLog -PathType Leaf)) { return 0 }
-    return @(Select-String -LiteralPath $HelperLog -SimpleMatch -Pattern $Text).Count
+    $count = 0
+    foreach ($log in @(Get-HelperLogFiles)) { $count += @(Select-String -LiteralPath $log -SimpleMatch -Pattern $Text).Count }
+    return $count
+}
+
+# The helper's log files that exist: its own update-logs\ directory, or logs\ for a
+# previous build from before it had one.
+function Get-HelperLogFiles {
+    return @($HelperLogs | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
 }
 
 # How many of the lab server's request lines hold $Text.
@@ -443,7 +452,8 @@ function Show-Tail([string]$Path, [int]$Lines = 60) {
 }
 
 function Save-Evidence {
-    foreach ($file in @($HelperLog, $MsiexecLog, $StartsLog, (Join-Path $State 'exits.log'))) {
+    # The previous build's logs\ copy first, so the newer update-logs\ one is kept.
+    foreach ($file in @($HelperLogs[1], $HelperLogs[0], $MsiexecLog, $StartsLog, (Join-Path $State 'exits.log'))) {
         if (Test-Path -LiteralPath $file -PathType Leaf) { Copy-Item -LiteralPath $file -Destination $script:Evidence -Force -ErrorAction SilentlyContinue }
     }
     $logs = Join-Path $State 'logs'
@@ -576,7 +586,7 @@ $VendorData = Join-Path $env:ProgramData $Vendor
 $Support = Join-Path $VendorData $Directory
 $State = Join-Path $Support 'state'
 $Staging = Join-Path $Support 'updates'
-$HelperLog = Join-Path $Support "logs\$HelperExe.log"
+$HelperLogs = @((Join-Path $Support "update-logs\$HelperExe.log"), (Join-Path $Support "logs\$HelperExe.log"))
 $MsiexecLog = Join-Path $Staging 'msiexec-last.log'
 $StartsLog = Join-Path $State 'starts.log'
 $StateFile = Join-Path $State 'lab-state'
@@ -762,7 +772,7 @@ try {
         Wait-Until 120 "$Service runs again, under a new process" {
             $s = Get-Svc $Service; $s -and $s.State -eq 'Running' -and $s.ProcessId -ne $script:FirstPid
         }
-        Assert-True ([bool](Select-String -LiteralPath $HelperLog -Pattern "handed $([regex]::Escape($Package)) .* to its installer" -Quiet)) "the helper's log says it handed $Package to its installer"
+        Assert-True ((Get-HelperLogFiles).Count -gt 0 -and [bool](Select-String -LiteralPath (Get-HelperLogFiles) -Pattern "handed $([regex]::Escape($Package)) .* to its installer" -Quiet)) "the helper's log says it handed $Package to its installer"
         Assert-True ([bool](Select-String -LiteralPath $MsiexecLog -Pattern 'success or error status: 0' -Quiet)) "msiexec's log reports success"
     }
 

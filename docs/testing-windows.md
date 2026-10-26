@@ -92,7 +92,7 @@ a failed lane uploads its reports and evidence.
 | `install` | `scripts/windows-msi-install.ps1` | The desktop MSI installs its launcher, cores and data files, the Start-menu and desktop shortcuts, one Programs and Features entry with its install location and the product icon Windows Installer caches; the launcher runs a core; 1.0.1 upgrades it in place; the removal leaves nothing. |
 | `update` | `scripts/windows-msi-update.ps1` | See below. |
 | `upgrade` | `scripts/windows-upgrade-previous.ps1`, `scripts/windows-upgrade.ps1` | The previous lab build updated to this run's by its own helper, over TLS from the lab: see below. |
-| `scm` | `scripts/windows-scm-e2e.ps1 -Phase Service` | The SCM product's MSI registers the service under its virtual account with its recovery actions and DACLs; the service runs as `NT SERVICE\acme-e2e`; a fatal outcome, a panic and a crash are each restarted by the SCM after the configured delay; a version rejection (running or at connect) asks for an update and keeps the service running, and a stop during the connect wait is a clean exit; a clean stop isn't restarted; the uninstall removes the service. `tests/windows_scm.rs` (`SEAWORTHY_WINDOWS_SCM_E2E=1`, `--ignored`, one thread) runs inside it. |
+| `scm` | `scripts/windows-scm-e2e.ps1 -Phase Service` | The SCM product's MSI registers the service under its virtual account with its recovery actions and DACLs; the service runs as `NT SERVICE\acme-e2e`; a fatal outcome, a panic and a crash are each restarted by the SCM after the configured delay; a version rejection (running or at connect) asks for an update and keeps the service running, and a stop during the connect wait is a clean exit; a clean stop isn't restarted; the uninstall removes the service. Every start runs past the runtime's audit of the MSI's state directory (the guard made it; the suite's own files there are an administrator's). `tests/windows_scm.rs` (`SEAWORTHY_WINDOWS_SCM_E2E=1`, `--ignored`, one thread) runs inside it. |
 | `policy-live` | `windows_policy_live` | `read_policy` and the update requester against real HKLM keys: the MSI's default, Group Policy winning, and keys others can write refused (`SEAWORTHY_WINDOWS_LIVE_REGISTRY=1`; the job fails if the test reports it skipped). |
 | `fips` | the build with `-Fips`, then `windows-scm-e2e.ps1 -Phase All` | Schedule and dispatch only, informational. The cores, the stub, the probe and the SCM test on the FIPS module, `fips_selfcheck --expect-fips` natively, `verify`'s Windows FIPS checks, the module's DLL laid beside the installed cores, and the whole SCM suite with `fips=true` asserted. |
 
@@ -102,9 +102,11 @@ The agent 1.0.0-rc.1 is installed by hand; the lane's stub answers `1.0.0` and s
 1.0.0 and its signed manifest; starting the helper's service makes the helper verify, stage and
 hand the release to msiexec, and Windows Installer upgrades the product. Then a second helper
 run finds nothing to do, a standard user's repair can't change the update policy, the broken
-1.0.1 rolls back, the removal leaves nothing, and finally a standard user who created the
-product's `%ProgramData%` directories before the install loses them to it (SYSTEM owns them
-afterwards) and the helper still updates from there.
+1.0.1 rolls back, the removal leaves nothing, then a standard user who created the product's
+`%ProgramData%` directories before the install loses them to the launcher's guard (SYSTEM owns
+them afterwards) and the helper still updates from there, and finally the same user's directory
+planted inside the state directory makes the guard refuse the install (1603), with nothing
+installed and the planted directory left as it was.
 
 It keeps the fixes this lane was built around:
 
@@ -120,7 +122,12 @@ It keeps the fixes this lane was built around:
 - **Signing.** Every installed binary and both signed MSIs verify with Windows itself
   (`Get-AuthenticodeSignature`) against the run's `CA:FALSE` certificate, trusted for the run
   only.
-- **`%ProgramData%`.** The squat step.
+- **`%ProgramData%`.** The `sequence` step finds the guard (`ProgramDataFolders`, type 3090,
+  `NOT Installed AND NOT REMOVE="ALL"`, after `InstallFiles` and before `InstallServices`); after
+  every install, upgrade and rollback, `<Vendor>`, `<Directory>`, `updates` and `update-logs`
+  are no reparse point and owned and writable only by SYSTEM, Administrators or TrustedInstaller
+  (`state` admits the service's account too); the helper's log in `update-logs` is
+  administrators'; the squat steps take squatted directories back and refuse planted content.
 
 ### The upgrade lane
 
@@ -205,6 +212,14 @@ repository keeps jitter: `.cargo/config.toml` names the switch).
 An OS shutdown (`SERVICE_CONTROL_SHUTDOWN`) and the auto-start at the next boot need a reboot a
 job can't survive; the SCM suite reports them as skipped, `EXPECTED VM-ONLY`. A domain-joined
 machine is out of reach too. Both stay a physical or virtual machine check before a release.
+The `%ProgramData%` guard's other refusals are a machine check before a release too, done as a
+standard user before the install: `%ProgramData%\<Vendor>` made a junction to a directory the
+user owns (the install fails with 1603 and the target directory is unchanged: no folder created
+in it, its DACL and owner as they were), a file with a protected DACL planted in `logs`, and a
+hard link in `update-logs` (the helper then logs nothing and says why on stderr); and the
+runtime's refusal of a state directory changed after the install (a write grant for Users added
+to a file in it: the service stops with the service-specific exit code 1, the reason in its
+log). The lanes cover the squatted directories and the planted directory.
 The GitLab template's other Windows path, `seaworthy adopt-msi` (an MSI built from the `.wxs` on
 a Windows runner, then signed and listed on Linux), is not part of this lab.
 

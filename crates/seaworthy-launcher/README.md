@@ -148,6 +148,11 @@ launcher falls back is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
   adds `cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0xA00` to the
   launcher crate's build script, MSVC targets only: a dependency's build
   script can't pass a link argument to the product's binary).
+- On Windows, `--seaworthy-install-programdata` as the first argument is reserved: the
+  seaworthy CLI's MSI runs the installed launcher with it, as SYSTEM, to make the product's
+  `%ProgramData%` folders by handle (each created with its descriptor or taken back without
+  following a reparse point, everything below the product's folder audited, the install refused
+  over anything planted); the core never sees it, and any caller but LocalSystem is refused.
 - Everything the launcher prints, and its macOS alert, shows control
   characters and invisible or bidirectional formatting characters escaped
   (`\u{202E}`): a file name can't forge a line or reorder a message.
