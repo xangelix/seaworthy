@@ -76,7 +76,7 @@ fn each_recorded_cpu_detects_exactly_its_features() {
     }
 }
 
-/// The feature sets rustc 1.98.1 enables for the x86-64 levels
+/// The feature sets rustc 1.99.1 enables for the x86-64 levels
 /// (`RUSTC_BOOTSTRAP=1 rustc --print cfg -C target-cpu=<level>`).
 const LEVELS: [(&str, &str); 4] = [
     ("x86-64", "fxsr,sse,sse2,x87"),

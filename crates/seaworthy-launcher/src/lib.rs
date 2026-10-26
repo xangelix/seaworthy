@@ -694,7 +694,7 @@ macro_rules! __for_each_feature {
             "avx512bitalg" "avx512vpopcntdq" "avx512vp2intersect" "amx-bf16" "avx512fp16" "amx-tile"
             "amx-int8" "sha512" "sm3" "sm4" "avxvnni" "avx512bf16" "amx-fp16" "avxifma" "movrs"
             "avxvnniint8" "avxneconvert" "amx-complex" "avxvnniint16" "apxf" "avx10.1" "avx10.2"
-            "xsaveopt" "xsavec" "xsaves" "kl" "widekl" "amx-fp8" "amx-tf32" "amx-avx512" "amx-movrs"
+            "xsaveopt" "xsavec" "xsaves" "kl" "widekl" "amx-fp8" "amx-avx512" "amx-movrs"
             "lahfsahf" "lzcnt" "sse4a" "prfchw" "xop" "fma4" "tbm"
             "bf16" "bti" "crc" "cssc" "dit" "dotprod" "dpb" "dpb2" "ecv" "faminmax" "fcma" "fhm"
             "flagm" "flagm2" "fp16" "fp8" "fp8dot2" "fp8dot4" "fp8fma" "frintts" "hbc" "i8mm"

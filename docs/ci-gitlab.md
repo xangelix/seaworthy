@@ -213,7 +213,7 @@ nothing earlier jobs left them but data:
 | Input | Default | Meaning |
 |---|---|---|
 | `tools-image` | **required** | prepare, package, repo, publish (and the MSI adoption): Rust, bash, curl and git, plus dpkg, rpm's `rpmsign` and `rpmkeys`, `createrepo_c`, pacman's `repo-add`, gnupg, libarchive's `bsdtar`, msitools (the MSI adoption) and desktop-file-utils (desktop products). On Arch Linux the steps install what's missing with pacman. Nothing it compiles ships |
-| `build-image` | the official `rust:1.98.1-bookworm` image, digest-pinned | the Linux build; its glibc (Debian 12's 2.36) must be at or below the products' floor (2.34 by default, which a Debian 12 build meets) |
+| `build-image` | the official `rust:1.99.1-bookworm` image, digest-pinned | the Linux build; its glibc (Debian 12's 2.36) must be at or below the products' floor (2.34 by default, which a Debian 12 build meets) |
 | `seaworthy-toml`, `signing-toml`, `publish-toml` | `seaworthy.toml`, `signing.toml`, `publish.toml` | the three files above |
 | `ci-signing-toml` | (none) | outside a release, the CI test keys' signing configuration; empty, non-release builds stay unsigned |
 | `seaworthy-dir` | `.seaworthy` | a seaworthy checkout at this template's revision |

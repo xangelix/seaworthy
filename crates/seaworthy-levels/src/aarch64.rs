@@ -1,21 +1,25 @@
 //! The aarch64 feature table: one row per aarch64 target-feature name the
-//! pinned rustc (1.98.1) can enable through `-C target-cpu`, with how macOS
+//! pinned rustc (1.99.1) can enable through `-C target-cpu`, with how macOS
 //! reports it.
 //!
 //! **The vocabulary** is the 71 names `rustc --print cfg` reports, with
-//! `RUSTC_BOOTSTRAP=1`, across every aarch64 CPU rustc 1.98.1 knows on
-//! `aarch64-apple-darwin` (the 87 it lists, plus the `apple-m1`, `apple-m2`
+//! `RUSTC_BOOTSTRAP=1`, across every aarch64 CPU rustc 1.99.1 knows on
+//! `aarch64-apple-darwin` (the 84 it lists, plus the `apple-m1`, `apple-m2`
 //! and `apple-m3` aliases it doesn't). `tests/vocabulary.rs` re-derives it
 //! from the toolchain in use and fails on any name without a row.
 //!
 //! **The signals** follow the standard library's own detector for Darwin
 //! (`library/std_detect/src/detect/os/darwin/aarch64.rs` in rust-src
-//! 1.98.1): the same `sysctl` keys, combined the same way — `aes` needs
+//! 1.99.1): the same `sysctl` keys, combined the same way — `aes` needs
 //! `FEAT_AES` and `FEAT_PMULL`, `sha2` `FEAT_SHA1`, `FEAT_SHA256` and
 //! AdvSIMD, `sha3` `FEAT_SHA512`, `FEAT_SHA3` and AdvSIMD, `mte` `FEAT_MTE`
 //! and `FEAT_MTE2`, `paca` and `pacg` `FEAT_PAuth` — and stricter for
 //! `neon`, which also needs `hw.optional.floatingpoint` (rustc's `neon`
-//! implies `fp-armv8`). Detection runs on macOS only (Apple Silicon, the one
+//! implies `fp-armv8`). One divergence: std 1.99 also takes
+//! `hw.optional.arm.AdvSIMD` for AdvSIMD; this table reads
+//! `hw.optional.AdvSIMD` alone, which every macOS since 11 defines (were a
+//! macOS to drop it, `sha2` and `sha3` would under-report, never
+//! over-report; `neon` is in the M1 baseline). Detection runs on macOS only (Apple Silicon, the one
 //! aarch64 platform the launcher supports); elsewhere every aarch64 feature
 //! is absent.
 //!

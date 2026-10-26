@@ -1,6 +1,6 @@
 //! The live CPU, checked row by row against std's own detector for every
-//! name stable `is_x86_feature_detected!` accepts (57 of the 76 on rustc
-//! 1.98.1). Of the other 19, `clflushopt`, `lahfsahf`, `prfchw` and `x87`
+//! name stable `is_x86_feature_detected!` accepts (57 of the 75 on rustc
+//! 1.99.1). Of the other 18, `clflushopt`, `lahfsahf`, `prfchw` and `x87`
 //! are set in the recorded fixtures (`tests/fixtures.rs`); the AMX and AVX10
 //! families, `apxf`, `fma4`, `movrs` and `xop` — on no recorded CPU — are
 //! covered by the synthetic CPUs in `detect.rs`'s unit tests.

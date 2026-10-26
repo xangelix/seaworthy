@@ -1,10 +1,10 @@
 //! The feature table: one row per x86 target-feature name the pinned rustc
-//! (1.98.1) can enable through `-C target-cpu`, with the CPUID bit that
+//! (1.99.1) can enable through `-C target-cpu`, with the CPUID bit that
 //! reports it and the extra conditions it needs before it may be called
 //! present.
 //!
-//! **The vocabulary** is the 75 names `rustc --print cfg` reports, with
-//! `RUSTC_BOOTSTRAP=1`, across all 131 x86 CPUs rustc 1.98.1 knows, plus the
+//! **The vocabulary** is the 74 names `rustc --print cfg` reports, with
+//! `RUSTC_BOOTSTRAP=1`, across all 136 x86 CPUs rustc 1.99.1 knows, plus the
 //! features a CPU target uses without reporting them ([`IMPLIED_FEATURES`]:
 //! `apxf`). `tests/vocabulary.rs` re-derives both from the toolchain in use
 //! — the second by compiling a probe for every CPU — and fails on any name
@@ -16,8 +16,8 @@
 //! crashes the program with an invalid-opcode fault):
 //!
 //! - [`Reference::StdDetect`] — the standard library's own detector
-//!   (`library/std_detect/src/detect/os/x86.rs` in rust-src 1.98.1), which
-//!   covers 72 of the 76 names, including the OS-state rules (XCR0) and its
+//!   (`library/std_detect/src/detect/os/x86.rs` in rust-src 1.99.1), which
+//!   covers 71 of the 75 names, including the OS-state rules (XCR0) and its
 //!   errata handling.
 //! - [`Reference::Llvm`] — LLVM's X86 host detection, for the four names
 //!   std does not detect (`x87`, `lahfsahf`, `prfchw`, `fma4`).
@@ -155,10 +155,10 @@ use Reg::{Eax, Ebx, Ecx, Edx};
 /// The extended-function leaf carrying AMD-defined and LAHF/PREFETCHW bits.
 pub const EXTENDED_FEATURES_LEAF: u32 = 0x8000_0001;
 
-/// Every feature name rustc 1.98.1 can enable on x86, in CPUID order: the 75
+/// Every feature name rustc 1.99.1 can enable on x86, in CPUID order: the 74
 /// names `--print cfg` reports for some CPU, plus `apxf`, which two CPU
 /// targets use without `--print cfg` saying so ([`IMPLIED_FEATURES`]).
-pub const FEATURES: [Feature; 76] = [
+pub const FEATURES: [Feature; 75] = [
     // CPUID.1:EDX — the original feature flags.
     row("x87", 1, 0, Edx, 0, Gate::None, Llvm),
     row("fxsr", 1, 0, Edx, 24, Gate::None, StdDetect),
@@ -245,7 +245,6 @@ pub const FEATURES: [Feature; 76] = [
     row("widekl", 0x19, 0, Ebx, 2, KeyLockerWide, Stricter),
     // CPUID.0x1E.1:EAX — the AMX extensions.
     row("amx-fp8", 0x1E, 1, Eax, 4, AmxState, StdDetect),
-    row("amx-tf32", 0x1E, 1, Eax, 6, AmxState, StdDetect),
     // AMX-AVX512 moves data between tiles and ZMM registers: std requires AMX
     // state only; this also requires AVX-512 state.
     row("amx-avx512", 0x1E, 1, Eax, 7, AmxAvx512State, Stricter),
@@ -319,7 +318,7 @@ pub const FEATURES: [Feature; 76] = [
 ];
 
 /// Features a CPU target makes the compiler USE although `--print cfg`
-/// does not report them — `(cpu, feature)`. rustc 1.98.1 (LLVM 22):
+/// does not report them — `(cpu, feature)`. rustc 1.99.1 (LLVM 23):
 /// `diamondrapids` and `novalake` enable APX's sub-features (NF, NDD, …)
 /// without all of them, so `--print cfg` lists no `apxf`, yet the code
 /// carries APX encodings that fault without APX. `seaworthy-launcher`'s build
@@ -447,7 +446,7 @@ mod tests {
             assert!(seen.insert(feature.name), "duplicate row {}", feature.name);
             assert!(feature.bit.bit < 32, "{}", feature.name);
         }
-        assert_eq!(seen.len(), 76);
+        assert_eq!(seen.len(), 75);
     }
 
     #[test]
@@ -470,7 +469,7 @@ mod tests {
         assert_eq!(Arch::of_target("aarch64-apple-darwin"), Some(Arch::Aarch64));
         assert_eq!(Arch::of_target("x86_64-apple-darwin"), Some(Arch::X86_64));
         assert_eq!(Arch::of_target("wasm32-unknown-unknown"), None);
-        assert_eq!(Arch::X86_64.names().len(), 76);
+        assert_eq!(Arch::X86_64.names().len(), 75);
         assert_eq!(Arch::Aarch64.names().len(), 71);
     }
 

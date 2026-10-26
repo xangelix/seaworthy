@@ -18,13 +18,13 @@ for it against what this machine supports.
 These pieces make that check exact:
 
 - **`FEATURES`** — one row per target-feature name the pinned rustc can
-  enable (76 names for rustc 1.98.1, across all 131 x86 CPUs it knows):
+  enable (75 names for rustc 1.99.1, across all 136 x86 CPUs it knows):
   the CPUID leaf, sub-leaf, register and bit, plus the OS-state or vendor
   condition (`Gate`) the feature also needs. **`IMPLIED_FEATURES`** names
   what a CPU target uses without `--print cfg` reporting it (`apxf` for
   `diamondrapids` and `novalake`, rule 3).
 - **`AARCH64_FEATURES`** — the same for aarch64 (71 names across every
-  aarch64 CPU rustc 1.98.1 knows): the macOS `sysctl` keys std's own Darwin
+  aarch64 CPU rustc 1.99.1 knows): the macOS `sysctl` keys std's own Darwin
   detector reads for each (`Signal::Sysctl`), the Apple M1 baseline every
   arm64 Mac has (`Signal::AppleM1`, rule 5), or nothing macOS reports
   (`Signal::Never`).
@@ -47,7 +47,7 @@ launcher's choice — is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
    `unknown`; a core that names one is never loaded. The table must grow
    instead (rule 3).
 2. **Under-report, never over-report.** Each row follows std's own
-   detector (`std_detect`, rust-src 1.98.1) — or LLVM's for the four names
+   detector (`std_detect`, rust-src 1.99.1) — or LLVM's for the four names
    std doesn't detect — and the *stricter* of the two where they differ
    (`Reference::Stricter`: `f16c`, `vaes`, `vpclmulqdq` also need AVX
    state; `xop` needs an AMD vendor and AVX state; `amx-avx512` also needs
@@ -61,7 +61,7 @@ launcher's choice — is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
    `rustc --print cfg -C target-cpu=<cpu>` reports (with
    `RUSTC_BOOTSTRAP=1`) for every CPU on both supported x86-64 targets, and
    fails on a name without a row ("add one row") or a row the toolchain
-   dropped. `--print cfg` can under-report: on rustc 1.98.1 `diamondrapids`
+   dropped. `--print cfg` can under-report: on rustc 1.99.1 `diamondrapids`
    and `novalake` enable APX's sub-features (NF, NDD, CCMP, PUSH2/POP2, …)
    without the `apxf` umbrella, so no `apxf` is reported, yet the code is
    full of APX encodings. So the test also compiles a probe for every

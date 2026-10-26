@@ -6,7 +6,7 @@
 //! name rustc knows). This crate is what the launcher decides with:
 //!
 //! - **[`FEATURES`]** — one row per target-feature name the pinned rustc can
-//!   enable (76 names for rustc 1.98.1, across all 131 x86 CPUs it knows —
+//!   enable (75 names for rustc 1.99.1, across all 136 x86 CPUs it knows —
 //!   including `apxf`, which two CPU targets use without `--print cfg`
 //!   reporting it, [`IMPLIED_FEATURES`]): the CPUID leaf, sub-leaf, register
 //!   and bit, plus the OS-state or vendor condition the feature also needs

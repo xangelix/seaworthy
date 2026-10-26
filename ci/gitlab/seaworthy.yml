@@ -153,7 +153,7 @@ spec:
       description: Required. The image of prepare, package, repo and publish, for any x86-64 runner. It needs Rust, bash, curl and git, plus the packaging tools (dpkg, rpm's rpmsign and rpmkeys, createrepo_c, pacman's repo-add, gnupg, libarchive's bsdtar; msitools for the MSI adoption, desktop-file-utils for desktop products); on Arch Linux the steps install what's missing with pacman. Nothing it builds ships (the products compile in build-image).
     build-image:
       description: The Linux build's image, whose glibc is at or below the products' floor (2.34 by default); a FIPS product's needs the module's toolchain too. The default is the official Rust image on Debian 12 (glibc 2.36), digest-pinned.
-      default: rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
+      default: rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
     build-stage:
       default: build
     package-stage:
@@ -184,7 +184,7 @@ spec:
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "9d5d9b3af2b2774f"
+    SEAWORTHY_TEMPLATE: "aef9ee4913254b24"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
