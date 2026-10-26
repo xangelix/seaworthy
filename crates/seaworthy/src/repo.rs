@@ -1291,12 +1291,17 @@ fn pacman(
         files.push(file.to_owned());
     }
     let database = format!("{name}.db.tar.zst");
+    // Absolute paths: a word starting with `/` is never an option, in any
+    // repo-add. `--` would not do: repo-add's implementations (pacman's
+    // shell script across releases, distributions' rewrites) don't agree
+    // on ending the options with it. The names are the vendor's and the
+    // packages' anyway, which never start with `-`.
     let mut command = crate::process::tool(&tools.repo_add);
     command
         .current_dir(&root)
         .args(["--quiet", "--nocolor"])
-        .arg(&database)
-        .args(&files);
+        .arg(root.join(&database))
+        .args(files.iter().map(|file| root.join(file)));
     run_ok(&mut command, "repo-add", tools.timeout)?;
     let mut indexes = Vec::new();
     // The files database before the one `pacman -Sy` reads.
