@@ -502,6 +502,11 @@ fn the_text_form_is_one_tab_separated_step_per_line() {
     );
 }
 
+// Unix only: the plan names the workspace's paths in a shell-safe alphabet,
+// which an absolute Windows path (a drive, backslashes, an 8.3 `~` name)
+// never is; the reusable workflow plans on Linux, and the Windows lab plans
+// from a relative checkout path.
+#[cfg(unix)]
 #[test]
 fn the_command_prints_the_plan() {
     let dir = tempfile::tempdir().unwrap();
@@ -628,7 +633,11 @@ fn a_product_s_build_rustflags_are_refused() {
         "build.rustflags = [\"-Dwarnings\"]\n",
     )
     .unwrap();
-    let err = check_cargo_config(&manifest).unwrap_err().to_string();
+    // The path as the platform prints it, compared with `/` separators.
+    let err = check_cargo_config(&manifest)
+        .unwrap_err()
+        .to_string()
+        .replace('\\', "/");
     assert!(
         err.contains("repo/.cargo/config sets build.rustflags"),
         "{err}"
