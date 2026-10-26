@@ -191,8 +191,9 @@ A library caller that never publishes takes `default-features = false`.
 - **To sign:** osslsigncode 2.14 (Authenticode with a local certificate, and the check of every
   Authenticode signature; `scripts/ci/install-osslsigncode.sh` builds it from its pinned source),
   gpg, rpmsign and rpmkeys, or whatever programs `signing.toml`'s commands name.
-- **To build repositories:** `dpkg-scanpackages` (dpkg), `createrepo_c` and `repo-add` (pacman),
-  plus `dpkg-deb` and `bsdtar` to read the repository package back.
+- **To build repositories:** `dpkg-scanpackages` (dpkg), `createrepo_c` and `repo-add` (pacman;
+  on Debian and Ubuntu, `pacman-package-manager` and `makepkg`, whose shell libraries `repo-add`
+  loads), plus `dpkg-deb` and `bsdtar` to read the repository package back.
 - **To adopt an MSI:** msitools' `msiextract` and `msiinfo`.
 
 The artifact directory the build leaves for `seaworthy`:

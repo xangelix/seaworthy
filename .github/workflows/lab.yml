@@ -213,7 +213,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            rpm createrepo-c dpkg-dev pacman-package-manager libarchive-tools gnupg desktop-file-utils
+            rpm createrepo-c dpkg-dev pacman-package-manager makepkg libarchive-tools gnupg desktop-file-utils
       - name: Pull the digest-pinned images
         run: scripts/pull-test-images.sh --only debian-13,ubuntu-24.04,ubi-9,fedora-43,arch,rust-builder
       - name: scripts/linux-conformance.sh
