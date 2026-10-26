@@ -61,6 +61,36 @@ fn refused(text: &str, mentions: &str) {
     assert!(err.contains(mentions), "expected {mentions:?} in: {err}");
 }
 
+/// `check` notes each msi product whose UpgradeCode is derived (an
+/// existing product must pin the one its MSIs carry); a pinned code, the
+/// derived one included, silences it.
+#[test]
+fn check_notes_msi_products_without_a_pinned_upgrade_code() {
+    let config = Config::parse(EXAMPLE).unwrap();
+    let notes = config.notes();
+    let ids: Vec<&str> = notes.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["collector", "console"]);
+    let derived = seaworthy::wix::upgrade_code(&config, "collector").unwrap();
+    assert!(
+        notes[0]
+            .1
+            .contains(&format!("upgrade-code = \"{derived}\"")),
+        "{}",
+        notes[0].1
+    );
+    assert!(notes[0].1.contains("Migrating an existing product"));
+    let pinned = edit(
+        "windows-directory = \"Collector\"",
+        &format!("windows-directory = \"Collector\"\nupgrade-code = \"{derived}\""),
+    );
+    let notes = Config::parse(&pinned).unwrap().notes();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].0, "console");
+    // No msi output, no note.
+    let without = edit("outputs = [\"msi\", \"deb\"]", "outputs = [\"deb\"]");
+    assert_eq!(Config::parse(&without).unwrap().notes().len(), 1);
+}
+
 #[test]
 fn the_documented_example_loads() {
     let config = Config::parse(EXAMPLE).expect("valid");

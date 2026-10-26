@@ -147,6 +147,50 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
+fn check_notes_a_derived_upgrade_code_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("seaworthy.toml");
+    let product = r#"
+[defaults]
+vendor = "Acme"
+targets = ["x86-64-v2"]
+channel = "stable"
+maintainer = "Acme <pkg@acme.test>"
+license = "MIT"
+
+[product.viewer]
+display-name = "Acme Viewer"
+description = "A viewer."
+executable = "AcmeViewer"
+core = "acme_core"
+kind = "tool"
+windows-directory = "Viewer"
+outputs = ["msi", "zip"]
+updates.default = "off"
+"#;
+    std::fs::write(&config, product).unwrap();
+    let out = seaworthy(&["check", "--config", config.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("seaworthy: note: [viewer] the MSI's UpgradeCode is derived, {"),
+        "{stderr}"
+    );
+    // Pinned, it's quiet.
+    std::fs::write(
+        &config,
+        product.replace(
+            "windows-directory = \"Viewer\"",
+            "windows-directory = \"Viewer\"\nupgrade-code = \"{6F1C4A2E-3B5D-4C7E-9A1B-2D3E4F5A6B7C}\"",
+        ),
+    )
+    .unwrap();
+    let out = seaworthy(&["check", "--config", config.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(out.stderr.is_empty(), "{}", text(&out));
+}
+
+#[test]
 fn verify_and_layout_require_their_directories() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("seaworthy.toml");

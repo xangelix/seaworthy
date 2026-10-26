@@ -657,6 +657,9 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                 config_path().display(),
                 config.products.len()
             );
+            for (id, note) in config.notes() {
+                eprintln!("seaworthy: note: [{id}] {note}");
+            }
         }
         "verify" => {
             let artifacts = required(&args.artifacts, command, "--artifacts")?;

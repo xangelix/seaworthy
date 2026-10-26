@@ -1270,6 +1270,31 @@ impl Config {
         Ok(config)
     }
 
+    /// What `seaworthy check` notes beside a valid file, as `(product,
+    /// note)`: settings that suit a new product but decide whether an
+    /// existing product's next release upgrades it in place. One per
+    /// product with an `msi` output and no `upgrade-code`: its UpgradeCode
+    /// is derived ([`crate::wix::upgrade_code`]), and an MSI another tool
+    /// built carries another, which the next MSI would install beside
+    /// instead of upgrading. Pinning a code, the derived one included,
+    /// silences it.
+    #[must_use]
+    pub fn notes(&self) -> Vec<(String, String)> {
+        self.products
+            .iter()
+            .filter(|(_, p)| p.outputs.contains(&Output::Msi) && p.upgrade_code.is_none())
+            .filter_map(|(id, _)| {
+                let code = crate::wix::upgrade_code(self, id).ok()?;
+                Some((
+                    id.clone(),
+                    format!(
+                        "the MSI's UpgradeCode is derived, {code}: if this product already shipped MSIs built another way, pin their UpgradeCode as upgrade-code, or its next MSI installs beside them instead of upgrading them (docs/packaging.md, \"Migrating an existing product\"); a new product can pin upgrade-code = \"{code}\""
+                    ),
+                ))
+            })
+            .collect()
+    }
+
     /// This configuration with the CI test keys trusted instead of
     /// `release-keys` and `openpgp-keys` (`seaworthy package` and
     /// `adopt-msi` `--ci-test-signing`): every signature made and checked

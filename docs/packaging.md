@@ -163,7 +163,8 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
   policy default and the machine's update server under `HKLM\SOFTWARE\<Vendor>\<Directory>`;
 - allows two builds of one version (the sequence orders them) and refuses downgrades. Its
   UpgradeCode is `upgrade-code`, else derived from the vendor and the product id: pin it before
-  renaming either.
+  renaming either, and to the code earlier MSIs carry when another tool built them
+  ([Migrating an existing product](#migrating-an-existing-product)).
 
 With `SEAWORTHY_WIX` naming WiX v5.0.2, `package` builds the MSI itself. Otherwise a Windows runner
 builds it from the `.wxs` (`wix build -arch x64 -bindpath tree=<tree> -o <name>.msi <name>.wxs`, then
@@ -393,3 +394,31 @@ printf '\n[acme]\nSigLevel = Required\nServer = https://files.example.com/packag
 Compare the key's fingerprint with one the vendor publishes elsewhere before trusting it; the setup
 deb's detached signature checks with `gpgv --keyring <dearmored key> acme-repository.deb.asc
 acme-repository.deb`.
+
+## Migrating an existing product
+
+A product that already shipped packages built by another tool has an installed base that knows it
+by several identities. seaworthy derives each of them from `seaworthy.toml`, under its own rules and
+namespaces, so a new product can take them as they come; a migrating product must make each one
+equal to what its machines carry, or its first seaworthy release installs beside the old product
+instead of upgrading it, or never reaches the machines at all. Check every row before that release:
+
+| Identity | What seaworthy uses | When it differs from the installed one |
+|---|---|---|
+| MSI UpgradeCode | `upgrade-code`, else a code derived from the vendor and the product id. Another tool derives its codes another way, so the derived one is never the code its MSIs carry. | The MSI installs beside the old product: two entries in Programs and Features, two copies of the service. **Pin `upgrade-code`** to the code the shipped MSIs carry (`msiinfo export <old>.msi Property` with msitools, or the `Property` table in Orca). `seaworthy check` notes every product with an `msi` output and no `upgrade-code`. |
+| MSI ProductVersion | `MAJOR.MINOR.PATCH`; Windows Installer compares the first three fields only, allows the same version again and refuses a downgrade. | The first release is refused as a downgrade unless its version compares at or above the installed one on those three fields (a build counter the old versions kept in the third field, say). |
+| MSI component GUIDs | Derived from the UpgradeCode and each file. | Nothing to do: the major upgrade removes the old product before it installs (`afterInstallInitialize`), so the two never share a component. |
+| MSI scope | Per machine. | A per-user installation of the old product isn't found by the upgrade: remove it first. |
+| Package names | `<vendor>-<id>` in lowercase, for deb, rpm and pacman. | apt, dnf and pacman see an unrelated package: both stay installed and collide on shared paths (`/usr/bin/<command>`, units), and the update helper doesn't find the installed release. seaworthy declares no `Replaces`, `Obsoletes` or `Conflicts`: choose `vendor` and the product id so the name is the old one, or retire the old package on each machine. |
+| Service names | `[product.<id>.service]`'s `name`: the SCM name, the systemd unit's basename, the LaunchDaemon's label; with `state-directory` (systemd `StateDirectory=`) and the sandbox `user`. | The old service keeps running beside the new one wherever the old package or product survives, and a new state directory or user starts the service without its state, or without the right to it. Keep all three. |
+| Install directories | `/opt/<vendor>/<id>` (lowercase), `%ProgramFiles%\<Vendor>\<windows-directory>`, `/Applications/<Display Name>.app`; state, staging and logs under `%ProgramData%\<Vendor>\<windows-directory>`. | Files move: whatever names the old paths (scripts, firewall rules, monitoring, allow-lists) stops matching, and state left under the old directory isn't carried over. |
+| macOS bundle id | `bundle-id`, which is also the pkg's identifier. | macOS keys permissions and preferences to the bundle id, and the installer upgrades an app only under the same identifier. Keep it. |
+| Update policy | `HKLM\SOFTWARE\Policies\<Vendor>\<windows-directory>` (Group Policy), `HKLM\SOFTWARE\<Vendor>\<windows-directory>` (the MSI's `UPDATES=` and `SERVER=`), `/etc/<vendor>/<id>/policy.toml`. | Administrators' policies stop applying, silently: an `off` their policy set no longer holds. Keep `vendor` and `windows-directory` so the keys are the ones administrators already set, or have them deploy the new Group Policy templates first. |
+| The release key | `release-keys`, compiled into the update helper, verifying `seaworthy-release-manifest:1` manifests. | An update helper built by another tool verifies its own manifest format and keys: it never installs a seaworthy release. The first seaworthy release reaches machines through a channel they already trust (the package repositories, below; an administrator; the old tool's own update path); from then on the seaworthy-built helper updates them. An existing ML-DSA-87, ECDSA P-256 or Ed25519 key pair can stay the release key, its public key written as `seaworthy keygen --public` writes one. |
+| The OpenPGP key | `openpgp-keys`: rpm and pacman signatures and every repository index. | Machines' keyrings refuse what a new key signed. Sign with the key they trust, or rotate it as above ("Rotating the OpenPGP key"). |
+| Repository URLs | `[defaults.repository]`'s `url`; the layout under it (`apt/`, `rpm/<channel>/x86_64`, `pacman/<channel>/x86_64`); the repository package's `/etc/apt/sources.list.d/<repo>.sources`, `/usr/share/keyrings/<repo>-archive-keyring.asc` and `/etc/yum.repos.d/<repo>.repo`. | Machines keep fetching the old URL and layout and never see a seaworthy release. Publish where they look, or ship one last release through the old repository that installs `<vendor>-repository` and removes the old source definition (apt refuses one repository listed twice with different `Signed-By` keyrings). |
+
+Then prove the upgrade on a machine with the last old release installed, for each format: one
+product left in Programs and Features (or one package in `dpkg -l`, `rpm -qa`, `pacman -Q`), its
+service running under its old name with its state, the administrator's policy still read, and the
+seaworthy-built update helper installing the release after it.
