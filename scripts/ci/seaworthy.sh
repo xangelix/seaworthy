@@ -450,13 +450,14 @@ prepare() {
     local triple product
     selected_products
     for triple in "$linux" "$windows" "$macos"; do
-        "$tool" build-plan --config "$config" --triple "$triple" \
-            --manifest "${SEAWORTHY_MANIFEST:-Cargo.toml}" > "$work/plan-$triple.tsv"
-        if [ "${#products[@]}" -gt 0 ]; then
-            # The selected products' plans, each step once, in order (the
-            # whole plan above already refused products that build one
-            # artifact differently). A product without this triple's
-            # outputs adds nothing.
+        if [ "${#products[@]}" -eq 0 ]; then
+            "$tool" build-plan --config "$config" --triple "$triple" \
+                --manifest "${SEAWORTHY_MANIFEST:-Cargo.toml}" > "$work/plan-$triple.tsv"
+        else
+            # The selected products' plans, each step once, in order. A
+            # product without this triple's outputs adds nothing; two that
+            # build one binary (a target directory's --bin or -p) with other
+            # arguments are refused, as the whole plan refuses them.
             : > "$work/plan-$triple.tsv.selected"
             for product in "${products[@]}"; do
                 if ! "$tool" build-plan --config "$config" --triple "$triple" --product "$product" \
@@ -467,6 +468,15 @@ prepare() {
             done
             awk '!seen[$0]++' "$work/plan-$triple.tsv.selected" > "$work/plan-$triple.tsv"
             rm -f "$work/plan-$triple.tsv.selected" "$work/plan.err"
+            local clash
+            clash="$(awk -F'\t' '$1 == "build" {
+                n = split($4, word, " "); unit = "";
+                for (i = 1; i < n; i++) if (word[i] == "--bin" || word[i] == "-p") unit = unit " " word[i] " " word[i + 1];
+                key = $2 unit;
+                if (key in line && line[key] != $0) { print key; exit }
+                line[key] = $0 }' "$work/plan-$triple.tsv")"
+            [ -z "$clash" ] ||
+                fail "$triple: the selected products build ${clash} differently: give their binaries different names"
         fi
         if [ -s "$work/plan-$triple.tsv" ]; then
             say "$triple: $(grep -c '^build' "$work/plan-$triple.tsv") build(s), $(grep -c '^copy' "$work/plan-$triple.tsv") binaries"

@@ -2775,6 +2775,24 @@ fn prepare_plans_the_selected_products_alone() {
     let out = prepare("Tool");
     assert!(!out.status.success());
     assert!(said(&out).contains("isn't a product id"), "{}", said(&out));
+    // Two selected products building one binary differently: refused,
+    // though the products aren't selected together otherwise.
+    let clashing = format!(
+        "{}\n[product.other]\ndisplay-name = \"Acme Other\"\ndescription = \"Another.\"\n\
+         launcher = \"crates/other\"\nexecutable = \"AcmeTool\"\ncore = \"acme_core\"\nkind = \"tool\"\n\
+         outputs = [\"tar\"]\nupdates.default = \"off\"\n",
+        std::fs::read_to_string(dir.path().join("seaworthy.toml")).unwrap()
+    );
+    std::fs::write(dir.path().join("seaworthy.toml"), clashing).unwrap();
+    let out = prepare("tool");
+    assert!(out.status.success(), "{}", said(&out));
+    let out = prepare("console,other");
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("the selected products build base --bin AcmeTool differently"),
+        "{}",
+        said(&out)
+    );
     let out = prepare("missing");
     assert!(!out.status.success());
     assert!(said(&out).contains("missing"), "{}", said(&out));
