@@ -938,6 +938,7 @@ dependencies = [
  "miniz_oxide",
  "object",
  "seaworthy",
+ "seaworthy-crypto",
  "seaworthy-formats",
  "seaworthy-lab",
  "seaworthy-levels",

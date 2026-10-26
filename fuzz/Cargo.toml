@@ -35,6 +35,8 @@ arbitrary = { version = "1", features = ["derive"] }
 # The fuzzed crates. `fuzzing` enables a crate's doc-hidden `__fuzz` seam
 # over crate-private parsers (no extra dependencies).
 seaworthy-levels = { path = "../crates/seaworthy-levels" }
+# The ML-DSA-87 public-key intake test (mldsa_public_key; public API).
+seaworthy-crypto = { path = "../crates/seaworthy-crypto" }
 seaworthy-formats = { path = "../crates/seaworthy-formats" }
 seaworthy-service = { path = "../crates/seaworthy-service", features = ["fuzzing"] }
 seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing"] }
@@ -86,6 +88,13 @@ bench = false
 [[bin]]
 name = "levels_records"
 path = "fuzz_targets/levels_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mldsa_public_key"
+path = "fuzz_targets/mldsa_public_key.rs"
 test = false
 doc = false
 bench = false

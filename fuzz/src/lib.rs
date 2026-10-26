@@ -48,6 +48,7 @@ targets![
     dist_pe,
     lab_request,
     levels_records,
+    mldsa_public_key,
     s3_xml,
     service_unit,
     updater_manifest,
