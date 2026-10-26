@@ -118,5 +118,7 @@ Stop-Process $server
 
 The release tree's layout is the update helper's URL template: the fixture's helper is built with
 `SEAWORTHY_LAB_PACKAGE_URL` and `SEAWORTHY_LAB_VERSION_URL` naming the lab
-(`crates/seaworthy-launcher/e2e/demo_helper/build.rs`). Remove the root from the store and the
-hosts entry when the lane ends, on every exit path.
+(`crates/seaworthy-launcher/e2e/demo_helper/build.rs`; the Windows fixture's `scm_helper` takes
+`SEAWORTHY_E2E_HELPER_PACKAGE_URL` and `SEAWORTHY_E2E_HELPER_VERSION_URL`). Remove the root from
+the store and the hosts entry when the lane ends, on every exit path. `scripts/windows-upgrade.ps1`
+is the Windows upgrade lane built this way.

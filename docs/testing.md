@@ -29,6 +29,7 @@ a throwaway CA, and the client the fixture helper's version source uses.
 | macOS pkg install | The service pkg installed with sudo: launchd runs it and loads the helper's daemon; the helper upgrades, refuses a wrong format, a tampered pkg, a downgrade and an `off` or untrusted policy file, survives failing install scripts (backing off, then rolling forward); the uninstaller removes everything | `scripts/macos-pkg-install.sh` |
 | Upgrade from previous, Linux | The previous lab build (the latest successful run on `main`) installed on the five distributions, then updated by its own helper to this run's build over TLS from the lab (a name-constrained throwaway CA in the system store, hosts entries): an `off` policy honored, another key's manifest refused, then the transition (version, the service restarted on the new build, the new files, the path unit untouched, the service's state kept) | `scripts/upgrade-candidate.sh linux`, `scripts/upgrade-previous.sh`, `scripts/upgrade-linux.sh` (the suite: `crates/seaworthy-lab/tests/upgrade_linux.rs`) |
 | Upgrade from previous, macOS | The same on macOS: the previous pkg installed, the CA in the System keychain, the helper's daemon updating it to this run's pkg | `scripts/upgrade-candidate.sh macos`, `scripts/upgrade-previous.sh`, `scripts/upgrade-macos.sh` |
+| Upgrade from previous, Windows (`lab-windows.yml`) | The same on Windows: the previous MSI installed, the CA in `LocalMachine\Root`, the helper's service updating it to this run's MSI through Windows Installer ([testing-windows.md](testing-windows.md#the-upgrade-lane)) | `scripts/windows-lab-build.ps1` (its upgrade step), `scripts/windows-upgrade-previous.ps1`, `scripts/windows-upgrade.ps1` |
 
 ### How the lab is built
 
@@ -45,20 +46,23 @@ a throwaway CA, and the client the fixture helper's version source uses.
 - **Keys.** The conformance and pkg-install lanes generate throwaway keys every run. The upgrade
   lanes need one key across runs (a previous build's helper must trust this run's packages), so
   the fixture's builds are non-release builds signed with a **public CI test key** committed in
-  `crates/seaworthy-launcher/e2e/desktop/keys/` (`--ci-test-signing`; the
+  `crates/seaworthy-launcher/e2e/desktop/keys/` (Linux and macOS) and
+  `crates/seaworthy-launcher/e2e/scm/keys/` (Windows) (`--ci-test-signing`; the
   [threat model's CI test-key mechanism](threat-model.md#the-ci-test-key-mechanism)). Nothing but
   the fixture trusts it, and the fixture's helper only ever reaches names under `.invalid`, which
-  never resolve outside a lab's hosts entries.
+  never resolve outside a lab's hosts entries (the Windows helper's build script refuses any
+  other name).
 - **The throwaway CA** permits only the lab's names (critical name constraints), and its private
   key never leaves the process that made it, so nothing can issue another certificate under the
   root a lane trusts. The lanes remove it, the hosts entries and the installed product on every
   exit path.
 - **The previous build.** The upgrade jobs on `main` keep their candidate as an artifact
-  (`lab-upgrade-linux`, `lab-upgrade-macos`, 30 days). A later run picks the latest successful
-  run of the workflow on `main` (from a push, the schedule or a dispatch, never a pull request's;
-  the repository's own; a lower run number, so an older release), downloads its artifact with
-  the job's token (`actions: read`, nothing else), checks the zip against the SHA-256 digest
-  GitHub recorded at upload and every file against the build's own listing. When there is none
+  (`lab-upgrade-linux`, `lab-upgrade-macos`, 30 days; the Windows lab's build job keeps
+  `lab-upgrade-windows`). A later run picks the latest successful run of the workflow on
+  `main` (from a push, the schedule or a dispatch, never a pull request's; the repository's own;
+  a lower run number, so an older release), downloads its artifact with the job's token
+  (`actions: read`, nothing else), checks the zip against the SHA-256 digest GitHub recorded at
+  upload and every file against the build's own listing. When there is none
   (the lane's first run on `main`, an expired artifact, or a build trusting a rotated test key),
   the lane is skipped with a warning and the run's candidate becomes the next one's previous
   build. It doesn't build a previous build from the merge base instead: at the lane's
@@ -83,4 +87,5 @@ PID 1 in containers with `CAP_SYS_ADMIN` (never privileged; see
 `crates/seaworthy-test-support/src/systemd.rs`). They are meant for a CI runner's own docker
 daemon: don't run them against a daemon other workloads share. `scripts/macos-pkg-install.sh` and
 `scripts/upgrade-macos.sh` install and remove system daemons, edit `/etc/hosts` and the System
-keychain; `scripts/upgrade-previous.sh` needs the GitHub Actions environment.
+keychain; `scripts/upgrade-previous.sh` and `scripts/windows-upgrade-previous.ps1` need the
+GitHub Actions environment.
