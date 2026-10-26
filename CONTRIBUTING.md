@@ -50,7 +50,8 @@ ahead of a run.
 Clang, CMake, Go and Perl. CI runs clippy and the tests with every other feature on Linux,
 Windows and macOS, and with all features (FIPS included) on Linux. It also checks the MSRV,
 cargo-deny, the fuzz corpus replay, the check scripts, and the workflows themselves; the fuzz
-targets run weekly ([fuzz/README.md](fuzz/README.md)). The toolchain, MSRV and release
+targets run weekly ([fuzz/README.md](fuzz/README.md)). The lab workflows install and update
+real packages on Linux distributions, macOS and Windows ([docs/testing.md](docs/testing.md)). The toolchain, MSRV and release
 procedures are in [docs/releasing.md](docs/releasing.md).
 
 ## Commits
