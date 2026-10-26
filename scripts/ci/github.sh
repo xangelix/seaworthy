@@ -13,10 +13,16 @@
 #                                        job was handed (names, never values);
 #                                        exports SEAWORTHY_SIGNING, or
 #                                        SEAWORTHY_UNSIGNED=1 without a signer
-#   github.sh apple-keychain             macOS: a throwaway keychain with the
-#                                        Developer ID identities and the
-#                                        notary profile
-#   github.sh apple-cleanup              macOS: that keychain deleted
+#   github.sh signed <step>              seaworthy.sh <step> (package,
+#                                        adopt-msi, package-macos, repo) with
+#                                        its signing material made for it alone:
+#                                        signing.toml and the Authenticode PEM
+#                                        files (or, on macOS, the Developer ID
+#                                        keychain) in a private directory that
+#                                        is shredded (keychain deleted) when the
+#                                        step ends, however it ends
+#   github.sh apple-cleanup              macOS: any keychain a cancelled step
+#                                        left, deleted (the always-run step)
 #   github.sh assemble <out> <label>=<dir>...
 #                                        every listed artifact, checked
 #                                        against its listing's SHA-256, into
@@ -45,17 +51,28 @@
 #                                       signing-toml: the identities, keychain
 #                                       and notary profile apple-keychain set
 #   SEAWORTHY_GH_SCRIPTS                signing-toml: where azure-sign.sh is
+#                                       (default: beside this script)
+#   SIGNING_TOML                        signed: the caller's own signing.toml,
+#                                       used instead of one made from secrets
+#   SEAWORTHY_RELEASE, SEAWORTHY_DEV_SIGN
+#                                       signed: whether the step signs at all;
+#                                       signing-toml: a release or a dev build
+#                                       with no signer is refused unless
+#                                       SEAWORTHY_ALLOW_UNSIGNED=1
 #
 # Every value that reaches a file is checked first; secrets go to files
-# only under a private directory (umask 077) and are never printed.
+# only under a private directory (umask 077), which `signed` shreds when its
+# step ends, and are never printed or put on a command line.
 set -euo pipefail
 shopt -s inherit_errexit
 
 fail() { echo "seaworthy (github): FAIL: $*" >&2; exit 1; }
 say() { echo "seaworthy (github): $*"; }
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Appends `name=value` to $GITHUB_OUTPUT (or prints it outside Actions).
 output() { # <name> <value>
+    [[ "$2" != *[$'\n\r']* ]] || fail "$1 holds a line break"
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
         printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
     else
@@ -65,7 +82,7 @@ output() { # <name> <value>
 
 # Exports `name=value` to the job's later steps ($GITHUB_ENV), or prints it.
 export_env() { # <name> <value>
-    [[ "$2" != *$'\n'* ]] || fail "$1 holds a newline"
+    [[ "$2" != *[$'\n\r']* ]] || fail "$1 holds a line break"
     if [ -n "${GITHUB_ENV:-}" ]; then
         printf '%s=%s\n' "$1" "$2" >> "$GITHUB_ENV"
     else
@@ -163,6 +180,7 @@ check_plain() { # <value>...
 # an OpenPGP signer by secret-key-env, Authenticode by a PKCS#12 converted
 # to PEM files in a private directory or by azure-sign.sh (OIDC), and the
 # Developer ID apple-keychain set up. Names and paths only.
+signed_file="" signed_unsigned=0
 signing_toml() { # <file>
     local file="$1" sections=()
     local dir
@@ -200,6 +218,7 @@ signing_toml() { # <file>
         [[ "$account" =~ ^[A-Za-z0-9-]{3,64}$ ]] || fail "azure-account: an Artifact Signing account name"
         [[ "$profile" =~ ^[A-Za-z0-9-]{3,64}$ ]] || fail "azure-profile: a certificate profile name"
         [ -n "${AZURE_TENANT_ID:-}" ] && [ -n "${AZURE_CLIENT_ID:-}" ] || fail "Azure Artifact Signing needs the azure-tenant-id and azure-client-id inputs"
+        scripts="${scripts:-$here}"
         [ -f "$scripts/azure-sign.sh" ] || fail "no azure-sign.sh in ${scripts@Q}"
         check_plain "$scripts/azure-sign.sh"
         printf '[authenticode]\ncommand = ["bash", "%s", "--endpoint", "%s", "--account", "%s", "--profile", "%s", "{file}"]\n\n' \
@@ -247,43 +266,84 @@ signing_toml() { # <file>
         printf '\n' >> "$file"
         sections+=("apple (Developer ID)")
     fi
-    # For the later steps: the file, or (no signer at all) an unsigned build.
+    # The file, or (no signer at all) an unsigned build: refused on a
+    # release or a dev build unless SEAWORTHY_ALLOW_UNSIGNED=1 means it, as a
+    # secret that didn't reach the job must not quietly ship unsigned.
     if [ "${#sections[@]}" -eq 0 ]; then
+        if [ "${SEAWORTHY_RELEASE:-0}" = 1 ] || [ "${SEAWORTHY_DEV_SIGN:-0}" = 1 ]; then
+            [ "${SEAWORTHY_ALLOW_UNSIGNED:-0}" = 1 ] ||
+                fail "no signer was handed to this job, on a release or a dev build: pass the signing secrets (or signing-toml), or allow an unsigned build on purpose with the allow-unsigned input"
+            echo "::warning::seaworthy: no signer was handed to this job: an UNSIGNED build (allow-unsigned)"
+        fi
         say "signing.toml: no signer was handed to this job: an unsigned build"
-        export_env SEAWORTHY_UNSIGNED 1
+        signed_unsigned=1
     else
         say "signing.toml: ${sections[*]}"
-        export_env SEAWORTHY_SIGNING "$file"
+        signed_file="$file"
     fi
 }
 
 # macOS: the Developer ID identities imported into a keychain of their own
-# (a random password, locked after six hours), first in the search list,
-# and the notary service's API key stored as a notarytool profile in it.
-# Exports the identities' names, the keychain and the profile for
-# signing-toml.
-apple_keychain() {
-    [ "$(uname -s)" = Darwin ] || fail "apple-keychain runs on macOS"
+# in <dir> (a random password, locked after two hours: the package step's
+# longest run, notarization included; `signed` deletes it when the step
+# ends), first in the search list, and the notary service's API key stored
+# as a notarytool profile in it. Sets the identities' names, the keychain
+# and the profile for signing-toml. The PKCS#12's password reaches openssl
+# alone, through its environment: each identity is re-wrapped under a
+# throwaway password, which is what `security import` (which takes one only
+# as -P, on its command line) sees.
+apple_keychain() { # <dir>
+    [ "$(uname -s)" = Darwin ] || fail "the Developer ID keychain is made on macOS"
     [ -n "${SEAWORTHY_GH_APPLE_P12:-}" ] || fail "no APPLE_CERTIFICATE_P12 secret"
     for variable in SEAWORTHY_GH_APPLE_NOTARY_KEY SEAWORTHY_GH_APPLE_NOTARY_KEY_ID SEAWORTHY_GH_APPLE_NOTARY_ISSUER; do
         [ -n "${!variable:-}" ] || fail "Developer ID signing notarizes: the APPLE_NOTARY_KEY, APPLE_NOTARY_KEY_ID and APPLE_NOTARY_ISSUER secrets are required"
     done
     [[ "$SEAWORTHY_GH_APPLE_NOTARY_KEY_ID" =~ ^[A-Z0-9]{6,20}$ ]] || fail "APPLE_NOTARY_KEY_ID isn't an App Store Connect key id"
     [[ "$SEAWORTHY_GH_APPLE_NOTARY_ISSUER" =~ ^[0-9a-fA-F-]{36}$ ]] || fail "APPLE_NOTARY_ISSUER isn't an issuer id (a UUID)"
-    local temp="${RUNNER_TEMP:?RUNNER_TEMP is unset}/seaworthy-apple"
+    local temp="$1/apple"
     umask 077
     mkdir -p "$temp"
-    local keychain="$temp/signing.keychain-db" password profile=seaworthy-notary
+    local keychain="$1/signing.keychain-db" password profile=seaworthy-notary throwaway
     password="$(openssl rand -hex 24)"
+    throwaway="$(openssl rand -hex 24)"
     echo "::add-mask::$password"
+    echo "::add-mask::$throwaway"
     security create-keychain -p "$password" "$keychain"
-    security set-keychain-settings -lut 21600 "$keychain"
+    security set-keychain-settings -lut 7200 "$keychain"
     security unlock-keychain -p "$password" "$keychain"
     base64 -d > "$temp/identity.p12" <<<"$SEAWORTHY_GH_APPLE_P12" || fail "APPLE_CERTIFICATE_P12 isn't base64"
-    security import "$temp/identity.p12" -k "$keychain" -f pkcs12 \
-        -P "${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" -T /usr/bin/codesign -T /usr/bin/productbuild >/dev/null ||
-        fail "APPLE_CERTIFICATE_P12 doesn't import with APPLE_CERTIFICATE_PASSWORD"
+    local legacy=()
+    SEAWORTHY_P12_IN="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" \
+        openssl pkcs12 -in "$temp/identity.p12" -passin env:SEAWORTHY_P12_IN -noout 2>/dev/null ||
+        legacy=(-legacy)
+    SEAWORTHY_P12_IN="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" \
+        openssl pkcs12 "${legacy[@]}" -in "$temp/identity.p12" -passin env:SEAWORTHY_P12_IN \
+        -nokeys -out "$temp/certificates.pem" 2>/dev/null ||
+        fail "APPLE_CERTIFICATE_P12 doesn't open with APPLE_CERTIFICATE_PASSWORD"
+    # Each private key into a file of its own (the Application and the
+    # Installer identities share one PKCS#12).
+    SEAWORTHY_P12_IN="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" \
+        openssl pkcs12 "${legacy[@]}" -in "$temp/identity.p12" -passin env:SEAWORTHY_P12_IN \
+        -nocerts -nodes 2>/dev/null |
+        awk -v dir="$temp" '/^-----BEGIN [A-Z ]*PRIVATE KEY-----$/ { n++; file = dir "/key-" n ".pem" }
+            file { print > file }
+            /^-----END [A-Z ]*PRIVATE KEY-----$/ { close(file); file = "" }' ||
+        fail "APPLE_CERTIFICATE_P12's keys don't open with APPLE_CERTIFICATE_PASSWORD"
     rm -f "$temp/identity.p12"
+    local keys=("$temp"/key-*.pem) key
+    [ -f "${keys[0]}" ] || fail "APPLE_CERTIFICATE_P12 holds no private key"
+    for key in "${keys[@]}"; do
+        # The certificate matching the key leads; the others ride along.
+        SEAWORTHY_P12_OUT="$throwaway" openssl pkcs12 -export -inkey "$key" -in "$temp/certificates.pem" \
+            -passout env:SEAWORTHY_P12_OUT -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+            -out "$key.p12" 2>/dev/null || fail "an APPLE_CERTIFICATE_P12 key has no certificate"
+        shred_files "$key"
+        security import "$key.p12" -k "$keychain" -f pkcs12 -P "$throwaway" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild >/dev/null ||
+            fail "an APPLE_CERTIFICATE_P12 identity doesn't import into the keychain"
+        shred_files "$key.p12"
+    done
+    shred_files "$temp/certificates.pem"
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
     # This keychain first, the user's others after it.
     local existing=()
@@ -302,7 +362,7 @@ apple_keychain() {
     xcrun notarytool store-credentials "$profile" --key "$temp/AuthKey.p8" \
         --key-id "$SEAWORTHY_GH_APPLE_NOTARY_KEY_ID" --issuer "$SEAWORTHY_GH_APPLE_NOTARY_ISSUER" \
         --keychain "$keychain" >/dev/null || fail "notarytool refused the API key (APPLE_NOTARY_KEY, _KEY_ID, _ISSUER)"
-    rm -f "$temp/AuthKey.p8"
+    shred_files "$temp/AuthKey.p8"
     local identity="${SEAWORTHY_GH_APPLE_IDENTITY:-}" installer=""
     if [ -z "$identity" ]; then
         identity="$(security find-identity -v -p codesigning "$keychain" |
@@ -311,18 +371,105 @@ apple_keychain() {
     fi
     installer="$(security find-identity -v "$keychain" |
         sed -n 's/^ *[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Installer: .*\)"$/\1/p' | head -n1)"
-    export_env SEAWORTHY_GH_APPLE_IDENTITY "$identity"
-    export_env SEAWORTHY_GH_APPLE_INSTALLER_IDENTITY "$installer"
-    export_env SEAWORTHY_GH_APPLE_KEYCHAIN "$keychain"
-    export_env SEAWORTHY_GH_APPLE_NOTARY_PROFILE "$profile"
+    SEAWORTHY_GH_APPLE_IDENTITY="$identity"
+    SEAWORTHY_GH_APPLE_INSTALLER_IDENTITY="$installer"
+    SEAWORTHY_GH_APPLE_KEYCHAIN="$keychain"
+    SEAWORTHY_GH_APPLE_NOTARY_PROFILE="$profile"
     say "Developer ID: $identity${installer:+; installer: $installer}"
 }
 
+# Every keychain a signing step made (signed deletes its own; this is the
+# always-run step's, for a step that was killed).
 apple_cleanup() {
-    local keychain="${RUNNER_TEMP:-}/seaworthy-apple/signing.keychain-db"
-    [ -f "$keychain" ] || return 0
-    security delete-keychain "$keychain" || true
-    say "the signing keychain is deleted"
+    local keychain
+    for keychain in "${RUNNER_TEMP:-/nonexistent}"/seaworthy-signing.*/signing.keychain-db; do
+        [ -f "$keychain" ] || continue
+        security delete-keychain "$keychain" || true
+        say "the signing keychain is deleted"
+    done
+}
+
+# Overwrites and removes files (GNU shred where there is one; macOS's
+# filesystems give no such guarantee, so there they're only removed).
+shred_files() { # <file>...
+    local file
+    for file in "$@"; do
+        [ -f "$file" ] || continue
+        if command -v shred >/dev/null 2>&1; then
+            shred -u -z -- "$file" 2>/dev/null || rm -f -- "$file"
+        else
+            rm -f -- "$file"
+        fi
+    done
+}
+
+# Shreds every file under <dir>, then removes it.
+shred_dir() { # <dir>
+    [ -d "$1" ] || return 0
+    local file
+    while IFS= read -r -d '' file; do
+        shred_files "$file"
+    done < <(find "$1" -type f -print0)
+    rm -rf -- "$1"
+}
+
+# seaworthy.sh <step> with its signing material made for it alone. On a
+# release or a dev build: a private directory under RUNNER_TEMP holds
+# signing.toml, the Authenticode PEM files the PKCS#12 secret opens to, and
+# on macOS (package-macos with the Apple secrets) the Developer ID keychain;
+# the step runs, then the keychain is deleted and the directory shredded,
+# whether the step passed, failed or was interrupted. The secrets that
+# became files leave the environment before seaworthy.sh starts, and
+# seaworthy.sh hands the rest to its seaworthy call alone. Outside a
+# release or a dev build nothing signs: seaworthy.sh <step> as it is.
+signed_dir="" signed_keychain=""
+signed_cleanup() {
+    if [ -n "$signed_keychain" ] && [ -f "$signed_keychain" ]; then
+        security delete-keychain "$signed_keychain" || true
+        say "the signing keychain is deleted"
+    fi
+    [ -z "$signed_dir" ] || shred_dir "$signed_dir"
+}
+signed() { # <step>
+    local step="$1"
+    case "$step" in
+        package | adopt-msi | package-macos | repo) ;;
+        *) fail "signed: package, adopt-msi, package-macos or repo, not ${step@Q}" ;;
+    esac
+    if [ "${SEAWORTHY_RELEASE:-0}" != 1 ] && [ "${SEAWORTHY_DEV_SIGN:-0}" != 1 ]; then
+        exec bash "$here/seaworthy.sh" "$step"
+    fi
+    if [ "$step" = package-macos ] && { [ "${SEAWORTHY_RELEASE:-0}" != 1 ] || [ -z "${SEAWORTHY_GH_APPLE_P12:-}" ]; }; then
+        # No Developer ID: the macOS outputs stay ad hoc-signed, outside the
+        # release.
+        unset SEAWORTHY_GH_APPLE_P12 SEAWORTHY_GH_APPLE_P12_PASSWORD SEAWORTHY_GH_APPLE_NOTARY_KEY
+        exec bash "$here/seaworthy.sh" "$step"
+    fi
+    trap signed_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    signed_dir="$(umask 077 && mktemp -d "${RUNNER_TEMP:?RUNNER_TEMP is unset}/seaworthy-signing.XXXXXXXX")"
+    if [ "$step" = package-macos ]; then
+        signed_keychain="$signed_dir/signing.keychain-db"
+        apple_keychain "$signed_dir"
+        export SEAWORTHY_MACOS_SIGN=1
+    fi
+    if [ -n "${SIGNING_TOML:-}" ]; then
+        [[ "$SIGNING_TOML" != *[[:cntrl:]]* ]] || fail "signing-toml holds a control character"
+        export SEAWORTHY_SIGNING="$SIGNING_TOML"
+        say "signing.toml: the caller's $SIGNING_TOML"
+    else
+        signing_toml "$signed_dir/signing.toml"
+        if [ "$signed_unsigned" = 1 ]; then
+            export SEAWORTHY_UNSIGNED=1
+        else
+            export SEAWORTHY_SIGNING="$signed_file"
+        fi
+    fi
+    # What became files leaves the environment.
+    unset SEAWORTHY_GH_AUTHENTICODE_PFX SEAWORTHY_GH_AUTHENTICODE_PASSWORD \
+        SEAWORTHY_GH_APPLE_P12 SEAWORTHY_GH_APPLE_P12_PASSWORD SEAWORTHY_GH_APPLE_NOTARY_KEY
+    bash "$here/seaworthy.sh" "$step"
 }
 
 # Every listing's artifacts, read once, checked against the SHA-256 the
@@ -371,9 +518,16 @@ shift || true
 case "$step" in
     matrix) matrix "${1:?usage: github.sh matrix <work>}" ;;
     build-env) build_env "${1:?usage: github.sh build-env <triple> <file>}" "${2:?usage: github.sh build-env <triple> <file>}" ;;
-    signing-toml) signing_toml "${1:?usage: github.sh signing-toml <file>}" ;;
-    apple-keychain) apple_keychain ;;
+    signing-toml)
+        signing_toml "${1:?usage: github.sh signing-toml <file>}"
+        if [ "$signed_unsigned" = 1 ]; then
+            export_env SEAWORTHY_UNSIGNED 1
+        else
+            export_env SEAWORTHY_SIGNING "$signed_file"
+        fi
+        ;;
+    signed) signed "${1:?usage: github.sh signed <step>}" ;;
     apple-cleanup) apple_cleanup ;;
     assemble) assemble "$@" ;;
-    *) echo "usage: $0 matrix|build-env|signing-toml|apple-keychain|apple-cleanup|assemble" >&2; exit 2 ;;
+    *) echo "usage: $0 matrix|build-env|signing-toml|signed|apple-cleanup|assemble" >&2; exit 2 ;;
 esac

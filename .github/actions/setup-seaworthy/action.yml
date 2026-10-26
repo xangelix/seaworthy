@@ -23,6 +23,16 @@
 # Linux and macOS runners (the tool runs there; Windows jobs need only the
 # PowerShell scripts). With `cache: false` (a release) the tool compiles
 # from source and nothing is restored from or saved to the cache.
+#
+# Nothing of the caller's reaches the build: it compiles a copy of the
+# checkout's commit (`git archive`) under RUNNER_TEMP, outside the
+# workspace (cargo reads every .cargo/config.toml from the directory it runs
+# in upward, and rustup the nearest rust-toolchain.toml: a product's own
+# would otherwise apply), refuses a cargo configuration above that copy, and
+# runs cargo with the system's basics alone in its environment (no
+# RUSTC_WRAPPER or compiler cache, no CARGO_* or RUSTFLAGS override, no
+# RUSTUP_TOOLCHAIN, no CC or CFLAGS, none of the runner's tokens). Written for
+# macOS's /bin/bash (3.2) too: it may run before a job installs a newer one.
 name: Set up seaworthy
 description: >-
   Build the seaworthy command from a seaworthy checkout (its pinned
@@ -84,19 +94,53 @@ runs:
     - name: Build seaworthy
       if: steps.restore.outputs.cache-hit != 'true'
       shell: bash
-      working-directory: ${{ inputs.source }}
       env:
+        SOURCE: ${{ inputs.source }}
         OUT: ${{ steps.commit.outputs.dir }}
       run: |
         set -euo pipefail
-        rustup --version
-        rustup set auto-self-update disable
-        rustup set profile minimal
-        # rust-toolchain.toml's toolchain (this directory's).
-        rustup toolchain install
-        cargo build --release --locked -p seaworthy --target-dir "$RUNNER_TEMP/seaworthy-tool-target"
+        src="$RUNNER_TEMP/seaworthy-tool-src"
+        target="$RUNNER_TEMP/seaworthy-tool-target"
+        rm -rf "$src" "$target"
+        mkdir -p "$src"
+        # The commit's tree, outside the workspace.
+        git -C "$SOURCE" archive --format=tar HEAD | tar -x -C "$src"
+        cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+        [ ! -d "$cargo_home" ] || cargo_home="$(cd "$cargo_home" && pwd -P)"
+        dir="$(cd "$src" && pwd -P)"
+        while [ "$dir" != / ]; do
+          dir="$(dirname "$dir")"
+          for file in "$dir/.cargo/config" "$dir/.cargo/config.toml"; do
+            if [ -e "$file" ] && [ "$(cd "$dir/.cargo" && pwd -P)" != "$cargo_home" ]; then
+              echo "::error::$file would join seaworthy's own build"; exit 1
+            fi
+          done
+        done
+        # The system's basics alone, unset in a subshell (no value on a
+        # command line).
+        (
+          for name in $(compgen -e); do
+            case "$name" in
+              PATH | HOME | USER | LOGNAME | LANG | TMPDIR | TZ | CARGO_HOME | RUSTUP_HOME | \
+                RUSTUP_DIST_SERVER | RUSTUP_UPDATE_ROOT | RUSTUP_MAX_RETRIES | CARGO_NET_RETRY | \
+                CARGO_TERM_COLOR | CARGO_HTTP_CAINFO | CARGO_HTTP_PROXY | CARGO_HTTP_TIMEOUT | \
+                SSL_CERT_FILE | SSL_CERT_DIR | http_proxy | https_proxy | no_proxy | HTTP_PROXY | \
+                HTTPS_PROXY | NO_PROXY | ALL_PROXY | all_proxy | DEVELOPER_DIR | RUNNER_TEMP) ;;
+              *) unset "$name" 2>/dev/null || true ;;
+            esac
+          done
+          export CARGO_INCREMENTAL=0
+          cd "$src"
+          rustup --version
+          rustup set auto-self-update disable
+          rustup set profile minimal
+          # The copy's rust-toolchain.toml: seaworthy's pinned toolchain.
+          rustup toolchain install
+          cargo build --release --locked -p seaworthy --target-dir "$target"
+        )
         mkdir -p "$OUT"
-        install -m 0755 "$RUNNER_TEMP/seaworthy-tool-target/release/seaworthy" "$OUT/seaworthy"
+        install -m 0755 "$target/release/seaworthy" "$OUT/seaworthy"
+        rm -rf "$src" "$target"
     - name: Save the tool for this commit
       if: inputs.cache == 'true' && steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -149,6 +149,30 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked --features "$FEATURES"
 
+  # seaworthy-formats built with its CI test-key switch on: the trust paths
+  # only such a build has (the marker, ci_test_keys!, test keys accepted).
+  ci-test-keys:
+    name: Test (CI test-key switch)
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: cargo test -p seaworthy-formats (SEAWORTHY_ALLOW_CI_TEST_KEYS=1)
+        env:
+          SEAWORTHY_ALLOW_CI_TEST_KEYS: "1"
+        run: cargo test -p seaworthy-formats --locked
+
   containers:
     name: Container suites (Linux)
     needs: plan
@@ -493,7 +517,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [plan, fmt, clippy, test, containers, packaging, msrv, docs, deny, fips, fuzz-replay, checks, lint]
+    needs: [plan, fmt, clippy, test, ci-test-keys, containers, packaging, msrv, docs, deny, fips, fuzz-replay, checks, lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -505,7 +529,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
-          jq -e '["clippy", "test", "containers", "packaging", "msrv", "docs", "fips"] as $gated
+          jq -e '["clippy", "test", "ci-test-keys", "containers", "packaging", "msrv", "docs", "fips"] as $gated
             | to_entries
             | all(.value.result == "success"
                   or (.value.result == "skipped" and (.key | IN($gated[]))))' <<<"$NEEDS" >/dev/null \

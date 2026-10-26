@@ -213,7 +213,9 @@ fn no_input_defaults_to_an_organization_and_every_secret_is_optional() {
             "platforms" => assert_eq!(default, "linux,windows,macos"),
             "artifact-prefix" => assert_eq!(default, "seaworthy"),
             "retention-days" => assert_eq!(default, "14"),
-            "release" | "dev-sign" | "publish-dry-run" => assert_eq!(default, "false"),
+            "release" | "dev-sign" | "publish-dry-run" | "allow-unsigned" | "ci-test-keys" => {
+                assert_eq!(default, "false")
+            }
             // Everything else (accounts, endpoints, identities, stores,
             // signing settings) has no default.
             _ => assert_eq!(default, "", "{name}"),
@@ -235,15 +237,29 @@ fn the_workflow_runs_steps_the_scripts_have() {
     let script = std::fs::read_to_string(repo_root().join("scripts/ci/seaworthy.sh")).unwrap();
     let glue = std::fs::read_to_string(repo_root().join("scripts/ci/github.sh")).unwrap();
     let mut seen = 0;
-    for line in text.lines() {
-        for (needle, source) in [("seaworthy.sh\" ", &script), ("github.sh\" ", &glue)] {
-            if let Some(at) = line.find(needle) {
-                let step = line[at + needle.len()..].split_whitespace().next().unwrap();
-                assert!(
-                    source.contains(&format!("\n    {step})")),
-                    "{line}: no step {step}"
-                );
-                seen += 1;
+    // The commands (a step's name or a comment can name a script too).
+    for line in text
+        .lines()
+        .filter(|l| l.contains("bash ") && !l.trim_start().starts_with('#'))
+    {
+        for (needle, source) in [("seaworthy.sh", &script), ("github.sh", &glue)] {
+            let Some(at) = line.find(needle) else {
+                continue;
+            };
+            let rest = line[at + needle.len()..].trim_start_matches('"');
+            if !rest.starts_with(' ') {
+                continue;
+            }
+            let step = rest.split_whitespace().next().unwrap();
+            assert!(
+                source.contains(&format!("\n    {step})")),
+                "{line}: no step {step}"
+            );
+            seen += 1;
+            // github.sh signed <step> runs seaworthy.sh <step>.
+            if step == "signed" {
+                let inner = rest.split_whitespace().nth(1).unwrap();
+                assert!(script.contains(&format!("\n    {inner})")), "{line}");
             }
         }
     }
@@ -269,6 +285,129 @@ fn the_workflow_runs_steps_the_scripts_have() {
             assert!(!run.contains("${{"), "{run}");
         }
     }
+}
+
+/// The jobs that hold secrets run no product code and trust nothing the
+/// prepare job handed on but data: seaworthy comes from seaworthy's own
+/// checkout at the workflow's commit, built in the job (never from a cache
+/// on a release or a dev build), and so do the scripts; the third-party
+/// tools are installed by a step that holds no secret, before the one step
+/// that does, whose script hands the secrets to the seaworthy call alone; no
+/// signing configuration travels through GITHUB_ENV.
+#[test]
+fn the_signing_jobs_trust_only_data_from_prepare() {
+    let (text, workflow) = yaml(".github/workflows/dist.yml");
+    assert!(
+        !text.contains("SEAWORTHY_SIGNING=$SIGNING_TOML"),
+        "signing.toml never travels through GITHUB_ENV"
+    );
+    let jobs = workflow["jobs"].as_hash().unwrap();
+    for id in ["package", "adopt-msi", "package-macos", "publish"] {
+        let job = &jobs[&Yaml::String(id.to_owned())];
+        let steps = job["steps"].as_vec().unwrap();
+        let workflow_checkout = steps.iter().position(|step| {
+            string(&step["with"]["ref"]) == Some("${{ job.workflow_sha }}")
+                && string(&step["with"]["path"]) == Some(".seaworthy")
+        });
+        let setup = steps.iter().position(|step| {
+            string(&step["uses"]) == Some("./.seaworthy/.github/actions/setup-seaworthy")
+        });
+        assert!(
+            workflow_checkout.is_some() && setup > workflow_checkout,
+            "{id}: seaworthy from the workflow's own commit, built in the job"
+        );
+        let cache = string(&steps[setup.unwrap()]["with"]["cache"]).unwrap();
+        assert!(
+            cache == "false"
+                || cache.contains("(inputs.release || inputs.dev-sign) && 'false'")
+                || cache == "${{ inputs.release && 'false' || 'true' }}",
+            "{id}: {cache}"
+        );
+        let mut secret_steps = Vec::new();
+        for (index, step) in steps.iter().enumerate() {
+            let run = string(&step["run"]).unwrap_or_default();
+            if run.contains("seaworthy.sh") || run.contains("github.sh") {
+                assert!(
+                    run.contains(".seaworthy/scripts/ci/")
+                        && !run.contains("$SEAWORTHY_WORK/scripts"),
+                    "{id}: the checkout's scripts, never the prepare job's copies:\n{run}"
+                );
+            }
+            assert!(
+                !run.contains("$SEAWORTHY_WORK/bin"),
+                "{id}: never the prepare job's seaworthy"
+            );
+            let holds_secret = step["env"].as_hash().is_some_and(|env| {
+                env.values()
+                    .any(|v| string(v).is_some_and(|v| v.contains("secrets.")))
+            });
+            if holds_secret {
+                secret_steps.push(index);
+                assert!(
+                    run.starts_with("bash .seaworthy/scripts/ci/github.sh signed ")
+                        || run == "bash .seaworthy/scripts/ci/seaworthy.sh publish",
+                    "{id}: a step holding secrets runs the signing script alone:\n{run}"
+                );
+            }
+            if run.contains("apt-get") || run.contains("brew install") || run.contains(" tools ") {
+                assert!(!holds_secret, "{id}: a tool install holds no secret");
+                assert!(
+                    secret_steps.is_empty(),
+                    "{id}: tools are installed before any step holds a secret"
+                );
+            }
+        }
+        assert!(
+            !secret_steps.is_empty(),
+            "{id}: some step signs or publishes"
+        );
+        // The always-run cleanup removes whatever a killed step left.
+        assert!(
+            steps
+                .iter()
+                .any(|step| string(&step["if"]) == Some("always()")
+                    && string(&step["run"]).is_some_and(|r| r.contains("seaworthy-signing."))),
+            "{id}: the always-run cleanup"
+        );
+    }
+    // The tools step installs nFPM and osslsigncode into GITHUB_ENV, never
+    // with the OIDC request variables in its environment.
+    for (id, step) in [("package", "package"), ("adopt-msi", "adopt-msi")] {
+        let job = &jobs[&Yaml::String(id.to_owned())];
+        let tools = job["steps"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .filter_map(|s| string(&s["run"]))
+            .find(|r| r.contains(" tools "))
+            .unwrap_or_else(|| panic!("{id}: a tools step"));
+        assert!(
+            tools.contains(&format!(
+                "bash .seaworthy/scripts/ci/seaworthy.sh tools {step} \"$GITHUB_ENV\""
+            )),
+            "{tools}"
+        );
+        assert!(
+            tools.contains("unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        );
+    }
+    // The MSI job and the assembly run the checkout's scripts too.
+    assert!(text.contains("-File .seaworthy\\scripts\\ci\\seaworthy-msi.ps1"));
+    assert!(text.contains("bash .seaworthy/scripts/ci/github.sh assemble"));
+    // The CI test-key switch: an input, off by default, given to the
+    // builds (the Linux build's container too), refused on a release by
+    // every step.
+    assert!(text.contains("SEAWORTHY_ALLOW_CI_TEST_KEYS: ${{ inputs.ci-test-keys && '1' || '' }}"));
+    assert!(text.contains("-e SEAWORTHY_ALLOW_CI_TEST_KEYS"));
+    assert!(text.contains("SEAWORTHY_ALLOW_UNSIGNED: ${{ inputs.allow-unsigned && '1' || '0' }}"));
+    // The tool's own build sees nothing of the product's.
+    let (action, _) = yaml(".github/actions/setup-seaworthy/action.yml");
+    assert!(action.contains("git -C \"$SOURCE\" archive --format=tar HEAD | tar -x -C \"$src\""));
+    assert!(action.contains("would join seaworthy's own build"));
+    assert!(
+        !action.contains("working-directory"),
+        "never in the product's tree"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +773,24 @@ fn signing_toml_names_each_signer_it_was_handed() {
         std::fs::read_to_string(&env_file).unwrap(),
         "SEAWORTHY_UNSIGNED=1\n"
     );
+    // On a release or a dev build that's refused, unless allow-unsigned
+    // means it (and then it's a warning).
+    for kind in ["SEAWORTHY_RELEASE", "SEAWORTHY_DEV_SIGN"] {
+        let out = run(&[(kind, "1")]);
+        assert!(!out.status.success(), "{kind}");
+        assert!(
+            said(&out).contains("no signer was handed to this job, on a release or a dev build"),
+            "{}",
+            said(&out)
+        );
+        let out = run(&[(kind, "1"), ("SEAWORTHY_ALLOW_UNSIGNED", "1")]);
+        assert!(out.status.success(), "{}", said(&out));
+        assert!(said(&out).contains("::warning::"), "{}", said(&out));
+        assert_eq!(
+            std::fs::read_to_string(&env_file).unwrap(),
+            "SEAWORTHY_UNSIGNED=1\n"
+        );
+    }
     // What it refuses.
     for (env, why) in [
         (
@@ -777,4 +934,189 @@ fn assemble_copies_every_listed_artifact_checked_against_its_listing() {
     let out = glue(&["assemble", out_dir.to_str().unwrap(), &dist_arg], &[]);
     assert!(!out.status.success());
     assert!(said(&out).contains("exists"), "{}", said(&out));
+}
+
+/// `github.sh signed <step>`: on a release, the signing material is made in
+/// a private directory for that step alone — signing.toml and the PEM
+/// files the PKCS#12 opens to — the PKCS#12 and its password leave the
+/// environment before seaworthy.sh starts, and the directory is shredded
+/// when the step ends, passed or failed. Outside a release or a dev build
+/// nothing is made. A stub seaworthy.sh beside a copy of github.sh records
+/// what it was given.
+#[test]
+fn signed_makes_the_signing_material_for_its_step_alone() {
+    if !have("openssl", &["version"]) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = dir.path().join("scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::copy(
+        repo_root().join("scripts/ci/github.sh"),
+        scripts.join("github.sh"),
+    )
+    .unwrap();
+    std::fs::write(scripts.join("azure-sign.sh"), "").unwrap();
+    let record = dir.path().join("record");
+    std::fs::write(
+        scripts.join("seaworthy.sh"),
+        format!(
+            r#"#!/usr/bin/env bash
+{{
+  echo "step=$1"
+  echo "signing=${{SEAWORTHY_SIGNING:-}}"
+  echo "unsigned=${{SEAWORTHY_UNSIGNED:-}}"
+  echo "pfx=${{SEAWORTHY_GH_AUTHENTICODE_PFX:-}}"
+  echo "password=${{SEAWORTHY_GH_AUTHENTICODE_PASSWORD:-}}"
+  echo "manifest=${{SEAWORTHY_RELEASE_MANIFEST_KEY:-}}"
+  if [ -n "${{SEAWORTHY_SIGNING:-}}" ]; then
+    cat "$SEAWORTHY_SIGNING"
+    find "$(dirname "$SEAWORTHY_SIGNING")" -type f | sort
+  fi
+}} > {record}
+exit "${{STUB_EXIT:-0}}"
+"#,
+            record = record.display()
+        ),
+    )
+    .unwrap();
+    let runner_temp = dir.path().join("runner-temp");
+    std::fs::create_dir_all(&runner_temp).unwrap();
+    // A PKCS#12 identity.
+    let key = dir.path().join("k.pem");
+    let cert = dir.path().join("c.pem");
+    let p12 = dir.path().join("codesign.p12");
+    let req = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=Acme Code Signing",
+            "-days",
+            "2",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(req.status.success(), "{}", said(&req));
+    let export = Command::new("openssl")
+        .args(["pkcs12", "-export", "-passout", "pass:pfx-pass"])
+        .arg("-inkey")
+        .arg(&key)
+        .arg("-in")
+        .arg(&cert)
+        .arg("-out")
+        .arg(&p12)
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{}", said(&export));
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&p12).unwrap());
+    let signed = |extra: &[(&str, &str)]| {
+        let _ = std::fs::remove_file(&record);
+        let mut command = Command::new("bash");
+        command
+            .arg(scripts.join("github.sh"))
+            .args(["signed", "package"])
+            .env("RUNNER_TEMP", &runner_temp)
+            .env_remove("GITHUB_OUTPUT")
+            .env_remove("GITHUB_ENV");
+        for (k, _) in std::env::vars_os() {
+            let k = k.to_string_lossy();
+            if k.starts_with("SEAWORTHY_") || k.starts_with("AZURE_") || k == "SIGNING_TOML" {
+                command.env_remove(&*k);
+            }
+        }
+        for (k, v) in extra {
+            command.env(k, v);
+        }
+        command.output().unwrap()
+    };
+    let leftovers = || {
+        std::fs::read_dir(&runner_temp)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let release = [
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_RELEASE_MANIFEST_KEY", "00"),
+        ("SEAWORTHY_GH_MANIFEST_ALGORITHM", "ed25519"),
+        ("SEAWORTHY_GH_AUTHENTICODE_PFX", encoded.as_str()),
+        ("SEAWORTHY_GH_AUTHENTICODE_PASSWORD", "pfx-pass"),
+        ("SEAWORTHY_GH_TIMESTAMP_URL", "http://timestamp.example.com"),
+    ];
+    let out = signed(&release);
+    assert!(out.status.success(), "{}", said(&out));
+    let seen = std::fs::read_to_string(&record).unwrap();
+    assert!(seen.contains("step=package\n"), "{seen}");
+    assert!(
+        seen.contains("pfx=\n") && seen.contains("password=\n"),
+        "the PKCS#12 left the environment:\n{seen}"
+    );
+    assert!(
+        seen.contains("manifest=00\n"),
+        "seaworthy.sh hands the key on itself:\n{seen}"
+    );
+    let signing = seen
+        .lines()
+        .find_map(|l| l.strip_prefix("signing="))
+        .unwrap()
+        .to_owned();
+    assert!(
+        signing.starts_with(&format!("{}/seaworthy-signing.", runner_temp.display())),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("[authenticode]") && seen.contains("authenticode/key.pem"),
+        "{seen}"
+    );
+    assert!(leftovers().is_empty(), "shredded: {:?}", leftovers());
+    // A failing step: the same cleanup, its exit status kept.
+    let mut failing = release.to_vec();
+    failing.push(("STUB_EXIT", "7"));
+    let out = signed(&failing);
+    assert_eq!(out.status.code(), Some(7), "{}", said(&out));
+    assert!(leftovers().is_empty(), "shredded: {:?}", leftovers());
+    // A release with no signer: refused before the step; allowed, unsigned.
+    let out = signed(&[("SEAWORTHY_RELEASE", "1")]);
+    assert!(!out.status.success());
+    assert!(!record.exists(), "the step never ran");
+    assert!(leftovers().is_empty(), "{:?}", leftovers());
+    let out = signed(&[
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_ALLOW_UNSIGNED", "1"),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    let seen = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        seen.contains("unsigned=1\n") && seen.contains("signing=\n"),
+        "{seen}"
+    );
+    // The caller's own signing.toml, as given.
+    let out = signed(&[
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SIGNING_TOML", "ci/signing.toml"),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        std::fs::read_to_string(&record)
+            .unwrap()
+            .contains("signing=ci/signing.toml\n")
+    );
+    // Not a release: the step as it is, nothing made.
+    let out = signed(&[("SEAWORTHY_GH_AUTHENTICODE_PFX", encoded.as_str())]);
+    assert!(out.status.success(), "{}", said(&out));
+    let seen = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        seen.contains("signing=\n") && seen.contains("unsigned=\n"),
+        "{seen}"
+    );
+    assert!(leftovers().is_empty(), "{:?}", leftovers());
 }
