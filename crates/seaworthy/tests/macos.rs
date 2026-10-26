@@ -741,7 +741,10 @@ fn the_pkg_s_daemons_scripts_and_uninstaller() {
     );
     let uninstall = macos::uninstaller(&names);
     for needle in [
-        "/bin/launchctl bootout system/'AcmeAgent-update'",
+        "/bin/launchctl bootout \"system/$1\"",
+        "unload 'AcmeAgent-update'",
+        "unload 'AcmeAgent'",
+        "/usr/bin/pgrep -f '^/usr/sbin/installer -pkg /Library/Application Support/Acme/Agent/updates/'",
         "/bin/rm -f '/Library/LaunchDaemons/AcmeAgent.plist'",
         "/bin/rm -rf '/Applications/Acme Field Agent.app'",
         "/usr/sbin/pkgutil --forget 'com.acme.agent'",
@@ -749,6 +752,12 @@ fn the_pkg_s_daemons_scripts_and_uninstaller() {
     ] {
         assert!(uninstall.contains(needle), "{needle}\n{uninstall}");
     }
+    // The helper stops first, then the service; nothing is removed before
+    // both have.
+    let at = |needle: &str| uninstall.find(needle).unwrap();
+    assert!(at("unload 'AcmeAgent-update'") < at("/usr/bin/pgrep"));
+    assert!(at("/usr/bin/pgrep") < at("unload 'AcmeAgent'"));
+    assert!(at("unload 'AcmeAgent'") < at("/bin/rm -f"));
     // Every script parses, and passes shellcheck where it's installed.
     for (name, text) in [
         ("preinstall", &pre),
@@ -1509,4 +1518,121 @@ fn a_signed_macos_release_needs_the_developer_id_and_its_team() {
         "{}",
         said(&out)
     );
+}
+
+/// The uninstaller run for real against stub tools (every absolute tool
+/// path rewritten): it removes nothing until both daemons are unloaded, a
+/// daemon that won't unload stops it with exit 1 and nothing removed, and
+/// a service an in-flight install loads again is unloaded again.
+#[cfg(unix)]
+#[test]
+fn the_uninstaller_stops_the_daemons_before_removing_anything() {
+    use seaworthy::macos;
+    let config = config(SERVICE).unwrap();
+    let product = &config.products["agent"];
+    let names = macos::pkg_names(&config, "agent", product).unwrap();
+    let script = macos::uninstaller(&names);
+
+    // `launchctl`: `print system/<label>` succeeds while <label>.loaded
+    // exists; `bootout` removes it unless <label>.stuck exists, and a
+    // <label>.reload file makes it come back once after its bootout.
+    let run = |setup: &dyn Fn(&Path)| {
+        let dir = tempfile::tempdir().unwrap();
+        let stubs = dir.path().join("stubs");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&stubs).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let log = dir.path().join("calls");
+        let stub = |name: &str, body: &str| {
+            let path = stubs.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let st = state.display();
+        let lg = log.display();
+        stub(
+            "launchctl",
+            &format!(
+                "label=\"${{2#system/}}\"
+                 case \"$1\" in
+                   print) [ -e \"{st}/$label.loaded\" ] ;;
+                   bootout)
+                     echo \"bootout $label\" >> '{lg}'
+                     [ -e \"{st}/$label.stuck\" ] && exit 5
+                     rm -f \"{st}/$label.loaded\"
+                     if [ -e \"{st}/$label.reload\" ]; then rm -f \"{st}/$label.reload\"; touch \"{st}/$label.comeback\"; fi ;;
+                 esac"
+            ),
+        );
+        // The comeback: the next `sleep` after a reload's bootout loads the
+        // service again (an install daemon's postinstall, late).
+        stub(
+            "sleep",
+            &format!(
+                "for f in \"{st}\"/*.comeback; do [ -e \"$f\" ] || continue; \
+                 l=\"${{f%.comeback}}\"; rm -f \"$f\"; touch \"$l.loaded\"; done"
+            ),
+        );
+        stub("pgrep", "exit 1");
+        stub("id", "echo 0");
+        stub("rm", &format!("echo \"rm $*\" >> '{lg}'"));
+        stub("pkgutil", &format!("echo \"pkgutil $*\" >> '{lg}'"));
+        for label in ["AcmeAgent-update", "AcmeAgent"] {
+            std::fs::write(state.join(format!("{label}.loaded")), "").unwrap();
+        }
+        setup(&state);
+        let mut text = script.clone();
+        for (tool, name) in [
+            ("/bin/launchctl", "launchctl"),
+            ("/usr/bin/pgrep", "pgrep"),
+            ("/usr/bin/id", "id"),
+            ("/bin/rm", "rm"),
+            ("/usr/sbin/pkgutil", "pkgutil"),
+            ("/bin/sleep", "sleep"),
+        ] {
+            text = text.replace(tool, &stubs.join(name).display().to_string());
+        }
+        let path = dir.path().join("uninstall");
+        std::fs::write(&path, &text).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg(&path)
+            .arg("--purge")
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        (
+            out.status.code(),
+            calls,
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // Both unload: the helper, then the service, then the removals.
+    let (code, calls, _) = run(&|_| {});
+    assert_eq!(code, Some(0), "{calls}");
+    let helper = calls.find("bootout AcmeAgent-update").unwrap();
+    let service = calls.find("bootout AcmeAgent\n").unwrap();
+    let removed = calls.find("rm ").unwrap();
+    assert!(helper < service && service < removed, "{calls}");
+
+    // A service that won't unload: exit 1, nothing removed.
+    let (code, calls, stderr) = run(&|state| {
+        std::fs::write(state.join("AcmeAgent.stuck"), "").unwrap();
+    });
+    assert_eq!(code, Some(1), "{calls}");
+    assert!(
+        !calls.contains("rm "),
+        "removed with a daemon loaded: {calls}"
+    );
+    assert!(stderr.contains("nothing was removed"), "{stderr}");
+
+    // A service loaded again after its bootout (a late postinstall): it
+    // is unloaded again, then everything is removed.
+    let (code, calls, _) = run(&|state| {
+        std::fs::write(state.join("AcmeAgent.reload"), "").unwrap();
+    });
+    assert_eq!(code, Some(0), "{calls}");
+    assert_eq!(calls.matches("bootout AcmeAgent\n").count(), 2, "{calls}");
+    assert!(calls.contains("rm "), "{calls}");
 }

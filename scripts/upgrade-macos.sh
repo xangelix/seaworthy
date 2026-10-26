@@ -315,6 +315,10 @@ ok "the helper installed $CAND_RECEIPT; the service runs again (pid $SECOND_PID)
 
 # --- 7. removed ------------------------------------------------------------------
 
+# The helper's run outlives the receipt and the service's restart (it logs,
+# records the release, exits). The uninstaller waits for the daemons itself,
+# but the lane checks removal of a quiet product.
+await 120 "the helper is still running after the update: $(launchd_field "$HELPER" state)" idle "$HELPER"
 sudo "$APP/Contents/Resources/uninstall" --purge >/dev/null || fail "the uninstaller failed"
 for label in "$SERVICE" "$HELPER"; do
     ! loaded "$label" || fail "$label is still loaded"

@@ -434,6 +434,16 @@ pub fn postinstall(names: &PkgNames) -> String {
 /// package's receipt; `--purge` removes the state and logs too. The
 /// administrator's policy file (`/etc/<vendor>/<id>/policy.toml`) stays,
 /// as on Linux.
+///
+/// The daemons stop first, and nothing is removed unless they did: the
+/// update helper (so no run of it starts the service again), then any
+/// package install a helper run left in flight (`installer` hands the
+/// package to the system's install daemon, whose postinstall loads the
+/// service), then the service, which must stay unloaded for a few seconds.
+/// A `launchctl bootout` can fail while a daemon is mid-transition (just
+/// restarted by an update), so each is retried until launchd no longer
+/// knows the label; a daemon that won't go stops the uninstall with exit 1
+/// before anything is removed, so running it again finishes the job.
 #[must_use]
 pub fn uninstaller(names: &PkgNames) -> String {
     let mut text = format!(
@@ -445,16 +455,69 @@ pub fn uninstaller(names: &PkgNames) -> String {
          [ \"$(/usr/bin/id -u)\" = 0 ] || {{ echo \"run it as root (sudo)\" >&2; exit 1; }}
          purge=0
          case \"${{1:-}}\" in --purge) purge=1 ;; '') ;; *) echo \"usage: $0 [--purge]\" >&2; exit 2 ;; esac
+         loaded() {{ /bin/launchctl print \"system/$1\" >/dev/null 2>&1; }}
+         # Unload a daemon, retrying a bootout that fails mid-transition.
+         unload() {{
+             tries=0
+             while loaded \"$1\"; do
+                 if [ \"$tries\" -ge 10 ]; then
+                     echo \"could not stop $1; nothing was removed: run the uninstaller again\" >&2
+                     exit 1
+                 fi
+                 /bin/launchctl bootout \"system/$1\" 2>/dev/null
+                 tries=$((tries + 1))
+                 /bin/sleep 1
+             done
+         }}
 ",
         title = names.display_name.replace('\n', " "),
         self_path = sh(&format!("{}/{UNINSTALLER}", names.bundle)),
     );
+    let mut labels = names.labels();
+    let service = labels.pop();
+    for label in labels {
+        text.push_str(&format!("unload {label}\n", label = sh(label)));
+    }
+    let updates = names.support.join("updates");
+    text.push_str(&format!(
+        "waited=0
+         while /usr/bin/pgrep -f {pattern} >/dev/null 2>&1; do
+             if [ \"$waited\" -ge 600 ]; then
+                 echo \"an update is still installing; nothing was removed: run the uninstaller again\" >&2
+                 exit 1
+             fi
+             /bin/sleep 2
+             waited=$((waited + 2))
+         done
+",
+        pattern = sh(&format!("^/usr/sbin/installer -pkg {}/", updates.display())),
+    ));
+    if let Some(service) = service {
+        text.push_str(&format!(
+            "stable=0
+             tries=0
+             while [ \"$stable\" -lt 5 ]; do
+                 if loaded {label}; then
+                     if [ \"$tries\" -ge 5 ]; then
+                         echo \"{label_text} keeps coming back; nothing was removed: run the uninstaller again\" >&2
+                         exit 1
+                     fi
+                     unload {label}
+                     tries=$((tries + 1))
+                     stable=0
+                 else
+                     stable=$((stable + 1))
+                 fi
+                 /bin/sleep 1
+             done
+",
+            label = sh(service),
+            label_text = service.replace(['"', '\n', '$', '`', '\\'], ""),
+        ));
+    }
     for label in names.labels() {
         text.push_str(&format!(
-            "/bin/launchctl bootout system/{label} 2>/dev/null
-             /bin/rm -f {plist}
-",
-            label = sh(label),
+            "/bin/rm -f {plist}\n",
             plist = sh(&PkgNames::daemon_path(label)),
         ));
     }
