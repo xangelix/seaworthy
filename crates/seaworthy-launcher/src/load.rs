@@ -95,12 +95,67 @@ mod platform {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
-    use windows_sys::Win32::System::LibraryLoader::{
-        GetProcAddress, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
-        LoadLibraryExW,
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetProcAddress, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW, SetDefaultDllDirectories,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use super::{CoreMain, LoadError};
+
+    pub(super) fn restrict_dll_search() -> Result<(), String> {
+        // SAFETY: SetDefaultDllDirectories takes a flag set and changes
+        // only this process's DLL search order.
+        #[allow(unsafe_code, reason = "FFI: SetDefaultDllDirectories")]
+        let done = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) };
+        if done == 0 {
+            Err(std::io::Error::last_os_error().to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether this process's token is elevated (`TokenIsElevated`).
+    pub(super) fn token_elevated() -> Result<bool, std::io::Error> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: GetCurrentProcess takes nothing and can't fail; its
+        // pseudo handle needs no closing.
+        #[allow(unsafe_code, reason = "FFI: GetCurrentProcess")]
+        let process = unsafe { GetCurrentProcess() };
+        // SAFETY: this process's pseudo handle, a query right and a valid
+        // out pointer; the token is closed below.
+        #[allow(unsafe_code, reason = "FFI: OpenProcessToken")]
+        let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+        if opened == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut size = 0u32;
+        // SAFETY: TokenElevation fills a TOKEN_ELEVATION; the buffer is one,
+        // its size passed, `size` a valid out pointer.
+        #[allow(unsafe_code, reason = "FFI: GetTokenInformation")]
+        let read = unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&raw mut elevation).cast(),
+                u32::try_from(size_of::<TOKEN_ELEVATION>()).unwrap_or(0),
+                &mut size,
+            )
+        };
+        let error = std::io::Error::last_os_error();
+        // SAFETY: the handle OpenProcessToken returned, closed once.
+        #[allow(unsafe_code, reason = "FFI: CloseHandle")]
+        let _ = unsafe { CloseHandle(token) };
+        if read == 0 {
+            return Err(error);
+        }
+        Ok(elevation.TokenIsElevated != 0)
+    }
 
     pub(super) fn load(path: &Path) -> Result<CoreMain, LoadError> {
         let wide: Vec<u16> = path
@@ -280,6 +335,46 @@ pub(crate) fn secure_execution() -> bool {
     }
 }
 
+/// Whether this process runs with administrator rights it may not have
+/// been started with by whoever set its environment: root on Unix (`euid`
+/// 0 — `sudo`, a root shell, a root service), an elevated token on Windows
+/// (an administrator's elevated console, LocalSystem, the service
+/// accounts). The launcher then ignores its environment overrides.
+/// Unknown (a token that can't be read) counts as elevated.
+pub(crate) fn elevated() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid takes no arguments and can't fail.
+        #[allow(unsafe_code, reason = "FFI: geteuid")]
+        let euid = unsafe { libc::geteuid() };
+        euid == 0
+    }
+    #[cfg(windows)]
+    {
+        platform::token_elevated().unwrap_or(true)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// Windows: `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)` —
+/// from here on, a `LoadLibrary` anywhere in the process searches the
+/// launcher's directory, System32 and `AddDllDirectory` directories only,
+/// never the working directory or `PATH` (`Launcher::legacy_dll_search`).
+/// Elsewhere, nothing.
+pub(crate) fn restrict_dll_search() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        platform::restrict_dll_search()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
+
 /// Requests the per-process permission Linux requires before a process may
 /// use AMX tile data (`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)`).
 /// Elsewhere AMX needs no request.
@@ -436,7 +531,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn secure_reads_open_only_regular_files_and_never_follow_a_symlink() {
-        let dir = std::env::temp_dir().join(format!("seaworthy_launcher_open_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("seaworthy_launcher_open_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch");
         let file = dir.join("core.so");
         std::fs::write(&file, b"not a core").expect("write");

@@ -183,11 +183,29 @@ fn windows_adds_the_extension_and_the_sidecars_beside_each_core() {
         )),
         "{steps:#?}"
     );
+    // The launcher and helper (target directory `base`) link with their
+    // imports restricted to their directory and System32; the cores, which
+    // the launcher loads with explicit search flags, don't need it.
+    for step in &steps {
+        if let Step::Build {
+            target_dir,
+            rustflags,
+            ..
+        } = step
+        {
+            let restricted = rustflags
+                .windows(2)
+                .any(|w| w == ["-C", "link-arg=/DEPENDENTLOADFLAG:0xA00"]);
+            assert_eq!(restricted, target_dir == "base", "{step:?}");
+        }
+    }
     // Linux builds don't take it (glibc's static linking is another matter).
     for step in plan(&config, "x86_64-unknown-linux-gnu", None).unwrap() {
         if let Step::Build { rustflags, .. } = step {
             assert!(
-                !rustflags.iter().any(|f| f.contains("crt-static")),
+                !rustflags
+                    .iter()
+                    .any(|f| f.contains("crt-static") || f.contains("DEPENDENTLOADFLAG")),
                 "{rustflags:?}"
             );
         }

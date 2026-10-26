@@ -335,7 +335,12 @@ mod tests {
     #[test]
     fn a_file_larger_than_the_limit_is_refused_unread() {
         let size = this_program().metadata().expect("metadata").len();
-        match open_file_section_within(this_program(), RECORD, size.saturating_sub(1), MAX_READ_BYTES) {
+        match open_file_section_within(
+            this_program(),
+            RECORD,
+            size.saturating_sub(1),
+            MAX_READ_BYTES,
+        ) {
             Err(BinaryError::ReadLimit(why)) => assert!(why.contains("larger than"), "{why}"),
             other => panic!("expected the size limit, got {other:?}"),
         }

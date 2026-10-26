@@ -102,11 +102,16 @@ pub const EXIT_UNTRUSTED_CORE: i32 = 77;
 pub const EXIT_PANIC: i32 = 101;
 
 /// Forces one core by CPU name (support and testing). Only a core the host
-/// supports is loaded; anything else fails loudly. Ignored in
-/// secure-execution mode.
+/// supports is loaded; anything else fails loudly. Ignored in a privileged
+/// process (see [`ENV_DEBUG`]).
 pub const ENV_CORE: &str = "SEAWORTHY_CORE";
-/// `1` prints every selection decision to stderr. Ignored in
-/// secure-execution mode.
+/// `1` prints every selection decision to stderr. Like [`ENV_CORE`],
+/// ignored in a privileged process: in secure-execution mode (set-user-ID,
+/// set-group-ID, file capabilities), as root on Linux and macOS (`sudo`, a
+/// root shell, a root service), and on Windows in an elevated process (an
+/// administrator's elevated token, LocalSystem and the service accounts),
+/// where whoever set the environment may not be whoever runs with the
+/// privileges.
 pub const ENV_DEBUG: &str = "SEAWORTHY_LAUNCHER_DEBUG";
 
 /// A product's launcher configuration ([`launcher_main!`] builds it).
@@ -119,6 +124,16 @@ pub struct Launcher {
     /// The launcher's own `.cpulist` section bytes (which a packaging tool
     /// cross-checks against the packaged cores).
     pub cpulist: &'static [u8],
+    /// Windows: keep the process's legacy DLL search order. Off by default:
+    /// the launcher's first act is `SetDefaultDllDirectories(
+    /// LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`, so every later `LoadLibrary` in
+    /// the process — the core's own, its libraries' — searches only the
+    /// launcher's directory, System32 and the directories added with
+    /// `AddDllDirectory`, never the working directory or `PATH`, where
+    /// anyone might plant a DLL. A core that loads libraries from `PATH`
+    /// (a plugin or driver it doesn't ship) sets it with
+    /// `legacy_dll_search = true` in [`launcher_main!`]. Ignored elsewhere.
+    pub legacy_dll_search: bool,
 }
 
 /// Where the core for `cpu` lives, given the launcher's directory: beside
@@ -151,6 +166,33 @@ pub fn run(launcher: &Launcher) -> ! {
     std::process::exit(code)
 }
 
+/// `text` safe to print and to show: every control character (C0, DEL,
+/// C1) and every invisible formatting or bidirectional control (the
+/// marks, embeddings, overrides and isolates, zero-width characters, the
+/// line and paragraph separators, the byte-order mark) written as
+/// `\u{XXXX}`. A file name can hold any of them, and a right-to-left
+/// override in a path would make a message read as something else.
+fn display_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let invisible = matches!(
+            c,
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        );
+        if c.is_control() || invisible {
+            out.push_str(&format!("\\u{{{:04X}}}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// What the launcher printed, and whether the core ran (its exit code, and
 /// its errors, are its own).
 #[derive(Default)]
@@ -167,7 +209,19 @@ struct Settings {
 
 impl Settings {
     fn from_env(name: &str) -> Self {
-        if load::secure_execution() {
+        // A privileged process takes no overrides (ENV_DEBUG's docs): a
+        // secure-execution launcher's environment is its caller's, and
+        // `sudo -E` or an elevated console carries a user's into an
+        // administrator's process.
+        let privileged = load::secure_execution() || load::elevated();
+        if privileged {
+            if !load::secure_execution()
+                && (std::env::var_os(ENV_CORE).is_some() || std::env::var_os(ENV_DEBUG).is_some())
+            {
+                eprintln!(
+                    "{name}: {ENV_CORE} and {ENV_DEBUG} are ignored in an elevated or root process"
+                );
+            }
             return Self {
                 debug: false,
                 forced: None,
@@ -193,7 +247,7 @@ fn program_name() -> String {
         .ok()
         .and_then(|path| {
             path.file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
+                .map(|stem| display_safe(&stem.to_string_lossy()))
         })
         .unwrap_or_else(|| "launcher".to_owned())
 }
@@ -202,12 +256,22 @@ fn program_name() -> String {
 /// prints goes into `out` as well.
 fn launch(launcher: &Launcher, out: &mut Report) -> i32 {
     let name = program_name();
+    // Every line is escaped whole: paths, the override's value and what a
+    // core's record said all pass through here.
     macro_rules! say {
         ($($arg:tt)*) => {{
-            let line = format!($($arg)*);
+            let line = display_safe(&format!($($arg)*));
             eprintln!("{name}: {line}");
             out.lines.push(line);
         }};
+    }
+    // Before anything can load a library: the process's DLL search order
+    // without the working directory and PATH (Launcher::legacy_dll_search).
+    if !launcher.legacy_dll_search
+        && let Err(e) = load::restrict_dll_search()
+    {
+        say!("cannot restrict the DLL search order: {e}");
+        return EXIT_LOAD_FAILED;
     }
     // The embedded list must describe this configuration (it is generated
     // from the same macro arguments; a mismatch is a build defect).
@@ -673,9 +737,16 @@ macro_rules! __join {
 ///     cpus = ["x86-64-v4", "x86-64-v3", "x86-64-v2"],
 /// );
 /// ```
+///
+/// A core that must load libraries from `PATH` on Windows keeps the legacy
+/// DLL search order with `legacy_dll_search = true` after the CPU list
+/// ([`Launcher::legacy_dll_search`]).
 #[macro_export]
 macro_rules! launcher_main {
     (core = $core:literal, cpus = [$($cpu:literal),+ $(,)?] $(,)?) => {
+        $crate::launcher_main!(core = $core, cpus = [$($cpu),+], legacy_dll_search = false);
+    };
+    (core = $core:literal, cpus = [$($cpu:literal),+ $(,)?], legacy_dll_search = $legacy:literal $(,)?) => {
         $crate::glibc_floor!();
 
         const __SEAWORTHY_CPULIST_TEXT: &str =
@@ -691,6 +762,7 @@ macro_rules! launcher_main {
                 core: $core,
                 cpus: &[$($cpu),+],
                 cpulist: &__SEAWORTHY_CPULIST,
+                legacy_dll_search: $legacy,
             })
         }
     };
@@ -966,6 +1038,36 @@ mod tests {
             rustflags::parse_print_cfg("target_feature=\"crt-static\"\ntarget_feature=\"sse\"\n"),
             ["sse"]
         );
+    }
+
+    #[test]
+    fn printed_text_shows_controls_and_bidi_marks_escaped() {
+        assert_eq!(
+            display_safe("/opt/acme/lib/core.so"),
+            "/opt/acme/lib/core.so"
+        );
+        assert_eq!(
+            display_safe("C:\\Program Files\\Acme"),
+            "C:\\Program Files\\Acme"
+        );
+        // A right-to-left override makes "evil\u{202E}os.exe" read as
+        // "evilexe.so"; a newline would forge a second message line.
+        assert_eq!(
+            display_safe("lib\u{202E}os.exe\nscm: all good\u{1b}[2J"),
+            "lib\\u{202E}os.exe\\u{000A}scm: all good\\u{001B}[2J"
+        );
+        for invisible in [
+            '\u{061C}', '\u{200B}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{202A}',
+            '\u{2066}', '\u{2069}', '\u{FEFF}', '\u{0085}', '\u{007F}', '\0',
+        ] {
+            let shown = display_safe(&format!("a{invisible}b"));
+            assert!(
+                shown.is_ascii() && shown.contains("\\u{"),
+                "{invisible:?}: {shown}"
+            );
+        }
+        // Text in any script is kept as it is.
+        assert_eq!(display_safe("Prüfung 試験 مرحبا"), "Prüfung 試験 مرحبا");
     }
 
     #[test]

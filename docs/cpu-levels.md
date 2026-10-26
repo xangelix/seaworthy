@@ -210,7 +210,12 @@ keep the file name and the flag in step.
    `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32` on
    Windows, so the core's own DLL imports come from its directory and
    System32, never the working directory or `PATH`. Then call its
-   `seaworthy_core_main` entry point with the launcher ABI version.
+   `seaworthy_core_main` entry point with the launcher ABI version. On
+   Windows the launcher first calls
+   `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`, so every
+   later `LoadLibrary` in the process (the core's own) skips the working
+   directory and `PATH` as well; a core that needs the legacy order opts
+   out with `legacy_dll_search = true` in `launcher_main!`.
 4. **In secure-execution mode** (a set-user-ID, set-group-ID or
    file-capability launcher: Linux `AT_SECURE`, macOS `issetugid()`) the
    overrides below are ignored, and a core is opened only if root controls
@@ -239,7 +244,11 @@ for stderr, so its own failures also appear in an alert.
 
 ## Debugging a machine
 
-Two environment variables, both ignored in secure-execution mode:
+Two environment variables, both ignored in a privileged process
+(secure-execution mode; root on Linux and macOS, `sudo` included; an
+elevated process on Windows, LocalSystem and the service accounts
+included), where whoever set the environment may not be whoever holds the
+privileges (a note on stderr says so when one is set):
 
 - `SEAWORTHY_LAUNCHER_DEBUG=1` prints the machine's CPU features and why
   each core was taken or skipped.

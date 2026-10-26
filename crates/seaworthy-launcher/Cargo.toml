@@ -30,9 +30,16 @@ seaworthy-levels.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# LoadLibraryExW with restricted search flags, GetProcAddress.
+# LoadLibraryExW with restricted search flags, GetProcAddress,
+# SetDefaultDllDirectories; the token's elevation (the overrides are
+# ignored in an elevated process).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }
 
 [lints]
 workspace = true

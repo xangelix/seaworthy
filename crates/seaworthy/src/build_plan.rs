@@ -38,7 +38,14 @@
 //!   C build), and `verify` holds the copies to one set of bytes;
 //! - on Windows, every build with `-C target-feature=+crt-static`: `verify`
 //!   refuses a Windows binary importing the dynamic C runtime, and the FIPS
-//!   module's CMake build follows the flag (`/MT`);
+//!   module's CMake build follows the flag (`/MT`); and the launcher and
+//!   helper linked with `/DEPENDENTLOADFLAG:0xA00`
+//!   (`LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`):
+//!   their own imports resolve from their directory and System32, never the
+//!   working directory or `PATH`. (A link argument from seaworthy-launcher's
+//!   build script would reach only that crate's own targets, never the
+//!   product's launcher; the helper needs its directory for the FIPS
+//!   module's DLL it imports.)
 //! - on macOS ([`MACOS`]), the cores for `defaults.macos-targets`
 //!   (`lib<core>.dylib`), the launcher and helper for the target's default
 //!   CPU (`apple-m1`), and every build with `--config
@@ -184,6 +191,16 @@ pub fn plan_for(
     } else {
         Vec::new()
     };
+    // The launcher's and helper's own imports: their directory and System32
+    // only (the module docs), never the working directory or PATH.
+    let dependent_load: Vec<String> = if windows {
+        vec![
+            "-C".to_owned(),
+            "link-arg=/DEPENDENTLOADFLAG:0xA00".to_owned(),
+        ]
+    } else {
+        Vec::new()
+    };
     // macOS builds take the deployment target from seaworthy.toml, forced over
     // any the environment sets (cargo's [env]: rustc, the linker and build
     // scripts all see it). Dotted keys, one per --config: cargo refuses an
@@ -252,7 +269,12 @@ pub fn plan_for(
                 Vec::new()
             }
         };
-        let executable_flags = [crt.clone(), rpath("@executable_path/../Frameworks")].concat();
+        let executable_flags = [
+            crt.clone(),
+            dependent_load.clone(),
+            rpath("@executable_path/../Frameworks"),
+        ]
+        .concat();
         let core_flags = rpath("@loader_path");
         let mut launcher_args = vec!["--bin".to_owned(), product.executable.clone()];
         launcher_args.extend(manifest("launcher", &product.launcher)?);

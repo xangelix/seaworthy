@@ -2873,7 +2873,7 @@ fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
     let flags = rustflags_by_target_dir(&log, triple);
     assert_eq!(
         flags["base"],
-        "['-C','target-feature=+crt-static','--cfg','every_build']"
+        "['-C','target-feature=+crt-static','-C','link-arg=/DEPENDENTLOADFLAG:0xA00','--cfg','every_build']"
     );
     let workspace = dir.canonicalize().unwrap();
     for cpu in ["x86-64-v3", "x86-64-v2"] {

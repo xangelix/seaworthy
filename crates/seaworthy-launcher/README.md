@@ -132,8 +132,25 @@ launcher falls back is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
   the launcher (an update helper).
 - The build script — writes the core's `.cpureq` record for each target
   build, and refuses flags no record could describe.
-- Overrides: `SEAWORTHY_CORE`, `SEAWORTHY_LAUNCHER_DEBUG` (ignored in
-  secure-execution mode).
+- Overrides: `SEAWORTHY_CORE`, `SEAWORTHY_LAUNCHER_DEBUG`, ignored in a
+  privileged process: secure-execution mode, root on Linux and macOS
+  (`sudo`, a root shell, a root service), an elevated process on Windows
+  (an administrator's elevated token, LocalSystem, the service accounts).
+- On Windows the launcher's first act is
+  `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`: every later
+  `LoadLibrary` in the process, the core's included, searches the
+  launcher's directory, System32 and `AddDllDirectory` directories only,
+  never the working directory or `PATH`. A core that loads libraries from
+  `PATH` opts out with `legacy_dll_search = true` in `launcher_main!`. The
+  seaworthy CLI's build plan also links the launcher with
+  `/DEPENDENTLOADFLAG:0xA00`, so its own imports skip the working
+  directory and `PATH` too (a product building its launcher otherwise
+  adds `cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0xA00` to the
+  launcher crate's build script, MSVC targets only: a dependency's build
+  script can't pass a link argument to the product's binary).
+- Everything the launcher prints, and its macOS alert, shows control
+  characters and invisible or bidirectional formatting characters escaped
+  (`\u{202E}`): a file name can't forge a line or reorder a message.
 - On macOS, a launcher started by LaunchServices (the Finder, the Dock,
   `open`: no terminal) also shows its own failures in an alert
   (CoreFoundation's `CFUserNotificationDisplayAlert`); a core's failures
