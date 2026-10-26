@@ -1,0 +1,336 @@
+# The Windows lab: the packaging-to-runtime contract end to end on GitHub-hosted
+# `windows-2025` runners (an administrator, a real Service Control Manager, real NTFS
+# DACLs, Windows Installer). The build job builds the fixture products and their MSIs
+# with the seaworthy CLI (scripts/windows-lab-build.ps1); each lane installs them on a
+# fresh runner. docs/testing-windows.md describes every lane.
+#
+# Make "Windows lab result" the required check: it fails unless the build and every
+# lane passed. The FIPS lane runs on the schedule and on demand only, and its result is
+# informational (GitHub's runners are Hyper-V guests, where the FIPS module's CPU-jitter
+# entropy can abort a process on its first random draw).
+name: Windows lab
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, against the moving runner image.
+    - cron: "41 5 * * 2"
+
+permissions: {}
+
+concurrency:
+  group: lab-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: Build the fixture and its MSIs
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: Build, package and bundle
+        run: |
+          pwsh -NoProfile -File scripts/windows-lab-build.ps1 -Out (Join-Path $env:RUNNER_TEMP 'windows-lab')
+          if ($LASTEXITCODE -ne 0) { throw "windows-lab-build.ps1 exited $LASTEXITCODE" }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-bundle
+          path: ${{ runner.temp }}/windows-lab/bundle/
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload the build's logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-build-logs
+          path: |
+            ${{ runner.temp }}/windows-lab/logs/
+            ${{ runner.temp }}/windows-lab/releases/*/*/packages/*.wxs
+          if-no-files-found: ignore
+          retention-days: 7
+
+  install:
+    name: MSI install, upgrade and removal
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-lab-bundle
+          path: ${{ runner.temp }}/bundle
+      - name: The desktop fixture's MSI
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'lab-install'
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-msi-install.ps1 `
+            -Bundle (Join-Path $env:RUNNER_TEMP 'bundle') `
+            -JUnitDir (Join-Path $out 'junit') -EvidenceDir (Join-Path $out 'evidence')
+          if ($LASTEXITCODE -ne 0) { throw "windows-msi-install.ps1 exited $LASTEXITCODE" }
+      - name: Upload the lane's logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-install-logs
+          path: ${{ runner.temp }}/lab-install/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  update:
+    name: Service update, rollback and squatting
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-lab-bundle
+          path: ${{ runner.temp }}/bundle
+      - name: The update lane
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'lab-update'
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-msi-update.ps1 `
+            -Bundle (Join-Path $env:RUNNER_TEMP 'bundle') `
+            -JUnitDir (Join-Path $out 'junit') -EvidenceDir (Join-Path $out 'evidence')
+          if ($LASTEXITCODE -ne 0) { throw "windows-msi-update.ps1 exited $LASTEXITCODE" }
+      - name: Upload the lane's logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-update-logs
+          path: ${{ runner.temp }}/lab-update/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  scm:
+    name: SCM end to end
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-lab-bundle
+          path: ${{ runner.temp }}/bundle
+      # A native crash leaves nothing in the log: Windows Error Reporting writes a
+      # minidump per crashed process (failure.crash_is_restarted aborts the service on
+      # purpose: one expected dump).
+      - name: Crash dumps
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'lab-scm\crashdumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $wer = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $wer -Force | Out-Null
+          Set-ItemProperty -Path $wer -Name DumpFolder -Value $dumps -Type ExpandString
+          Set-ItemProperty -Path $wer -Name DumpType -Value 1 -Type DWord
+          Set-ItemProperty -Path $wer -Name DumpCount -Value 20 -Type DWord
+          Start-Service WerSvc -ErrorAction SilentlyContinue
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "SEAWORTHY_CRASHDUMP_DIR=$dumps`n")
+      - name: The SCM suite
+        shell: powershell
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'bundle'
+          $msi = @(Get-ChildItem -LiteralPath (Join-Path $bundle 'scm\packages') -Filter '*.msi' -File)
+          if ($msi.Count -ne 1) { throw "expected one SCM fixture MSI, found $($msi.Count)" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-scm-e2e.ps1 -Phase Service `
+            -BinDir (Join-Path $bundle 'bin') -Msi $msi[0].FullName -ExpectFips 0 `
+            -RustScmTestExe (Join-Path $bundle 'bin\windows_scm-test.exe') `
+            -JUnitDir (Join-Path $env:RUNNER_TEMP 'lab-scm\junit')
+          if ($LASTEXITCODE -ne 0) { throw "windows-scm-e2e.ps1 exited $LASTEXITCODE" }
+      # Informational: fresh processes' first random draw on a Hyper-V guest
+      # (docs/testing-windows.md). Its result is data, never this job's.
+      - name: Entropy probe (informational)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'bundle'
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-scm-e2e.ps1 -Phase Entropy `
+            -BinDir (Join-Path $bundle 'bin') -ExpectFips 0 `
+            -JUnitDir (Join-Path $env:RUNNER_TEMP 'lab-entropy\junit')
+          $code = $LASTEXITCODE
+          $verdict = 'no first draw aborted'
+          if ($code -ne 0) { $verdict = 'some first draws aborted, or the probe failed (see the log)' }
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "Entropy probe (informational, non-FIPS): $verdict`n")
+          exit $code
+      - name: Upload the entropy probe's report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-entropy
+          path: ${{ runner.temp }}/lab-entropy/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload the lane's logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-scm-logs
+          path: ${{ runner.temp }}/lab-scm/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  policy-live:
+    name: Update policy against the live registry
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-lab-bundle
+          path: ${{ runner.temp }}/bundle
+      # crates/seaworthy-updater/tests/windows_policy_live.rs: writes HKLM, so it runs
+      # only with SEAWORTHY_WINDOWS_LIVE_REGISTRY=1 (it says it skipped otherwise, which
+      # must never pass here).
+      - name: windows_policy_live
+        env:
+          SEAWORTHY_WINDOWS_LIVE_REGISTRY: "1"
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'bundle\bin\windows_policy_live-test.exe'
+          $log = Join-Path $env:RUNNER_TEMP 'policy-live.log'
+          # The test's stderr is part of the evidence: not an error record under 'Stop'.
+          $ErrorActionPreference = 'Continue'
+          & $exe --test-threads 1 --nocapture 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($code -ne 0) { throw "windows_policy_live exited $code" }
+          $text = Get-Content -LiteralPath $log -Raw
+          if ($text -match 'SKIPPED') { throw 'windows_policy_live skipped: SEAWORTHY_WINDOWS_LIVE_REGISTRY did not reach it' }
+          if ($text -notmatch 'test result: ok\. 1 passed') { throw 'windows_policy_live did not run its one test' }
+
+  fips:
+    name: FIPS (informational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.report.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: Crash dumps
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'lab-fips\crashdumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $wer = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $wer -Force | Out-Null
+          Set-ItemProperty -Path $wer -Name DumpFolder -Value $dumps -Type ExpandString
+          Set-ItemProperty -Path $wer -Name DumpType -Value 1 -Type DWord
+          Set-ItemProperty -Path $wer -Name DumpCount -Value 20 -Type DWord
+          Start-Service WerSvc -ErrorAction SilentlyContinue
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "SEAWORTHY_CRASHDUMP_DIR=$dumps`n")
+      # The fixture's cores on the AWS-LC FIPS module (the module's DLL beside them), its
+      # MSI, and the lanes' binaries built FIPS.
+      - name: Build, package and bundle (FIPS)
+        id: build
+        continue-on-error: true
+        run: |
+          pwsh -NoProfile -File scripts/windows-lab-build.ps1 -Fips -Out (Join-Path $env:RUNNER_TEMP 'windows-lab-fips')
+          if ($LASTEXITCODE -ne 0) { throw "windows-lab-build.ps1 -Fips exited $LASTEXITCODE" }
+      - name: The SCM suite on the FIPS MSI
+        id: suite
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'windows-lab-fips\bundle'
+          $msi = @(Get-ChildItem -LiteralPath (Join-Path $bundle 'scm\packages') -Filter '*.msi' -File)
+          if ($msi.Count -ne 1) { throw "expected one SCM fixture MSI, found $($msi.Count)" }
+          $bin = Join-Path $bundle 'bin'
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-scm-e2e.ps1 -Phase All `
+            -BinDir $bin -Msi $msi[0].FullName -ExpectFips 1 -FipsDllDir $bin `
+            -RustScmTestExe (Join-Path $bin 'windows_scm-test.exe') `
+            -JUnitDir (Join-Path $env:RUNNER_TEMP 'lab-fips\junit')
+          if ($LASTEXITCODE -ne 0) { throw "windows-scm-e2e.ps1 exited $LASTEXITCODE" }
+      - name: Report
+        id: report
+        if: always()
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          SUITE: ${{ steps.suite.outcome }}
+        run: |
+          $result = 'failure'
+          if ($env:BUILD -eq 'success' -and $env:SUITE -eq 'success') { $result = 'success' }
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "result=$result`n")
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "FIPS lab (informational): build $env:BUILD, SCM suite $env:SUITE`n")
+      - name: Upload the lane's logs
+        if: steps.build.outcome == 'failure' || steps.suite.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-lab-fips-logs
+          path: |
+            ${{ runner.temp }}/lab-fips/
+            ${{ runner.temp }}/windows-lab-fips/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  result:
+    name: Windows lab result
+    if: always()
+    needs: [build, install, update, scm, policy-live, fips]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      # The build and every lane must succeed; the FIPS lane is reported, never required.
+      - name: Every required lane passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          fips="$(jq -r 'if .fips.result == "skipped" then "not run (schedule and workflow_dispatch only)"
+            else (.fips.outputs.result // .fips.result) end' <<<"$NEEDS")"
+          echo "FIPS (informational): $fips" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -en --argjson needs "$NEEDS" '["build", "install", "update", "scm", "policy-live"]
+            | all(.[]; $needs[.].result == "success")' >/dev/null \
+            || { echo "::error::the Windows lab's build or a required lane failed, was cancelled, or was skipped"; exit 1; }

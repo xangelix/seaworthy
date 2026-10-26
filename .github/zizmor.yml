@@ -12,3 +12,4 @@ rules:
       - ci.yml
       - codeql.yml
       - release.yml
+      - lab-windows.yml
