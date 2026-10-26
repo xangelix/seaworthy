@@ -19,13 +19,15 @@
       cli       `seaworthy` and the lanes' binaries, release builds of this workspace:
                 seaworthy-service's windows_scm_e2e example (the version-gate stub and
                 start/stop/status) and its windows_scm test, seaworthy-crypto's
-                entropy_probe example, and seaworthy-updater's windows_policy_live test.
-                With -Fips, the first three on the FIPS module (and fips_selfcheck, run
-                here with --expect-fips), the module's DLL beside them.
+                entropy_probe example, seaworthy-updater's windows_policy_live test and
+                the lab harness `seaworthy-lab`. With -Fips, the first three on the FIPS
+                module (and fips_selfcheck, run here with --expect-fips), the module's DLL
+                beside them, and neither of the last two.
       keys      an ML-DSA-87 release key (`seaworthy keygen`) and a self-signed RSA-3072
                 code-signing certificate, basicConstraints critical CA:FALSE (Windows'
                 Authenticode policy refuses a CA as the signer), both made here for this
-                run. Only the certificate leaves the job (the lanes trust it).
+                run. Only the certificate leaves the job (the lanes trust it). Beside
+                them, the fixture's committed public CI test key (scm/keys/ci-test.*).
       build     crates/seaworthy-launcher/e2e/scm/seaworthy.toml (seaworthy-fips.toml with
                 -Fips), copied beside the keys, and without -Fips the desktop fixture's
                 seaworthy.toml: `seaworthy build-plan`, carried out by
@@ -36,8 +38,18 @@
                 InstallServices (the rolled-back upgrade) and is built by WiX directly; the
                 desktop viewer 1.0.0 (1) and 1.0.1 (2), unsigned. Every MSI passes Windows
                 Installer's validation (`wix msi validate`: an ICE error fails the build).
-      bundle    <Out>\bundle, what the lanes install (docs/testing-windows.md), listed with
-                SHA-256 in its manifest.txt.
+      upgrade   the upgrade-from-previous lane's candidate (scripts/windows-upgrade.ps1):
+                the plan built again with the helper trusting the CI test key alone and
+                dialing the lab's names under .invalid, the agent packaged as the
+                workspace's version, sequence -UpgradeSequence, build g<commit>, its
+                token written into lab\build.txt: a dev build (`--authenticode-only`, the
+                run's certificate) whose manifest the CI test key signs
+                (`--ci-test-signing`). Into <Out>\upgrade-candidate: lab-build.json (the
+                build's identity, the SHA-256 of the test key it trusts and of every
+                file), packages.json and packages\, which the workflow keeps on main as
+                the next run's previous build. Not with -Fips.
+      bundle    <Out>\bundle, what the lanes install (docs/testing-windows.md, the candidate
+                as upgrade\), listed with SHA-256 in its manifest.txt.
 
     Needs PowerShell 7 (the certificate's PEM export is .NET's); the syntax stays Windows
     PowerShell 5.1's.
@@ -61,6 +73,9 @@ param(
     [switch]$Fips,
     [ValidateSet('All', 'SelfTest')][string]$Phase = 'All',
     [string]$Wxs,
+    # The upgrade candidate's release sequence (CI: the workflow's run number, so a later
+    # run's build is a newer release than an earlier one's).
+    [string]$UpgradeSequence = $(if ($env:SEAWORTHY_UPGRADE_SEQUENCE) { $env:SEAWORTHY_UPGRADE_SEQUENCE } else { '1' }),
     [string]$WixMsiUrl = 'https://github.com/wixtoolset/wix/releases/download/v5.0.2/wix-cli-x64.msi',
     [string]$WixMsiSha256 = '097383B2773BDD3D76A6A2CD3F4DE6357BAE59172E1B6FA5AD87CE062074E8D0',
     [string]$WixVersion = '5.0.2',
@@ -85,6 +100,10 @@ $Repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 # Forward slashes: the build plan names crate paths with `/` only; cargo takes them.
 $FixtureManifest = 'crates/seaworthy-launcher/e2e/Cargo.toml'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+# The lab's names (scripts/windows-upgrade.ps1 maps them to the loopback): the upgrade
+# candidate's helper dials nothing else.
+$LabPackagesHost = 'packages.lab.invalid'
+$LabUpdatesHost = 'updates.lab.invalid'
 
 function Say([string]$What) { Write-Host ('{0:HH:mm:ss} windows-lab: {1}' -f (Get-Date), $What) }
 function Fail([string]$Why) { throw "windows-lab: FAIL: $Why" }
@@ -388,6 +407,30 @@ function Set-BrokenWxs {
 }
 
 # ---------------------------------------------------------------------------
+# The upgrade candidate's record
+
+# <Dir>\lab-build.json, the format scripts/upgrade-candidate.sh writes and
+# scripts/windows-upgrade-previous.ps1 checks: the build's identity, the SHA-256 of the
+# CI test public key its helper trusts, and the SHA-256 of every other file under <Dir>
+# by its path relative to it (forward slashes).
+function Write-LabBuild {
+    param([string]$Dir, [string]$Product, [string]$Package, [string]$Version, [long]$Sequence,
+        [string]$Build, [string]$Token, [string]$Commit, [string]$TrustKey)
+    $root = [System.IO.Path]::GetFullPath($Dir).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+    $names = @(Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.FullName -ne (Join-Path $root 'lab-build.json') } |
+            ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\', '/') })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $files = [ordered]@{}
+    foreach ($name in $names) { $files[$name] = (Get-FileHash -LiteralPath (Join-Path $root $name) -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $record = [ordered]@{
+        build = $Build; commit = $Commit; files = $files; format = 1; package = $Package; platform = 'windows'
+        product = $Product; sequence = $Sequence; token = $Token
+        trust = (Get-FileHash -LiteralPath $TrustKey -Algorithm SHA256).Hash.ToLowerInvariant(); version = $Version
+    }
+    Write-Text (Join-Path $root 'lab-build.json') (($record | ConvertTo-Json -Depth 4) + "`n")
+}
+
+# ---------------------------------------------------------------------------
 # Self-test
 
 function Invoke-SelfTest {
@@ -419,6 +462,22 @@ function Invoke-SelfTest {
         try { Set-BrokenWxs $broken } catch { $refused = $true }
         if (-not $refused) { Fail 'a .wxs without recovery actions must be refused' }
         Say 'selftest: the broken .wxs is well-formed and fails right after the recovery actions'
+
+        $candidate = Join-Path $dir 'candidate'
+        New-Item -ItemType Directory -Force -Path (Join-Path $candidate 'packages') | Out-Null
+        Write-Text (Join-Path $candidate 'packages\acmee2e-agent-0.1.0-7.msi') 'msi'
+        Write-Text (Join-Path $candidate 'packages.json') '{"ci_test": true}'
+        Write-Text (Join-Path $dir 'ci-test.pub') "00ff`n"
+        Write-LabBuild -Dir $candidate -Product 'agent' -Package 'acmee2e-agent' -Version '0.1.0' -Sequence 7 -Build 'g0123456789ab' `
+            -Token '0.1.0+g0123456789ab' -Commit '0123456789ab' -TrustKey (Join-Path $dir 'ci-test.pub')
+        $record = Get-Content -LiteralPath (Join-Path $candidate 'lab-build.json') -Raw | ConvertFrom-Json
+        $sha = { param([string]$Text) -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($Utf8NoBom.GetBytes($Text)) | ForEach-Object { $_.ToString('x2') }) }
+        if ($record.format -ne 1 -or $record.platform -ne 'windows' -or $record.sequence -ne 7 -or $record.token -ne '0.1.0+g0123456789ab') { Fail 'lab-build.json: the identity' }
+        if ($record.trust -ne (& $sha "00ff`n")) { Fail 'lab-build.json: the trusted key''s SHA-256' }
+        $listed = @($record.files.PSObject.Properties | ForEach-Object { $_.Name })
+        if (($listed -join ',') -ne 'packages.json,packages/acmee2e-agent-0.1.0-7.msi') { Fail "lab-build.json lists $($listed -join ', ')" }
+        if ($record.files.'packages/acmee2e-agent-0.1.0-7.msi' -ne (& $sha 'msi')) { Fail 'lab-build.json: a file''s SHA-256' }
+        Say 'selftest: the upgrade candidate''s lab-build.json lists every file and the trusted key'
 
         if ((ConvertTo-TomlLiteral 'C:\a b\c.exe') -ne "'C:\a b\c.exe'") { Fail 'TOML literal quoting' }
         $refused = $false
@@ -508,6 +567,10 @@ if ($Fips) {
 } else {
     $messages += Invoke-CargoJson (@('test', '--no-run') + $common + @('-p', 'seaworthy-updater', '--test', 'windows_policy_live')) 'building the windows_policy_live test'
     Copy-Item -LiteralPath (Get-CargoExecutable $messages 'windows_policy_live') -Destination (Join-Path $Bin 'windows_policy_live-test.exe')
+    # The upgrade lane's lab: the TLS lab server, its throwaway CA, the foreign-key
+    # manifest and the required-version client.
+    $messages += Invoke-CargoJson (@('build') + $common + @('-p', 'seaworthy-lab', '--bin', 'seaworthy-lab')) 'building seaworthy-lab'
+    Copy-Item -LiteralPath (Get-CargoExecutable $messages 'seaworthy-lab') -Destination (Join-Path $Bin 'seaworthy-lab.exe')
 }
 
 Step 'keys'
@@ -518,9 +581,16 @@ Assert-LabCertificate -Pem $CodesignPem -CommonName $CommonName
 Say "code-signing certificate $thumbprint"
 $Signing = Join-Path $Out 'signing.toml'
 $signingText = ''
+$CiTestSigning = Join-Path $Out 'signing.ci-test.toml'
 if (-not $Fips) {
     Invoke-Checked $Seaworthy @('keygen', '--algorithm', 'ml-dsa-87', '--secret', (Join-Path $Keys 'release.key'), '--public', (Join-Path $Keys 'release.pub')) 'seaworthy keygen'
     $signingText += "[[manifest]]`nalgorithm = `"ml-dsa-87`"`nkey = `"keys/release.key`"`n`n"
+    # The fixture's public CI test key (seaworthy.toml's [defaults.ci-test-keys]): the
+    # upgrade candidate's manifest signer, the one key its helper trusts.
+    foreach ($name in @('ci-test.pub', 'ci-test.key')) {
+        Copy-Item -LiteralPath (Join-Path $Repo "crates\seaworthy-launcher\e2e\scm\keys\$name") -Destination (Join-Path $Keys $name)
+    }
+    Write-Text $CiTestSigning "[[manifest]]`nalgorithm = `"ml-dsa-87`"`nkey = `"keys/ci-test.key`"`n"
 }
 $signingText += "[authenticode]`ncertificate = `"keys/codesign.pem`"`nkey = `"keys/codesign.key`"`ntool = $(ConvertTo-TomlLiteral $Osslsigncode)`n"
 Write-Text $Signing $signingText
@@ -531,6 +601,11 @@ $configName = 'seaworthy.toml'
 if ($Fips) { $configName = 'seaworthy-fips.toml' }
 $ScmConfig = Join-Path $Out 'seaworthy.toml'
 Copy-Item -LiteralPath (Join-Path $Repo "crates\seaworthy-launcher\e2e\scm\$configName") -Destination $ScmConfig
+if (-not $Fips) {
+    # The agent's files (lab\build.txt: `unreleased`, until the upgrade step writes its
+    # candidate's token).
+    Copy-Item -LiteralPath (Join-Path $Repo 'crates\seaworthy-launcher\e2e\scm\lab') -Destination (Join-Path $Out 'lab') -Recurse
+}
 Invoke-Checked $Seaworthy @('check', '--config', $ScmConfig) 'seaworthy check (the lab''s products)'
 $DesktopConfig = Join-Path $Repo 'crates\seaworthy-launcher\e2e\desktop\seaworthy.toml'
 
@@ -565,15 +640,19 @@ if (-not $Fips) { $DesktopArtifacts = Build-Products -Config $DesktopConfig -Wor
 
 Step 'package'
 # One release of one product into <Out>\releases\<Name>; its packages directory. With
-# -NoWix, the .wxs only.
+# -NoWix, the .wxs only. -Signed: a release (manifests by the run's release key);
+# -CiTest: a dev build (the run's Authenticode signature, manifests by the public CI test
+# key, which `repo` refuses to publish).
 function Invoke-Package {
-    param([string]$Config, [string]$Artifacts, [string]$Name, [string]$Product, [string]$Version, [int]$Sequence, [switch]$Signed, [switch]$NoWix)
+    param([string]$Config, [string]$Artifacts, [string]$Name, [string]$Product, [string]$Version, [long]$Sequence, [string]$Build, [switch]$Signed, [switch]$CiTest, [switch]$NoWix)
     $dest = Join-Path (Join-Path $Out 'releases') $Name
-    # No --build: the release's version token is its version alone (what the update
+    # Without -Build the release's version token is its version alone (what the update
     # lane's gate answers).
     $arguments = @('package', '--config', $Config, '--artifacts', $Artifacts, '--out', $dest, '--product', $Product,
         '--release', $Version, '--sequence', "$Sequence", '--platforms', 'windows')
+    if ($Build) { $arguments += @('--build', $Build) }
     if ($Signed) { $arguments += @('--signing', $Signing) }
+    if ($CiTest) { $arguments += @('--signing', $Signing, '--authenticode-only', '--ci-test-signing', $CiTestSigning) }
     if ($NoWix) { Remove-Item Env:\SEAWORTHY_WIX -ErrorAction SilentlyContinue } else { $env:SEAWORTHY_WIX = $script:Wix }
     try {
         Invoke-Checked $Seaworthy $arguments "seaworthy package ($Product $Version-$Sequence)" -Log "package-$Name"
@@ -654,6 +733,52 @@ if (-not $Fips) {
     $icon = Join-Path (Join-Path (Join-Path $Out 'releases') 'viewer-1') "viewer\$Triple\tree\Acme\Viewer.ico"
     if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) { Fail "the layout staged no $icon" }
     Copy-Item -LiteralPath $icon -Destination (Join-Path (Join-Path $Bundle 'viewer-1') 'icon.ico')
+}
+
+if (-not $Fips) {
+    Step 'upgrade'
+    if ($UpgradeSequence -notmatch '^[1-9][0-9]{0,9}$') { Fail "-UpgradeSequence '$UpgradeSequence' isn't a release sequence" }
+    # The workspace's version, through a crate that inherits it.
+    $labVersion = (& $Seaworthy manifest-version --manifest (Join-Path $Repo 'crates\seaworthy-lab\Cargo.toml') | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $labVersion) { Fail "seaworthy manifest-version failed (exit $LASTEXITCODE)" }
+    $labCommit = (& git -C $Repo rev-parse --short=12 HEAD | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $labCommit -notmatch '^[0-9a-f]{12,40}$') { Fail "git rev-parse --short=12 HEAD answered '$labCommit'" }
+    $labBuild = "g$labCommit"
+    $labToken = "$labVersion+$labBuild"
+    $labSequence = [long]$UpgradeSequence
+    # The installed files name the build (lab\build.txt, the agent's files).
+    Write-Text (Join-Path $Out 'lab\build.txt') "$labToken`n"
+    # The helper trusts the CI test key alone and dials the lab's names only
+    # (scm_helper/build.rs refuses any other URL); everything else is the same build.
+    $env:SEAWORTHY_E2E_HELPER_RELEASE_KEY = Join-Path $Keys 'ci-test.pub'
+    $env:SEAWORTHY_E2E_HELPER_PACKAGE_URL = "https://$LabPackagesHost/repo/releases/{product}/{channel}/{version}/{target}/{product}.{format}"
+    $env:SEAWORTHY_E2E_HELPER_VERSION_URL = "https://$LabUpdatesHost/_lab/required-version"
+    try {
+        $upgradeArtifacts = Build-Products -Config $ScmConfig -Work (Join-Path $Out 'upgrade-build')
+    } finally {
+        foreach ($name in @('SEAWORTHY_E2E_HELPER_RELEASE_KEY', 'SEAWORTHY_E2E_HELPER_PACKAGE_URL', 'SEAWORTHY_E2E_HELPER_VERSION_URL')) {
+            Remove-Item -LiteralPath "Env:\$name" -ErrorAction SilentlyContinue
+        }
+    }
+    $packages = Invoke-Package -Config $ScmConfig -Artifacts $upgradeArtifacts -Name 'agent-upgrade' -Product 'agent' `
+        -Version $labVersion -Sequence $labSequence -Build $labBuild -CiTest
+    $msi = Get-Single $packages '*.msi'
+    Test-Msi $msi
+    if (-not (Test-Path -LiteralPath "$msi.manifest" -PathType Leaf)) { Fail "$msi has no manifest beside it" }
+    $listingFile = Join-Path (Split-Path -Parent $packages) 'packages.json'
+    $listing = Get-Content -LiteralPath $listingFile -Raw | ConvertFrom-Json
+    if (-not ($listing.PSObject.Properties.Name -contains 'ci_test') -or $listing.ci_test -ne $true) { Fail "$listingFile isn't a CI test build's listing" }
+    if ($listing.token -ne $labToken -or $listing.sequence -ne $labSequence) { Fail "$listingFile names $($listing.token) (sequence $($listing.sequence)), not $labToken ($labSequence)" }
+    $UpgradeCandidate = Join-Path $Out 'upgrade-candidate'
+    New-Item -ItemType Directory -Force -Path (Join-Path $UpgradeCandidate 'packages') | Out-Null
+    foreach ($item in @(Get-ChildItem -LiteralPath $packages -File | Where-Object { -not $_.Name.StartsWith('.') })) {
+        Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $UpgradeCandidate 'packages')
+    }
+    Copy-Item -LiteralPath $listingFile -Destination (Join-Path $UpgradeCandidate 'packages.json')
+    Write-LabBuild -Dir $UpgradeCandidate -Product 'agent' -Package $listing.package -Version $labVersion -Sequence $labSequence `
+        -Build $labBuild -Token $labToken -Commit $labCommit -TrustKey (Join-Path $Keys 'ci-test.pub')
+    Copy-Item -LiteralPath $UpgradeCandidate -Destination (Join-Path $Bundle 'upgrade') -Recurse
+    Say "upgrade candidate: $($listing.package) $labToken (sequence $labSequence), signed by the CI test key, in $UpgradeCandidate"
 }
 
 Step 'bundle'
