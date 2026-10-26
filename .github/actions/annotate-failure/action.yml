@@ -2,8 +2,9 @@
 # need a signed-in account even on a public repository; annotations are
 # served by the public API and show on the run's summary page, so the
 # reason a job failed can be read without signing in. Use it as the last
-# step, with `if: failure()`. The job's runs carry no secrets; GitHub masks
-# registered secrets in annotations as it does in logs.
+# step, with `if: failure()`. GitHub masks registered secrets in
+# annotations as it does in logs; a value derived from a secret needs its
+# own `::add-mask::`, here as in the log.
 name: Annotate failure
 description: >-
   Publish the tails of a failed job's logs (the logged shell's

@@ -303,6 +303,8 @@ jobs:
           } else {
             throw "windows-upgrade-previous.ps1 exited $code"
           }
+          # GitHub's wrapper ends the step with `exit $LASTEXITCODE`: 3 is handled.
+          exit 0
       # The runner is a throwaway VM, the job an administrator: the lane trusts a CA in
       # LocalMachine\Root, edits the hosts file, writes HKLM and installs a service, and
       # undoes all of it in a finally block.

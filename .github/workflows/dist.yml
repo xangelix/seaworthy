@@ -294,6 +294,11 @@ defaults:
 
 jobs:
   prepare:
+    # Each step's output is also kept for the failure annotations (the last
+    # step). The shell is in seaworthy's checkout, which precedes every run.
+    defaults:
+      run:
+        shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Prepare
     runs-on: ${{ inputs.linux-runner }}
     timeout-minutes: 30
@@ -357,6 +362,11 @@ jobs:
             seaworthy-work/release.env
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
+      # The failure's output as annotations, readable without signing in
+      # (.seaworthy/.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.seaworthy/.github/actions/annotate-failure
 
   build-linux:
     name: Build Linux (${{ matrix.dir }})
@@ -558,6 +568,11 @@ jobs:
   # whose script hands them to the seaworthy call alone; signing material
   # lives in a private directory shredded when that step ends.
   package: # zizmor: ignore[excessive-permissions] (the calling job's grant, see the top)
+    # Each step's output is also kept for the failure annotations (the last
+    # step). The shell is in seaworthy's checkout, which precedes every run.
+    defaults:
+      run:
+        shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Package (Linux, Windows)
     needs: [prepare, build-linux, build-windows]
     if: >-
@@ -660,6 +675,11 @@ jobs:
             seaworthy-work/dist/*/x86_64-pc-windows-msvc/layout.json
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
+      # The failure's output as annotations, readable without signing in
+      # (.seaworthy/.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.seaworthy/.github/actions/annotate-failure
 
   msi:
     name: MSI (WiX)
@@ -697,6 +717,11 @@ jobs:
           retention-days: ${{ inputs.retention-days }}
 
   adopt-msi: # zizmor: ignore[excessive-permissions] (the calling job's grant, see the top)
+    # Each step's output is also kept for the failure annotations (the last
+    # step). The shell is in seaworthy's checkout, which precedes every run.
+    defaults:
+      run:
+        shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Adopt the MSIs
     needs: [package, msi]
     if: ${{ !cancelled() && needs.msi.result == 'success' }}
@@ -780,8 +805,18 @@ jobs:
             seaworthy-work/adopted/*/packages/
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
+      # The failure's output as annotations, readable without signing in
+      # (.seaworthy/.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.seaworthy/.github/actions/annotate-failure
 
   package-macos:
+    # Each step's output is also kept for the failure annotations (the last
+    # step). The shell is in seaworthy's checkout, which precedes every run.
+    defaults:
+      run:
+        shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Package macOS
     needs: [prepare, build-macos]
     if: ${{ !cancelled() && needs.build-macos.result == 'success' }}
@@ -852,8 +887,18 @@ jobs:
           path: seaworthy-work/dist-macos/
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
+      # The failure's output as annotations, readable without signing in
+      # (.seaworthy/.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.seaworthy/.github/actions/annotate-failure
 
   verify:
+    # Each step's output is also kept for the failure annotations (the last
+    # step). The shell is in seaworthy's checkout, which precedes every run.
+    defaults:
+      run:
+        shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Verify and assemble
     needs: [package, adopt-msi, package-macos]
     if: >-
@@ -911,8 +956,18 @@ jobs:
           path: ${{ runner.temp }}/packages/
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
+      # The failure's output as annotations, readable without signing in
+      # (.seaworthy/.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.seaworthy/.github/actions/annotate-failure
 
   publish:
+    # Each step's output is also kept for the failure annotations (the last
+    # step). The shell is in seaworthy's checkout, which precedes every run.
+    defaults:
+      run:
+        shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Publish (seaworthy repo, seaworthy publish)
     needs: [verify, adopt-msi, package]
     if: ${{ !cancelled() && needs.verify.result == 'success' && inputs.release && inputs.publish-toml != '' }}
@@ -991,3 +1046,8 @@ jobs:
           path: seaworthy-work/repo/
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
+      # The failure's output as annotations, readable without signing in
+      # (.seaworthy/.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.seaworthy/.github/actions/annotate-failure

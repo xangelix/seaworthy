@@ -8,6 +8,7 @@ nine are published (the tenth slot stays free for the step's own failure).
 import glob
 import os
 import re
+import sys
 
 MAX_ANNOTATIONS = 9
 MAX_CHUNK = 60_000
@@ -73,6 +74,9 @@ def failure_lines(text: str, context: int = 3) -> str:
 
 
 def main() -> None:
+    # Windows runners print in cp1252, which has no U+FFFD (the replacement
+    # character the logs are read with).
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     lines = int(os.environ.get("ANNOTATE_LINES") or "150")
     temp = os.environ.get("RUNNER_TEMP", "")
     patterns = [os.path.join(temp, "step-output.log")] if temp else []
