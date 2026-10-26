@@ -54,7 +54,7 @@ url = "2"
 # dist_archive's independent readers: the tarball's zstd and the zip's
 # deflate (both already in the CLI's graph).
 zstd = { version = "0.14", default-features = false }
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 # dist_pe's check that a stamped image still parses (read side only).
 object = { version = "0.40", default-features = false, features = ["read_core", "pe", "std"] }
 
