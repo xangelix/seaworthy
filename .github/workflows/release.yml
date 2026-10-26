@@ -264,7 +264,11 @@ jobs:
             echo
             echo '```sh'
             echo "sha256sum --check --ignore-missing SHA256SUMS"
-            echo "gh attestation verify <archive> --repo $REPO"
+            echo "gh attestation verify <archive> \\"
+            echo "  --repo $REPO \\"
+            echo "  --signer-workflow $REPO/.github/workflows/release.yml \\"
+            echo "  --source-ref refs/tags/$TAG \\"
+            echo "  --deny-self-hosted-runners"
             echo '```'
           } >notes.md
           gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
