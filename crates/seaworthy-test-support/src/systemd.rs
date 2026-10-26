@@ -34,6 +34,11 @@
 //! - its entrypoint remounts the container's own cgroup mount read-write
 //!   (in a private cgroup namespace it shows only the container's subtree)
 //!   and then runs systemd;
+//! - docker's AppArmor profile is lifted (`apparmor=unconfined`):
+//!   `docker-default` refuses every mount, that remount too, wherever the
+//!   host enforces AppArmor (Ubuntu's, GitHub's runners); a host without
+//!   AppArmor never applied it. The containment doesn't rest on it: the
+//!   points around this one hold on every host, and [`start`] checks them;
 //! - provisioning masks every unit that exists to touch hardware or kernel
 //!   state ([`MASKED`]), and [`start`] checks the containment held: the
 //!   container isn't privileged, `/proc/sys` refuses a write, those units
@@ -442,9 +447,11 @@ pub async fn start(distro: Distro, files: &[(String, Vec<u8>)]) -> SystemdHost {
     let container = crate::launch::start_local(&role, || {
         // The committed image runs systemd (COMMIT_CHANGES). Never
         // privileged: only CAP_SYS_ADMIN, for systemd's namespaces and the
-        // entrypoint's remount of the container's own cgroup.
+        // entrypoint's remount of the container's own cgroup, which
+        // AppArmor's docker-default would refuse (see "Containment").
         let mut request = GenericImage::new(name, digest)
             .with_cap_add("SYS_ADMIN")
+            .with_security_opt("apparmor=unconfined")
             .with_cgroupns_mode(CgroupnsMode::Private)
             .with_mount(Mount::tmpfs_mount("/run"))
             .with_mount(Mount::tmpfs_mount("/run/lock"))
