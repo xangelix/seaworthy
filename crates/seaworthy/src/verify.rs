@@ -49,6 +49,16 @@
 //!    the oldest supported system. An import table, dynamic section or
 //!    version table that doesn't parse, and a dynamic binary without
 //!    section headers, are findings, never a pass.
+//! 7. **No trust in CI test keys**, unless the build is a CI test build
+//!    (`package --ci-test-signing`, [`Config::use_ci_test_keys`]): no
+//!    binary may carry the CI test-key marker that a build made with
+//!    `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` embeds when it trusts test keys
+//!    (`seaworthy_updater::ci_test`), nor a key of
+//!    `[defaults.ci-test-keys]` (a release key's last 32 bytes, raw or as
+//!    hex in either case; an OpenPGP key's first armored line). Anyone can
+//!    sign with a test key: a release binary that trusts one installs
+//!    anyone's update. `seaworthy verify` on its own treats the artifacts
+//!    as a release's.
 //!
 //! [`Verified`] can only come from [`verify`]. It carries the SHA-256 of
 //! every file it read, and `layout` refuses a file that changed since.
@@ -151,7 +161,10 @@ pub fn verify(config: &Config, id: &str, artifacts: &Path) -> Result<Verified, c
         .products
         .get(id)
         .ok_or_else(|| crate::DistError::Config(format!("no product {id:?} in seaworthy.toml")))?;
-    let mut run = Run::default();
+    let mut run = Run {
+        test_keys: ci_test_needles(config)?,
+        ..Run::default()
+    };
     let mut platforms = Vec::new();
     for inputs in expected(config, product, artifacts) {
         let sidecars = run.platform(config, product, &inputs);
@@ -174,6 +187,101 @@ struct Run {
     findings: Vec<String>,
     warnings: Vec<String>,
     digests: BTreeMap<PathBuf, String>,
+    /// What no binary of a release may carry ([`ci_test_needles`]).
+    test_keys: Vec<Needle>,
+}
+
+/// A byte string a binary must not carry, and what it means.
+struct Needle {
+    what: String,
+    bytes: Vec<u8>,
+}
+
+/// What marks a binary that trusts CI test keys: the marker every build
+/// made with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` embeds when it trusts one,
+/// and `[defaults.ci-test-keys]`'s keys themselves. Nothing for a CI test
+/// build ([`Config::ci_test`]), which trusts them on purpose.
+fn ci_test_needles(config: &Config) -> Result<Vec<Needle>, crate::DistError> {
+    if config.ci_test {
+        return Ok(Vec::new());
+    }
+    let mut needles = vec![Needle {
+        what: format!(
+            "the CI test-key marker: it was built with {}=1 and trusts public CI test keys",
+            seaworthy_updater::ci_test::CI_TEST_KEYS_VAR
+        ),
+        bytes: seaworthy_updater::ci_test::ci_test_keys_marker(),
+    }];
+    let Some(test) = &config.defaults.ci_test_keys else {
+        return Ok(needles);
+    };
+    for key in config.clone().use_ci_test_keys()?.release_keys()? {
+        // The last 32 bytes: the end of an ML-DSA-87 key's t1, the whole
+        // Ed25519 key, a P-256 point's y.
+        let public_key = key.public_key();
+        let tail = public_key
+            .get(public_key.len().saturating_sub(32)..)
+            .unwrap_or(public_key)
+            .to_vec();
+        let id = hex::encode(key.key_id());
+        for (form, bytes) in [
+            ("raw", tail.clone()),
+            ("hex", hex::encode(&tail).into_bytes()),
+            ("hex", hex::encode_upper(&tail).into_bytes()),
+        ] {
+            needles.push(Needle {
+                what: format!("CI test release key {id} ({form}; [defaults.ci-test-keys])"),
+                bytes,
+            });
+        }
+    }
+    for file in &test.openpgp_keys {
+        let path = config.dir.join(file);
+        let text = std::fs::read_to_string(&path).map_err(|e| crate::DistError::io(&path, e))?;
+        // The armor's first body line: after the header block's blank line.
+        let first = text
+            .lines()
+            .skip_while(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .find(|line| !line.is_empty());
+        if let Some(line) = first.filter(|line| line.len() >= 32) {
+            needles.push(Needle {
+                what: format!(
+                    "CI test OpenPGP key {} ([defaults.ci-test-keys])",
+                    file.display()
+                ),
+                bytes: line.as_bytes().to_vec(),
+            });
+        }
+    }
+    Ok(needles)
+}
+
+/// The needles `haystack` contains, in one pass.
+fn found_needles<'a>(haystack: &[u8], needles: &'a [Needle]) -> Vec<&'a Needle> {
+    let mut starts = [false; 256];
+    for needle in needles {
+        if let Some(&byte) = needle.bytes.first() {
+            starts[usize::from(byte)] = true;
+        }
+    }
+    let mut found = vec![false; needles.len()];
+    for (at, &byte) in haystack.iter().enumerate() {
+        if !starts[usize::from(byte)] {
+            continue;
+        }
+        let rest = haystack.get(at..).unwrap_or_default();
+        for (hit, needle) in found.iter_mut().zip(needles) {
+            if !*hit && !needle.bytes.is_empty() && rest.starts_with(&needle.bytes) {
+                *hit = true;
+            }
+        }
+    }
+    needles
+        .iter()
+        .zip(found)
+        .filter_map(|(needle, hit)| hit.then_some(needle))
+        .collect()
 }
 
 impl Run {
@@ -213,6 +321,18 @@ impl Run {
                     path.to_path_buf(),
                     seaworthy_crypto::digest::sha256_hex(&bytes),
                 );
+                let carried: Vec<String> = found_needles(&bytes, &self.test_keys)
+                    .into_iter()
+                    .map(|needle| needle.what.clone())
+                    .collect();
+                for what in carried {
+                    self.finding(
+                        path,
+                        format!(
+                            "carries {what}; only a CI test build (package --ci-test-signing) may ship a binary that trusts CI test keys"
+                        ),
+                    );
+                }
                 Some(bytes)
             }
             Err(e) => {

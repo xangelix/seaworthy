@@ -1179,3 +1179,121 @@ fn the_glibc_check_command_applies_verifys_rule_to_single_files() {
     assert_eq!(code, Some(1), "{text}");
     assert!(text.contains("cannot read"), "{text}");
 }
+
+/// A config whose `[defaults.ci-test-keys]` names a fresh ML-DSA-87 test
+/// key and an OpenPGP test key, written under `dir`; also the test key and
+/// the OpenPGP key's first armored line.
+fn config_with_test_keys(dir: &Path) -> (Config, Vec<u8>, Vec<u8>, String) {
+    let release = seaworthy_crypto::mldsa::SigningKey::generate()
+        .unwrap()
+        .public_key()
+        .to_vec();
+    let test = seaworthy_crypto::mldsa::SigningKey::generate()
+        .unwrap()
+        .public_key()
+        .to_vec();
+    let armor_line = "mQINBGZ0dGVzdC1vbmx5LWtleS1mb3Itc2Vhd29ydGh5LXZlcmlmeS10ZXN0cw";
+    write(dir, "keys/release.pub", hex::encode(&release).as_bytes());
+    write(dir, "keys/test.pub", hex::encode(&test).as_bytes());
+    write(
+        dir,
+        "keys/test.asc",
+        format!(
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: Acme CI test key\n\n{armor_line}\n=abcd\n-----END PGP PUBLIC KEY BLOCK-----\n"
+        )
+        .as_bytes(),
+    );
+    let text = config_text(false).replacen(
+        "release-signatures = [\"ml-dsa-87\"]\n",
+        "release-signatures = [\"ml-dsa-87\"]\n\
+         release-keys = [{ algorithm = \"ml-dsa-87\", public-key = \"keys/release.pub\" }]\n",
+        1,
+    ) + "\n[defaults.ci-test-keys]\n\
+         release-keys = [{ algorithm = \"ml-dsa-87\", public-key = \"keys/test.pub\" }]\n\
+         openpgp-keys = [\"keys/test.asc\"]\n";
+    let mut config = Config::parse(&text).expect("valid config");
+    config.dir = dir.to_path_buf();
+    (config, release, test, armor_line.to_owned())
+}
+
+/// `good_tree` with the Linux helper carrying `payload` in a data section.
+fn tree_with_helper_payload(payload: &[u8]) -> Tree {
+    let tree = good_tree();
+    write(
+        tree.root(),
+        &format!("{LINUX}/helper/AcmeToolUpdate"),
+        &Elf {
+            sections: vec![(".rodata".into(), payload.to_vec())],
+            needed: vec!["libc.so.6".into()],
+            interp: Some(LOADER.into()),
+            ..Elf::default()
+        }
+        .build(),
+    );
+    tree
+}
+
+fn findings_under(config: &Config, tree: &Tree) -> Vec<String> {
+    match seaworthy::verify::verify(config, "tool", tree.root()) {
+        Ok(_) => Vec::new(),
+        Err(DistError::Verify(findings)) => findings,
+        Err(other) => panic!("not a verify error: {other}"),
+    }
+}
+
+/// A binary that trusts CI test keys (the marker a build made with
+/// SEAWORTHY_ALLOW_CI_TEST_KEYS=1 embeds, or a test key itself) is refused,
+/// unless the build is a CI test build (`package --ci-test-signing`).
+#[test]
+fn a_binary_that_trusts_ci_test_keys_ships_only_in_a_ci_test_build() {
+    let keys = tempfile::tempdir().unwrap();
+    let (config, release, test, armor_line) = config_with_test_keys(keys.path());
+    let tail = &test[test.len() - 32..];
+    let marker = seaworthy_updater::ci_test::ci_test_keys_marker();
+    let ci_test = config.clone().use_ci_test_keys().expect("the CI test keys");
+    for (name, payload, mentions) in [
+        ("the marker", marker.clone(), "CI test-key marker"),
+        (
+            "the test key as hex",
+            hex::encode(&test).into_bytes(),
+            "CI test release key",
+        ),
+        (
+            "its tail as upper-case hex",
+            hex::encode_upper(tail).into_bytes(),
+            "CI test release key",
+        ),
+        ("the raw test key", test.clone(), "CI test release key"),
+        (
+            "the OpenPGP test key",
+            armor_line.clone().into_bytes(),
+            "CI test OpenPGP key",
+        ),
+    ] {
+        let tree = tree_with_helper_payload(&payload);
+        let found = findings_under(&config, &tree);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.contains(mentions) && f.contains("AcmeToolUpdate")),
+            "{name}: {found:#?}"
+        );
+        assert!(
+            findings_under(&ci_test, &tree).is_empty(),
+            "{name}: a CI test build may ship it"
+        );
+    }
+    // Without [defaults.ci-test-keys] the marker is still refused, and it
+    // names the switch.
+    let tree = tree_with_helper_payload(&marker);
+    expect_one(&tree, false, "SEAWORTHY_ALLOW_CI_TEST_KEYS=1");
+    // The release key, and either half of the marker, are no finding.
+    for payload in [
+        hex::encode(&release).into_bytes(),
+        marker[..marker.len() - 1].to_vec(),
+        marker[1..].to_vec(),
+    ] {
+        let tree = tree_with_helper_payload(&payload);
+        assert!(findings_under(&config, &tree).is_empty());
+    }
+}

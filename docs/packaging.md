@@ -319,7 +319,10 @@ manifests and rpm and pacman signatures by public test keys kept in the product'
 only the product's non-release builds trust. An installed dev build's helper can then update to a
 later one, and a release's never does. A test-key file holds no Authenticode signer and no secret
 from the environment; `--ci-test-signing` never joins a release's `--signing`, and `repo` refuses
-the result.
+the result. Only a helper built with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` can trust the test keys
+(`seaworthy_updater::ci_test`), and such a binary carries a marker: `verify` (on its own, or in a
+`package` run without `--ci-test-signing`) refuses any binary carrying it or a test key
+([threat model](threat-model.md#the-ci-test-key-mechanism)).
 
 `seaworthy keygen` writes a throwaway release key (secret hex, mode 0600, and public hex);
 `seaworthy sign-statement` is the reference command signer and a way to check a setup end to end. A
