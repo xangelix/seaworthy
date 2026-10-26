@@ -1342,6 +1342,20 @@ chmod 0755 /run/seaworthy-conformance-polkit.sh"#
             "{}",
             self.name()
         );
+        // Active means forked. Before systemd 255 the child is a copy of
+        // systemd (root, every capability) until it executes the program:
+        // wait for the program itself. A sandbox systemd can't set up never
+        // gets there, and the poll shows the unit's journal.
+        self.poll(
+            &format!(
+                "[ \"$(readlink /proc/$(systemctl show -p MainPID --value {service})/exe)\" = \"$(readlink -f '{}')\" ]",
+                self.lane.product.executable
+            ),
+            60,
+            &service,
+            "never executed the product",
+        )
+        .await;
         let pid = self.show(&service, "MainPID").await;
         // The process's real user, from its status: /proc/<pid>'s owner is
         // root whenever the process isn't dumpable, whoever it runs as.
