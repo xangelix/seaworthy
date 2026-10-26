@@ -35,7 +35,7 @@ jobs:
     uses: xangelix/seaworthy/.github/workflows/dist.yml@<full commit SHA> # <what it is, e.g. main of 2026-10-26>
     permissions:
       contents: read
-      id-token: write # the signing jobs request it (Azure Artifact Signing through OIDC)
+      # id-token: write  # only when signing through Azure Artifact Signing (the azure-* inputs)
     with:
       release: ${{ startsWith(github.ref, 'refs/tags/v') }}
       environment: release            # its protection rules gate signing and publishing
@@ -74,15 +74,15 @@ checks its SHA-256 against the listing; nothing unlisted is in it.
 | `build-linux` | Linux | one job per target directory: the launcher and helper (`base`), each CPU's core; inside `linux-build-image`, whose glibc is the products' floor or older | `contents: read` |
 | `build-windows` | Windows | the same, natively with MSVC (`seaworthy-build.ps1`) | `contents: read` |
 | `build-macos` | macOS | the same, on Apple Silicon | `contents: read` |
-| `package` | Linux | `seaworthy package --platforms linux,windows`: verify, layout, version resources, Authenticode, packages, manifests, SBOMs; signed on a release | `contents: read`, `id-token: write` |
+| `package` | Linux | `seaworthy package --platforms linux,windows`: verify, layout, version resources, Authenticode, packages, manifests, SBOMs; signed on a release | the calling job's grant: `contents: read`, plus `id-token: write` with the `azure-*` inputs |
 | `msi` | Windows | WiX v5.0.2 (pinned, checksum-verified) builds and validates each MSI from package's `.wxs` | `contents: read` |
-| `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI's payload checked against the signed tree and its security-relevant tables against the `.wxs`, signed, listed | `contents: read`, `id-token: write` |
+| `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI's payload checked against the signed tree and its security-relevant tables against the `.wxs`, signed, listed | the calling job's grant, as `package` |
 | `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (desktop) or pkg (service), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed | `contents: read` |
 | `verify` | Linux | every listed artifact against its listing; the packages artifact with `SHA256SUMS` | `contents: read` |
 | `publish` | Linux | on a release with `publish-toml`: `seaworthy repo` after the last published plan, then `seaworthy publish` (one at a time) | `contents: read` |
 
-Every job declares its own permissions; the workflow's default is none. Linux jobs run
-step-security's harden-runner in audit mode; every action is pinned by commit SHA; no checkout keeps
+Every job declares `contents: read` alone, except `package` and `adopt-msi`, which declare nothing
+and take the calling job's grant (below). Linux jobs run step-security's harden-runner in audit mode; every action is pinned by commit SHA; no checkout keeps
 credentials. The build jobs never see a secret.
 
 ### What the signing jobs trust
@@ -112,15 +112,26 @@ and take nothing from the jobs that do but data:
   credential.
 - **No secret in a file a later step reads,** and nothing through `GITHUB_ENV` but tool paths.
 
-**Why the calling job grants `id-token: write`:** GitHub checks the permissions a called workflow's
-jobs request against the caller's grant before it evaluates any condition, so the `package` and
-`adopt-msi` jobs' `id-token: write` (for Azure Artifact Signing through OIDC) must be granted even
-when no Azure input is set. The runner then puts the token-request variables
-(`ACTIONS_ID_TOKEN_REQUEST_*`) in every step of those jobs: the tools steps unset them,
-`seaworthy.sh` holds them back from everything but `seaworthy`, and `seaworthy` passes them to its
-Authenticode signing command alone (`azure-sign.sh`, when the `azure-*` inputs are given). The
-pinned actions those jobs use (checkout, the artifact actions, harden-runner) see them too: that is
-GitHub's design, and why those jobs run no product code.
+**`id-token: write`, for Azure alone.** GitHub checks the permissions a called workflow's jobs
+declare against the calling job's grant before it evaluates any condition: had `package` and
+`adopt-msi` declared `id-token: write` (Azure Artifact Signing through OIDC), every caller would
+have to grant it, signing through Azure or not, and the runner would put the token-request
+variables (`ACTIONS_ID_TOKEN_REQUEST_*`) in every step of those jobs. So those two jobs declare no
+permissions and take the calling job's grant as it is, and the workflow sets no default (one would
+cap them too):
+
+- **Grant `contents: read`**, as in the example, and add `id-token: write` only when you set the
+  `azure-*` inputs. The two jobs check the grant before anything else runs
+  (`github.sh oidc-grant`): `id-token: write` without the `azure-*` inputs fails the run (the jobs
+  would hold a token nothing uses), and the `azure-*` inputs without it fail a release or a dev
+  build (the signature needs the token).
+- **Grant nothing else to the calling job.** Those two jobs have exactly its grant; every other job
+  caps itself at `contents: read`.
+- With Azure, the token-request variables are in every step of those two jobs: the tools steps
+  unset them, `seaworthy.sh` holds them back from everything but `seaworthy`, and `seaworthy`
+  passes them to its Authenticode signing command alone (`azure-sign.sh`). The pinned actions those
+  jobs use (checkout, the artifact actions, harden-runner) see them too: that is GitHub's design,
+  and why those jobs run no product code.
 
 ## Inputs
 
@@ -185,8 +196,9 @@ managed identity) in Microsoft Entra, give it the "Trusted Signing Certificate P
 on the certificate profile, and add a federated credential for GitHub Actions: issuer
 `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`, subject
 `repo:<owner>/<repo>:environment:release` (with `environment: release`; the subject must match the
-job, which runs in that environment). Then set the five `azure-*` inputs; the tenant and client ids
-are identifiers, not secrets. `azure-sign.sh` mints a fresh GitHub OIDC token for every signature
+job, which runs in that environment). Then set the five `azure-*` inputs and grant
+`id-token: write` in the job that calls the workflow (beside `contents: read`); the tenant and
+client ids are identifiers, not secrets. `azure-sign.sh` mints a fresh GitHub OIDC token for every signature
 (the job's tokens expire within minutes) and exchanges it with Entra for the signing service's
 token; neither reaches a command line. Pin `[defaults.authenticode]` to the profile's subject and
 Microsoft Identity Verification Root Certificate Authority 2020.

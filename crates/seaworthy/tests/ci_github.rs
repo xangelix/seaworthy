@@ -1,7 +1,8 @@
 //! seaworthy's reusable GitHub workflow (`.github/workflows/dist.yml`) and
 //! its glue (`scripts/ci/github.sh`, `.github/actions/setup-seaworthy`):
 //! the workflow read as YAML and held to the repository's Actions baseline
-//! (no permissions by default, every job its own, every action pinned by
+//! (every job its own permissions but the two that take the calling job's
+//! grant for Azure's OIDC, every action pinned by
 //! commit, no credentials kept, no expression in a script, harden-runner on
 //! Linux, no organization default, every script step one the scripts
 //! have), and github.sh carried out: the build matrix from real build
@@ -84,37 +85,60 @@ fn the_reusable_workflow_follows_the_actions_baseline() {
     let on = key(&workflow, "on").as_hash().unwrap();
     assert_eq!(on.len(), 1);
     assert!(on.contains_key(&Yaml::from_str("workflow_call")));
-    // No permissions by default; each job grants its own, id-token only to
-    // the two jobs that sign Windows code (Azure OIDC).
+    // No default permissions: the two jobs that Authenticode-sign (package,
+    // adopt-msi) declare none and take the calling job's grant, so only a
+    // caller that signs through Azure grants id-token: write. Every other
+    // job declares contents: read alone, and no job declares id-token.
     assert!(
-        key(&workflow, "permissions")
-            .as_hash()
-            .is_some_and(|h| h.is_empty())
+        key(&workflow, "permissions").is_badvalue(),
+        "a default would cap the signing jobs too"
     );
     let jobs = key(&workflow, "jobs").as_hash().unwrap();
-    let mut id_token = BTreeSet::new();
+    let mut inheriting = BTreeSet::new();
     for (id, job) in jobs {
         let id = id.as_str().unwrap();
         assert!(
             job["timeout-minutes"].as_i64().is_some(),
             "{id}: timeout-minutes"
         );
-        let permissions = job["permissions"]
-            .as_hash()
-            .unwrap_or_else(|| panic!("{id}: permissions"));
-        assert_eq!(
-            string(&job["permissions"]["contents"]),
-            Some("read"),
-            "{id}"
-        );
-        for (scope, level) in permissions {
-            let scope = scope.as_str().unwrap();
-            match (scope, level.as_str()) {
-                ("contents", Some("read")) => {}
-                ("id-token", Some("write")) => {
-                    id_token.insert(id.to_owned());
+        match job["permissions"].as_hash() {
+            None => {
+                assert!(job["permissions"].is_badvalue(), "{id}: permissions");
+                inheriting.insert(id.to_owned());
+                // Its grant is checked before anything else runs.
+                let steps = job["steps"].as_vec().unwrap();
+                let grant = steps
+                    .iter()
+                    .position(|step| {
+                        string(&step["run"])
+                            == Some("bash .seaworthy/scripts/ci/github.sh oidc-grant")
+                    })
+                    .unwrap_or_else(|| panic!("{id}: the oidc-grant check"));
+                let setup = steps
+                    .iter()
+                    .position(|step| {
+                        string(&step["uses"])
+                            == Some("./.seaworthy/.github/actions/setup-seaworthy")
+                    })
+                    .unwrap();
+                assert!(grant < setup, "{id}: the grant is checked first");
+                for name in [
+                    "SEAWORTHY_GH_AZURE_ENDPOINT",
+                    "SEAWORTHY_GH_AZURE_ACCOUNT",
+                    "SEAWORTHY_GH_AZURE_PROFILE",
+                    "AZURE_TENANT_ID",
+                    "AZURE_CLIENT_ID",
+                ] {
+                    assert!(string(&steps[grant]["env"][name]).is_some(), "{id}: {name}");
                 }
-                _ => panic!("{id}: {scope}: {level:?}"),
+            }
+            Some(permissions) => {
+                assert_eq!(permissions.len(), 1, "{id}: {permissions:?}");
+                assert_eq!(
+                    string(&job["permissions"]["contents"]),
+                    Some("read"),
+                    "{id}"
+                );
             }
         }
         // Linux jobs start with harden-runner (audit mode).
@@ -133,8 +157,17 @@ fn the_reusable_workflow_follows_the_actions_baseline() {
         }
     }
     assert_eq!(
-        id_token,
+        inheriting,
         BTreeSet::from(["adopt-msi".to_owned(), "package".to_owned()])
+    );
+    // The self-test calls it as an unsigned caller does: contents: read
+    // alone.
+    let (_, selftest) = yaml(".github/workflows/dist-selftest.yml");
+    let grant = selftest["jobs"]["dist"]["permissions"].as_hash().unwrap();
+    assert_eq!(grant.len(), 1);
+    assert_eq!(
+        string(&selftest["jobs"]["dist"]["permissions"]["contents"]),
+        Some("read")
     );
     for (job, step) in steps(&workflow) {
         if let Some(uses) = string(&step["uses"]) {
@@ -426,7 +459,10 @@ fn glue(args: &[&str], env: &[(&str, &str)]) -> Output {
         .env_remove("GITHUB_ENV");
     for (k, _) in std::env::vars_os() {
         let k = k.to_string_lossy();
-        if k.starts_with("SEAWORTHY_") || k.starts_with("AZURE_") {
+        if k.starts_with("SEAWORTHY_")
+            || k.starts_with("AZURE_")
+            || k.starts_with("ACTIONS_ID_TOKEN_")
+        {
             command.env_remove(&*k);
         }
     }
@@ -434,6 +470,47 @@ fn glue(args: &[&str], env: &[(&str, &str)]) -> Output {
         command.env(k, v);
     }
     command.output().unwrap()
+}
+
+#[test]
+fn the_oidc_grant_is_azure_s_alone() {
+    let token = [
+        ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://example.com/token"),
+        ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "oidc"),
+    ];
+    let azure = [
+        ("SEAWORTHY_GH_AZURE_ENDPOINT", "eus.codesigning.azure.net"),
+        ("SEAWORTHY_GH_AZURE_ACCOUNT", "acme"),
+        ("SEAWORTHY_GH_AZURE_PROFILE", "acme-public"),
+        ("AZURE_TENANT_ID", "00000000-0000-0000-0000-000000000000"),
+        ("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000001"),
+    ];
+    let release = [("SEAWORTHY_RELEASE", "1")];
+    let run = |sets: &[&[(&str, &str)]]| {
+        let env: Vec<(&str, &str)> = sets.iter().flat_map(|s| s.iter().copied()).collect();
+        glue(&["oidc-grant"], &env)
+    };
+    // No Azure, no grant: an unsigned or PKCS#12 caller.
+    assert!(run(&[&release]).status.success());
+    // Azure with the grant, on a release or not.
+    assert!(run(&[&azure, &token, &release]).status.success());
+    assert!(run(&[&azure, &token]).status.success());
+    // A grant without Azure: refused, whatever the run.
+    for sets in [&[&token[..]][..], &[&token[..], &release[..]]] {
+        let out = run(sets);
+        assert!(!out.status.success());
+        assert!(said(&out).contains("remove it"), "{}", said(&out));
+    }
+    // Azure without the grant: refused when the run signs, else harmless.
+    let out = run(&[&azure, &release]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("grant id-token: write"),
+        "{}",
+        said(&out)
+    );
+    assert!(run(&[&azure, &[("SEAWORTHY_DEV_SIGN", "1")]]).status.code() == Some(1));
+    assert!(run(&[&azure]).status.success());
 }
 
 const TWO_PLATFORMS: &str = r#"

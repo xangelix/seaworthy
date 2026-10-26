@@ -3,8 +3,10 @@
 # has, unsigned, on GitHub-hosted runners: the Linux, Windows and macOS
 # builds per CPU target, the Linux packages, the Windows zip and MSI (built
 # with WiX and adopted), the macOS disk image, and the verified packages
-# artifact. Not on pull requests: dist.yml's signing jobs request
-# id-token: write, which a fork's pull request can't grant.
+# artifact. It grants contents: read alone, as every caller that doesn't
+# sign through Azure does (dist.yml refuses id-token: write without the
+# azure-* inputs). Not on pull requests: the full pipeline is long, and the
+# push to main and the weekly run cover it.
 name: dist (self-test)
 
 on:
@@ -25,8 +27,7 @@ jobs:
   dist:
     uses: ./.github/workflows/dist.yml
     permissions:
-      contents: read
-      id-token: write # requested by dist.yml's signing jobs; unused unsigned
+      contents: read # the checkouts; dist.yml's signing jobs take this grant as it is
     with:
       config: crates/seaworthy-launcher/e2e/desktop/seaworthy.toml
       manifest: crates/seaworthy-launcher/e2e/Cargo.toml

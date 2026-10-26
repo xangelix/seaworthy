@@ -9,6 +9,11 @@
 #                                        (GITHUB_OUTPUT lines)
 #   github.sh build-env <triple> <file>  the caller's build-env for one
 #                                        target, checked, as KEY=VALUE lines
+#   github.sh oidc-grant                 the calling job's grant, in the two
+#                                        jobs that take it as it is (package,
+#                                        adopt-msi): id-token: write with the
+#                                        azure-* inputs (required when the run
+#                                        signs), never without them
 #   github.sh signing-toml <file>        signing.toml from the secrets the
 #                                        job was handed (names, never values);
 #                                        exports SEAWORTHY_SIGNING, or
@@ -180,6 +185,34 @@ check_plain() { # <value>...
 # an OpenPGP signer by secret-key-env, Authenticode by a PKCS#12 converted
 # to PEM files in a private directory or by azure-sign.sh (OIDC), and the
 # Developer ID apple-keychain set up. Names and paths only.
+# The calling job's grant, in a job that declares no permissions of its own
+# and so has exactly that grant: the runner sets the OIDC request variables
+# (ACTIONS_ID_TOKEN_REQUEST_*) for the whole job when it includes
+# id-token: write. That grant is Azure Artifact Signing's alone: refused
+# without the azure-* inputs (the job would hold a token it never uses),
+# required with them when the run signs (a release or a dev build).
+oidc_grant() {
+    local azure=0 granted=0
+    [ -z "${SEAWORTHY_GH_AZURE_ENDPOINT:-}${SEAWORTHY_GH_AZURE_ACCOUNT:-}${SEAWORTHY_GH_AZURE_PROFILE:-}${AZURE_TENANT_ID:-}${AZURE_CLIENT_ID:-}" ] ||
+        azure=1
+    [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] || granted=1
+    if [ "$azure" = 0 ] && [ "$granted" = 1 ]; then
+        fail "the job that calls dist.yml grants id-token: write, which only Azure Artifact Signing (the azure-* inputs) uses: remove it from that job's permissions"
+    fi
+    if [ "$azure" = 1 ] && [ "$granted" = 0 ]; then
+        if [ "${SEAWORTHY_RELEASE:-0}" = 1 ] || [ "${SEAWORTHY_DEV_SIGN:-0}" = 1 ]; then
+            fail "Azure Artifact Signing (the azure-* inputs) needs an OIDC token: grant id-token: write in the job that calls dist.yml"
+        fi
+        say "no id-token: write grant: the azure-* inputs sign only a release or a dev build"
+        return 0
+    fi
+    if [ "$granted" = 1 ]; then
+        say "the calling job grants id-token: write, for Azure Artifact Signing"
+    else
+        say "the calling job grants no id-token: write (no Azure Artifact Signing)"
+    fi
+}
+
 signed_file="" signed_unsigned=0
 signing_toml() { # <file>
     local file="$1" sections=()
@@ -526,8 +559,9 @@ case "$step" in
             export_env SEAWORTHY_SIGNING "$signed_file"
         fi
         ;;
+    oidc-grant) oidc_grant ;;
     signed) signed "${1:?usage: github.sh signed <step>}" ;;
     apple-cleanup) apple_cleanup ;;
     assemble) assemble "$@" ;;
-    *) echo "usage: $0 matrix|build-env|signing-toml|signed|apple-cleanup|assemble" >&2; exit 2 ;;
+    *) echo "usage: $0 matrix|build-env|oidc-grant|signing-toml|signed|apple-cleanup|assemble" >&2; exit 2 ;;
 esac

@@ -10,7 +10,8 @@
 #       uses: <owner>/seaworthy/.github/workflows/dist.yml@<full commit SHA>
 #       permissions:
 #         contents: read
-#         id-token: write    # requested by the signing jobs (Azure OIDC)
+#         # id-token: write  # only with the azure-* inputs (Azure Artifact
+#         #                  # Signing through OIDC); refused without them
 #       with:
 #         release: ${{ startsWith(github.ref, 'refs/tags/v') }}
 #
@@ -41,13 +42,27 @@
 # commit and take only data from prepare (docs/ci-github.md, "What the
 # signing jobs trust").
 #
+# Permissions: every job declares its own (contents: read), except the two
+# that Authenticode-sign (package, adopt-msi). GitHub checks the permissions
+# a called workflow's jobs declare against the calling job's grant before it
+# evaluates any condition, so a declared id-token: write would have to be
+# granted by every caller, signing through Azure or not. Those two jobs
+# declare none and take the calling job's grant as it is: contents: read,
+# plus id-token: write from a caller that signs through Azure Artifact
+# Signing. Their first check (github.sh oidc-grant) refuses the grant
+# without the azure-* inputs, and requires it with them when the run signs.
+# For the same reason the workflow sets no default permissions: a default
+# would cap those two jobs too (hence zizmor's excessive-permissions is
+# ignored on the workflow and on those two jobs alone; seaworthy's
+# ci_github test holds every other job to contents: read).
+#
 # No account, endpoint, bucket or signing identity has a default: each
 # signer is used only when its secrets or inputs are given. A release or a
 # dev build without any fails, unless allow-unsigned says an unsigned one is
 # meant; other builds are unsigned (or CI test-signed). The runner labels default to
 # GitHub-hosted runners, and the Linux build image to the official Rust
 # image, digest-pinned (the GitLab template's default).
-name: seaworthy dist
+name: seaworthy dist # zizmor: ignore[excessive-permissions]
 
 on:
   workflow_call:
@@ -244,8 +259,6 @@ on:
       packages-artifact:
         description: The artifact holding every verified package, listing and SHA256SUMS.
         value: ${{ jobs.verify.outputs.artifact }}
-
-permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -537,7 +550,7 @@ jobs:
   # installed by a step that holds no secret; the secrets reach one step,
   # whose script hands them to the seaworthy call alone; signing material
   # lives in a private directory shredded when that step ends.
-  package:
+  package: # zizmor: ignore[excessive-permissions] (the calling job's grant, see the top)
     name: Package (Linux, Windows)
     needs: [prepare, build-linux, build-windows]
     if: >-
@@ -548,9 +561,7 @@ jobs:
     runs-on: ${{ inputs.linux-runner }}
     timeout-minutes: 90
     environment: ${{ (inputs.release || inputs.dev-sign) && inputs.environment || '' }}
-    permissions:
-      contents: read
-      id-token: write # Azure Artifact Signing through OIDC, when its inputs are set
+    # No permissions of its own: the calling job's grant (see the top).
     outputs:
       msi: ${{ steps.msi.outputs.msi }}
     steps:
@@ -567,6 +578,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .seaworthy
           persist-credentials: false
+      # The calling job's grant holds id-token: write exactly when Azure
+      # Artifact Signing is used (refused otherwise), before anything runs.
+      - name: The calling job's grant (github.sh oidc-grant)
+        env:
+          SEAWORTHY_GH_AZURE_ENDPOINT: ${{ inputs.azure-endpoint }}
+          SEAWORTHY_GH_AZURE_ACCOUNT: ${{ inputs.azure-account }}
+          SEAWORTHY_GH_AZURE_PROFILE: ${{ inputs.azure-profile }}
+          AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+          AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        run: bash .seaworthy/scripts/ci/github.sh oidc-grant
       - id: seaworthy
         uses: ./.seaworthy/.github/actions/setup-seaworthy
         with:
@@ -668,16 +689,14 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
 
-  adopt-msi:
+  adopt-msi: # zizmor: ignore[excessive-permissions] (the calling job's grant, see the top)
     name: Adopt the MSIs
     needs: [package, msi]
     if: ${{ !cancelled() && needs.msi.result == 'success' }}
     runs-on: ${{ inputs.linux-runner }}
     timeout-minutes: 45
     environment: ${{ (inputs.release || inputs.dev-sign) && inputs.environment || '' }}
-    permissions:
-      contents: read
-      id-token: write # Azure Artifact Signing through OIDC, when its inputs are set
+    # No permissions of its own: the calling job's grant (see the top).
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
@@ -692,6 +711,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .seaworthy
           persist-credentials: false
+      # The calling job's grant holds id-token: write exactly when Azure
+      # Artifact Signing is used (refused otherwise), before anything runs.
+      - name: The calling job's grant (github.sh oidc-grant)
+        env:
+          SEAWORTHY_GH_AZURE_ENDPOINT: ${{ inputs.azure-endpoint }}
+          SEAWORTHY_GH_AZURE_ACCOUNT: ${{ inputs.azure-account }}
+          SEAWORTHY_GH_AZURE_PROFILE: ${{ inputs.azure-profile }}
+          AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}
+          AZURE_CLIENT_ID: ${{ inputs.azure-client-id }}
+        run: bash .seaworthy/scripts/ci/github.sh oidc-grant
       - id: seaworthy
         uses: ./.seaworthy/.github/actions/setup-seaworthy
         with:
