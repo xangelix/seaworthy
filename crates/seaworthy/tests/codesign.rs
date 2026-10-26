@@ -1136,36 +1136,59 @@ outputs = [{outputs}]
         openpgp: Some(Box::new(keyring.signer())),
         ..seaworthy::package::Signing::default()
     };
+    let options = seaworthy::package::Options {
+        release: common::release(),
+        mtime: 1_700_000_000,
+        nfpm,
+        wix: wix.clone(),
+        build: seaworthy::sign::BuildId {
+            metadata: "cafe12".into(),
+        },
+    };
+    let sidecar_of = |layouts: &[seaworthy::layout::Layout]| {
+        layouts
+            .iter()
+            .find(|l| l.triple == "x86_64-pc-windows-msvc")
+            .and_then(|l| l.files.iter().find(|f| f.staged.ends_with("extra_1.dll")))
+            .unwrap()
+            .staged
+            .clone()
+    };
+    // A sidecar arriving signed by anyone but the product's pinned identity
+    // (a vendor's redistributable, any certificate at all): refused, as a
+    // signed release vouches for every binary it ships.
     let layouts = common::layouts(&config, "console", tmp.path());
-    // A vendor-signed redistributable among the sidecars keeps its
-    // publisher's signature.
     let publisher = tmp.path().join("publisher");
     std::fs::create_dir(&publisher).unwrap();
     let (publisher_cert, publisher_key) = test_certificate(&publisher);
-    let sidecar = layouts
-        .iter()
-        .find(|l| l.triple == "x86_64-pc-windows-msvc")
-        .and_then(|l| l.files.iter().find(|f| f.staged.ends_with("extra_1.dll")))
-        .unwrap()
-        .staged
-        .clone();
     osslsigncode(&publisher_cert, &publisher_key)
-        .sign(&sidecar, "Publisher")
+        .sign(&sidecar_of(&layouts), "Publisher")
+        .unwrap();
+    let err = seaworthy::package::package(
+        &config,
+        "console",
+        &layouts,
+        &tmp.path().join("dist-refused"),
+        &options,
+        &signing,
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(
+        err.contains("sidecar extra_1.dll arrives Authenticode-signed, but not by the product's pinned identity (defaults.authenticode): ship it unsigned and seaworthy signs it"),
+        "{err}"
+    );
+    // One the product's own identity signed already keeps that signature.
+    let layouts = common::layouts(&config, "console", tmp.path());
+    osslsigncode(&cert, &key)
+        .sign(&sidecar_of(&layouts), "Acme Console")
         .unwrap();
     let artifacts = seaworthy::package::package(
         &config,
         "console",
         &layouts,
         &tmp.path().join("dist"),
-        &seaworthy::package::Options {
-            release: common::release(),
-            mtime: 1_700_000_000,
-            nfpm,
-            wix: wix.clone(),
-            build: seaworthy::sign::BuildId {
-                metadata: "cafe12".into(),
-            },
-        },
+        &options,
         &signing,
     )
     .unwrap();
@@ -1187,12 +1210,7 @@ outputs = [{outputs}]
         "extra_1.dll",
     ] {
         let file = top.join(name);
-        let signer = if name == "extra_1.dll" {
-            &publisher_cert
-        } else {
-            &cert
-        };
-        verify_authenticode(Path::new("osslsigncode"), &file, Some(signer))
+        verify_authenticode(Path::new("osslsigncode"), &file, Some(&cert))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         let resources = run(Command::new("llvm-readobj")
             .arg("--coff-resources")

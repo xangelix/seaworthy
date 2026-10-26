@@ -758,14 +758,59 @@ pub fn set_resource(
     Ok(out)
 }
 
-/// Whether `pe` carries an Authenticode signature (a certificate table).
+/// `WIN_CERTIFICATE.wRevision`: `WIN_CERT_REVISION_2_0`.
+const WIN_CERT_REVISION_2_0: u16 = 0x0200;
+/// `WIN_CERTIFICATE.wCertificateType`: `WIN_CERT_TYPE_PKCS_SIGNED_DATA`.
+const WIN_CERT_TYPE_PKCS_SIGNED_DATA: u16 = 0x0002;
+/// A `WIN_CERTIFICATE` header: `dwLength`, `wRevision`, `wCertificateType`.
+const WIN_CERTIFICATE_HEADER: u32 = 8;
+
+/// Whether `pe` carries an Authenticode signature: a certificate table
+/// (the security data directory, a file offset and size) that is well
+/// formed — inside the file, 8-byte aligned, its first `WIN_CERTIFICATE`
+/// a revision 2.0 PKCS#7 entry no longer than the table. It says nothing
+/// of whether the signature verifies, or whose it is: check that with
+/// [`crate::codesign::Pins::check_authenticode`].
 ///
 /// # Errors
-/// [`DistError::Layout`] for an image that isn't PE32+ AMD64.
+/// [`DistError::Layout`] for an image that isn't PE32+ AMD64, or a
+/// certificate table that is malformed (never taken for "unsigned").
 pub fn is_signed(pe: &[u8]) -> Result<bool, DistError> {
     let l = layout(pe)?;
     let (offset, size) = directory(pe, &l, DIR_SECURITY)?;
-    Ok(offset != 0 || size != 0)
+    if offset == 0 && size == 0 {
+        return Ok(false);
+    }
+    let bad = |why: &str| {
+        Err(DistError::Layout(format!(
+            "a malformed certificate table (offset {offset:#x}, {size} bytes): {why}"
+        )))
+    };
+    if offset == 0 || size < WIN_CERTIFICATE_HEADER {
+        return bad("no room for a certificate");
+    }
+    if !offset.is_multiple_of(8) {
+        return bad("not 8-byte aligned");
+    }
+    let start = to_usize(offset)?;
+    let end = to_usize(size)?.checked_add(start);
+    if end.is_none_or(|end| end > pe.len()) {
+        return bad("past the end of the file");
+    }
+    let length = u32_at(pe, start)?;
+    let revision = start
+        .checked_add(4)
+        .map_or_else(|| Err(refused("truncated image")), |at| u16_at(pe, at))?;
+    let kind = start
+        .checked_add(6)
+        .map_or_else(|| Err(refused("truncated image")), |at| u16_at(pe, at))?;
+    if length < WIN_CERTIFICATE_HEADER || length > size {
+        return bad("a certificate whose length doesn't fit the table");
+    }
+    if revision != WIN_CERT_REVISION_2_0 || kind != WIN_CERT_TYPE_PKCS_SIGNED_DATA {
+        return bad("not a revision 2.0 PKCS#7 certificate");
+    }
+    Ok(true)
 }
 
 /// What a version resource names.

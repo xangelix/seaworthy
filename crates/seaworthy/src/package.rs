@@ -1242,8 +1242,11 @@ fn write_listing(
 /// helper, reads every record back, Authenticode-signs every binary when a
 /// signer is given (checking each signature against the pins), and
 /// rewrites the tree's digests and `layout.json`. A sidecar that already
-/// carries a signature (a vendor-signed redistributable) keeps its
-/// publisher's.
+/// carries a signature keeps it only when it verifies to the product's own
+/// pinned identity (`defaults.authenticode`); any other is refused: a
+/// signed release vouches for every binary it ships, and a signature
+/// nothing checks (any certificate, or a table that merely looks like one)
+/// would let a build skip that.
 fn prepare_windows(
     config: &Config,
     product: &crate::config::Product,
@@ -1294,10 +1297,17 @@ fn prepare_windows(
         }
         if let Some(signer) = authenticode {
             let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
-            let publisher_signed = matches!(file.role, Role::Sidecar)
+            let signed_already = matches!(file.role, Role::Sidecar)
                 && crate::pe_version::is_signed(&bytes)
                     .map_err(|e| DistError::Layout(format!("{}: {e}", file.staged.display())))?;
-            if !publisher_signed {
+            if signed_already {
+                // Kept only when it's the product's own pinned identity's.
+                pins.check_authenticode(&file.staged).map_err(|e| {
+                    DistError::Sign(format!(
+                        "sidecar {name} arrives Authenticode-signed, but not by the product's pinned identity (defaults.authenticode): ship it unsigned and seaworthy signs it ({e})"
+                    ))
+                })?;
+            } else {
                 signer.sign(&file.staged, display)?;
                 crate::layout::recheck_record(&file.staged, &file.role, "signed")?;
                 pins.check_authenticode(&file.staged)?;

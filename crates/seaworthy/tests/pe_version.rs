@@ -21,7 +21,7 @@ use std::process::Command;
 
 use common::{Pe, have, record, run};
 use seaworthy::pe_version::{
-    LANG_EN_US, RT_MANIFEST, RT_VERSION, VersionInfo, set_resource, stamp_version,
+    LANG_EN_US, RT_MANIFEST, RT_VERSION, VersionInfo, is_signed, set_resource, stamp_version,
 };
 use seaworthy::version::Release;
 
@@ -1017,4 +1017,82 @@ fn images_it_cannot_edit_safely_are_refused() {
     let optional = u32_at(&pe32, 0x3c) as usize + 24;
     pe32[optional..optional + 2].copy_from_slice(&0x10bu16.to_le_bytes());
     assert!(stamp(&pe32).contains("not PE32+"));
+}
+
+/// A certificate table is read as a signature only when it is well formed:
+/// inside the file, 8-byte aligned, a revision 2.0 PKCS#7 entry no longer
+/// than the table. Anything else is refused, never taken for unsigned (nor
+/// for a publisher's signature: whose it is, osslsigncode tells).
+#[test]
+fn a_certificate_table_counts_only_when_well_formed() {
+    let unsigned = core_dll();
+    assert!(!is_signed(&unsigned).unwrap());
+    // A table appended at the end, as signing leaves it.
+    let with_table = |pad_to_8: bool, length: u32, revision: u16, kind: u16, size: u32| {
+        let mut pe = core_dll();
+        if pad_to_8 {
+            while !pe.len().is_multiple_of(8) {
+                pe.push(0);
+            }
+        }
+        let offset = u32::try_from(pe.len()).unwrap();
+        pe.extend_from_slice(&length.to_le_bytes());
+        pe.extend_from_slice(&revision.to_le_bytes());
+        pe.extend_from_slice(&kind.to_le_bytes());
+        pe.resize(pe.len() + 24, 0x30);
+        let header = u32_at(&pe, 0x3c) as usize;
+        let security = header + 24 + 112 + 4 * 8;
+        pe[security..security + 4].copy_from_slice(&offset.to_le_bytes());
+        pe[security + 4..security + 8].copy_from_slice(&size.to_le_bytes());
+        pe
+    };
+    assert!(is_signed(&with_table(true, 32, 0x0200, 2, 32)).unwrap());
+    for (pe, why) in [
+        (
+            with_table(true, 32, 0x0200, 2, 4096),
+            "past the end of the file",
+        ),
+        (with_table(true, 4, 0x0200, 2, 32), "doesn't fit the table"),
+        (with_table(true, 64, 0x0200, 2, 32), "doesn't fit the table"),
+        (
+            with_table(true, 32, 0x0100, 2, 32),
+            "not a revision 2.0 PKCS#7",
+        ),
+        (
+            with_table(true, 32, 0x0200, 1, 32),
+            "not a revision 2.0 PKCS#7",
+        ),
+        (
+            with_table(true, 32, 0x0200, 2, 4),
+            "no room for a certificate",
+        ),
+    ] {
+        let err = is_signed(&pe).unwrap_err().to_string();
+        assert!(err.contains(why), "{why}: {err}");
+    }
+    // Unaligned: only when the image's length isn't a multiple of 8 already.
+    let unaligned = with_table(false, 32, 0x0200, 2, 32);
+    let offset = {
+        let header = u32_at(&unaligned, 0x3c) as usize;
+        u32_at(&unaligned, header + 24 + 112 + 4 * 8)
+    };
+    if !offset.is_multiple_of(8) {
+        assert!(
+            is_signed(&unaligned)
+                .unwrap_err()
+                .to_string()
+                .contains("not 8-byte aligned")
+        );
+    }
+    // A size with no offset.
+    let mut zero = core_dll();
+    let header = u32_at(&zero, 0x3c) as usize;
+    let security = header + 24 + 112 + 4 * 8;
+    zero[security + 4..security + 8].copy_from_slice(&16u32.to_le_bytes());
+    assert!(
+        is_signed(&zero)
+            .unwrap_err()
+            .to_string()
+            .contains("no room for a certificate")
+    );
 }
