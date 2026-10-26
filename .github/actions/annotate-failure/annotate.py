@@ -1,8 +1,10 @@
 """Print the tails of log files as GitHub `::error` annotations.
 
-GitHub keeps at most ten error annotations per step and caps a message at
-64 KiB, so the tails are split into chunks under that size and the first
-nine are published (the tenth slot stays free for the step's own failure).
+GitHub keeps at most ten error annotations per step and stores at most 4096
+characters of each message (it drops the rest, end first), so the output is
+cut into chunks under that size: the failure-looking lines first, then each
+file's tail, cut from its end so the last chunk is the log's real end. Nine
+are published; the tenth slot stays free for the step's own failure.
 """
 
 import glob
@@ -11,7 +13,8 @@ import re
 import sys
 
 MAX_ANNOTATIONS = 9
-MAX_CHUNK = 60_000
+MAX_CHUNK = 4_000
+MAX_SUMMARY_CHUNKS = 3
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -44,15 +47,67 @@ def files_for(pattern: str) -> list[str]:
     return out
 
 
-def tail(path: str, lines: int) -> str:
+def read(path: str) -> str:
     with open(path, "rb") as handle:
         data = handle.read()
-    text = ANSI.sub("", data.decode("utf-8", errors="replace"))
-    return "\n".join(text.splitlines()[-lines:])
+    return ANSI.sub("", data.decode("utf-8", errors="replace"))
+
+
+DIGITS = re.compile(r"\d+")
+
+
+def without_progress(lines: list[str]) -> list[str]:
+    """Drops a percentage that the next line repeats but for its numbers (a
+    progress meter: apt's "Reading database ... 45%")."""
+    out = []
+    for i, line in enumerate(lines):
+        following = lines[i + 1] if i + 1 < len(lines) else None
+        if (
+            "%" in line
+            and following is not None
+            and DIGITS.sub("#", line) == DIGITS.sub("#", following)
+        ):
+            continue
+        out.append(line)
+    return out
+
+
+def fit(line: str) -> str:
+    """A line cut to the chunk size (bytes, on a character boundary)."""
+    return line.encode("utf-8")[: MAX_CHUNK - 1].decode("utf-8", errors="ignore")
+
+
+def size(line: str) -> int:
+    return len(line.encode("utf-8")) + 1
+
+
+def chunks_from_start(lines: list[str], limit: int) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    used = 0
+    for line in map(fit, lines):
+        if used + size(line) > MAX_CHUNK:
+            chunks.append("\n".join(current))
+            if len(chunks) == limit:
+                return chunks
+            current, used = [], 0
+        current.append(line)
+        used += size(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks[:limit]
+
+
+def chunks_from_end(lines: list[str], limit: int) -> list[str]:
+    """The last `limit` chunks of `lines`, in order: the final one ends with
+    the last line."""
+    reverse = chunks_from_start([fit(line) for line in reversed(lines)], limit)
+    return ["\n".join(reversed(chunk.split("\n"))) for chunk in reversed(reverse)]
 
 
 FAILURE = re.compile(
-    r"panicked at|^\s*error(\[E\d+\])?:|FAILED|FAIL[: ]|^---- .+ ----$|^Error:|fatal:|failed to"
+    r"panicked at|(?i:\berror)(\[E\d+\])?:|\bERROR\b|FAILED|FAIL[: ]|^---- .+ ----$|fatal:"
+    r"|failed to|\bfailed:|No such file or directory|command not found|exit code [1-9]"
 )
 
 
@@ -103,25 +158,19 @@ def main() -> None:
         if found:
             collected.append(f"== {os.path.basename(path)}\n{found}")
     if collected:
-        summary = "\n".join(collected)
-        summary = summary.encode("utf-8")[:MAX_CHUNK].decode("utf-8", errors="ignore")
-        print(f"::error title={escape_property('error lines (whole log)')}::{escape_data(summary)}")
-        budget -= 1
-    for path in files:
-        text = tail(path, lines)
-        if not text.strip():
-            continue
-        chunks = []
-        while text:
-            # Split on a line boundary under the size cap (bytes, as GitHub counts).
-            piece = text.encode("utf-8")[:MAX_CHUNK].decode("utf-8", errors="ignore")
-            if len(piece) < len(text) and "\n" in piece:
-                piece = piece[: piece.rindex("\n") + 1]
-            chunks.append(piece)
-            text = text[len(piece):]
+        summary = chunks_from_start("\n".join(collected).splitlines(), MAX_SUMMARY_CHUNKS)
+        for index, chunk in enumerate(summary, start=1):
+            title = f"error lines (whole log, part {index}/{len(summary)})"
+            print(f"::error title={escape_property(title)}::{escape_data(chunk)}")
+            budget -= 1
+    # Then each file's tail, the budget shared among the files left.
+    tails = [(path, without_progress(read(path).splitlines()[-lines:])) for path in files]
+    tails = [(path, text) for path, text in tails if any(line.strip() for line in text)]
+    for left, (path, text) in zip(range(len(tails), 0, -1), tails):
+        if budget == 0:
+            return
+        chunks = chunks_from_end(text, max(1, budget // left))
         for index, chunk in enumerate(chunks, start=1):
-            if budget == 0:
-                return
             name = os.path.basename(path)
             title = f"{name} (last {lines} lines, part {index}/{len(chunks)})"
             print(f"::error title={escape_property(title)}::{escape_data(chunk)}")
