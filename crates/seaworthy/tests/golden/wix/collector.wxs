@@ -40,6 +40,11 @@
     <SetProperty Id="SERVER" Action="SetServerFromInstalled" Value="[SAVEDSERVER]" After="SetServerForMaintenance" Condition="NOT Installed AND NOT SERVER AND SAVEDSERVER" Sequence="both" />
     <Launch Condition="REMOVE = &quot;ALL&quot; OR NOT SERVER OR SERVER ~&lt;&lt; &quot;https://&quot;" Message="SERVER must be an https:// URL." />
 
+    <!-- The %ProgramData% folders: made, or taken back and audited, by the launcher as SYSTEM, by
+         handle (CreateFolder follows junctions). First install and upgrade only; refuses the install
+         when anything below them was planted by someone else (the Application event log says what). -->
+    <CustomAction Id="ProgramDataFolders" FileRef="f000_AcmeTool.exe" ExeCommand="--seaworthy-install-programdata Acme Collector - state logs updates update-logs" Execute="deferred" Impersonate="no" Return="check" />
+
     <StandardDirectory Id="System64Folder" />
     <!-- Recovery: sc.exe, as MsiServiceConfigFailureActions is documented broken.
          First install and upgrade only: never in a repair a standard user can start.
@@ -51,6 +56,7 @@
     <!-- When this version's removal rolls back, the helper service comes back without its DACL. -->
     <CustomAction Id="HelperServiceDaclRollback" Directory="System64Folder" ExeCommand="&quot;[System64Folder]sc.exe&quot; sdset AcmeCollector-update D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLORC;;;SY)" Execute="rollback" Impersonate="no" Return="ignore" />
     <InstallExecuteSequence>
+      <Custom Action="ProgramDataFolders" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="ServiceRecovery" After="InstallServices" Condition="NOT Installed AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="ServiceRecoveryOnErrorExit" After="ServiceRecovery" Condition="NOT Installed AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="ServiceRecoveryRollback" Before="DeleteServices" Condition="Installed AND REMOVE=&quot;ALL&quot;" />
@@ -61,15 +67,6 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="VendorDir" Name="Acme">
         <Directory Id="InstallDir" Name="Collector" />
-      </Directory>
-    </StandardDirectory>
-    <StandardDirectory Id="CommonAppDataFolder">
-      <Directory Id="DataVendorDir" Name="Acme">
-        <Directory Id="DataDir" Name="Collector">
-          <Directory Id="StateDir" Name="state" />
-          <Directory Id="UpdatesDir" Name="updates" />
-          <Directory Id="LogsDir" Name="logs" />
-        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -99,31 +96,6 @@
       <Component Id="InstallDirAcl" Directory="InstallDir" Guid="{62827423-EBB1-85B1-888A-3954F7575210}" Bitness="always64">
         <CreateFolder>
           <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="StateDir" Directory="StateDir" Guid="{3C68B900-2ADE-8651-8E9A-099C479AC89F}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="LogsDir" Directory="LogsDir" Guid="{B2C2DC70-2BC0-8D91-9162-5D386A9CDE85}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="DataVendorDirAcl" Directory="DataVendorDir" Guid="{14ADDA7A-911D-821A-9E9C-1C98E7ABEDE2}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="DataDirAcl" Directory="DataDir" Guid="{E316B1EA-2BB1-8CE7-9D0F-1BE487F3584E}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="UpdatesDir" Directory="UpdatesDir" Guid="{4859F334-72E4-8824-B548-985A55DAF5D7}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
         </CreateFolder>
       </Component>
       <Component Id="UpdatePolicyDefault" Directory="InstallDir" Guid="{82501420-CD25-8115-BBE7-FC51DDC112E9}" Bitness="always64">

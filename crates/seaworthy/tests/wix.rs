@@ -179,44 +179,112 @@ fn only_a_desktop_products_helper_service_lets_interactive_users_start_it() {
 }
 
 #[test]
-fn the_logs_folder_is_locked_like_state_and_only_where_something_logs_there() {
-    // %ProgramData%\<Vendor>\<Directory>\logs, never readable by
-    // every user.
+fn the_programdata_folders_are_made_by_the_launchers_guard() {
+    // %ProgramData%\<Vendor>\<Directory> and its folders: no CreateFolder
+    // (which follows a junction a user planted), but the installed
+    // launcher as SYSTEM, after InstallFiles, on a first install or an
+    // upgrade, with each folder's descriptor.
     let wxs_of = |product: &str, id: &str| {
         let config = config(product);
         let tmp = tempfile::tempdir().unwrap();
         let layouts = layouts(&config, id, tmp.path());
         seaworthy::wix::wxs(&config, id, layout_for(&layouts, WINDOWS), &release()).unwrap()
     };
-    let sddl_of = |wxs: &str, component: &str| -> String {
-        let at = wxs
-            .find(&format!("<Component Id=\"{component}\""))
-            .unwrap_or_else(|| panic!("no {component} in {wxs}"));
-        let rest = &wxs[at..];
-        let start = rest.find("Sddl=\"").unwrap() + 6;
-        rest[start..start + rest[start..].find('"').unwrap()].to_owned()
+    let command_of = |wxs: &str| -> Vec<String> {
+        let line = wxs
+            .lines()
+            .find(|l| l.contains("<CustomAction Id=\"ProgramDataFolders\""))
+            .unwrap_or_else(|| panic!("no guard in {wxs}"));
+        assert!(
+            line.contains("Execute=\"deferred\" Impersonate=\"no\" Return=\"check\""),
+            "{line}"
+        );
+        let start = line.find("ExeCommand=\"").unwrap() + 12;
+        line[start..start + line[start..].find('"').unwrap()]
+            .split(' ')
+            .map(str::to_owned)
+            .collect()
     };
+    let sid = seaworthy_service::render::windows::virtual_account_sid("AcmeAgent").unwrap();
     let agent = wxs_of(AGENT, "agent");
-    assert!(agent.contains("<Directory Id=\"LogsDir\" Name=\"logs\" />"));
-    assert_eq!(sddl_of(&agent, "LogsDir"), sddl_of(&agent, "StateDir"));
+    let command = command_of(&agent);
+    assert_eq!(
+        command,
+        [
+            seaworthy::wix::PROGRAMDATA_ARGUMENT,
+            "Acme",
+            "Agent",
+            sid.as_str(),
+            "state:account",
+            "logs:account",
+            "updates",
+            "update-logs",
+        ]
+    );
+    // Within the CustomAction target column's 255 characters.
+    assert!(command.join(" ").len() <= 255, "{}", command.join(" "));
+    // The descriptors the guard builds from it (seaworthy-launcher's
+    // programdata tests pin the same strings) are the renderer's.
+    use seaworthy_service::render::windows as win;
+    let programdata = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)";
+    assert_eq!(win::data_dir_sddl(), programdata);
+    assert_eq!(win::updates_dir_sddl(), programdata);
+    assert_eq!(win::helper_log_dir_sddl(), programdata);
+    let config = config(AGENT);
+    let product = &config.products["agent"];
+    let spec = config
+        .service_spec("agent", product, std::path::Path::new("C:\\x\\x.exe"))
+        .unwrap();
+    assert_eq!(
+        win::state_dir_sddl(&spec).unwrap(),
+        format!("{programdata}(A;OICI;0x1301bf;;;{sid})")
+    );
+    // The launcher's own file, run from the install directory, right after
+    // the files are installed, never in a repair or a removal.
+    assert!(
+        agent.contains("<CustomAction Id=\"ProgramDataFolders\" FileRef=\"f000_AcmeTool.exe\""),
+        "{agent}"
+    );
+    assert!(
+        agent.contains("<Custom Action=\"ProgramDataFolders\" After=\"InstallFiles\" Condition=\"NOT Installed AND NOT REMOVE=&quot;ALL&quot;\" />"),
+        "{agent}"
+    );
+    for gone in [
+        "CommonAppDataFolder",
+        "StateDir",
+        "LogsDir",
+        "UpdatesDir",
+        "DataDir",
+    ] {
+        assert!(!agent.contains(gone), "{gone}: {agent}");
+    }
+    // A desktop product's helper: its staging and its log, SYSTEM and
+    // Administrators only; no service folders.
     let console = wxs_of(CONSOLE, "console");
     assert_eq!(
-        sddl_of(&console, "LogsDir"),
-        sddl_of(&console, "UpdatesDir")
+        command_of(&console)[1..],
+        ["Acme", "Console", "-", "updates", "update-logs"]
     );
-    for sddl in [sddl_of(&agent, "LogsDir"), sddl_of(&console, "LogsDir")] {
-        assert!(sddl.starts_with("O:SYD:P"), "SYSTEM's, protected: {sddl}");
-        assert!(
-            !sddl.contains(";;;BU)") && !sddl.contains(";;;AU)") && !sddl.contains(";;;WD)"),
-            "{sddl}"
-        );
-    }
+    // LocalSystem needs no grant: SYSTEM has full control.
+    let collector = wxs_of(COLLECTOR, "collector");
+    assert_eq!(
+        command_of(&collector)[1..],
+        [
+            "Acme",
+            "Collector",
+            "-",
+            "state",
+            "logs",
+            "updates",
+            "update-logs"
+        ]
+    );
     let quiet = wxs_of(
         &CONSOLE.replace("updates.default = \"notify\"", "updates.default = \"off\""),
         "console",
     );
     assert!(
-        !quiet.contains("LogsDir"),
+        !quiet.contains("ProgramDataFolders"),
         "no service and no helper: {quiet}"
     );
 }
@@ -718,6 +786,28 @@ fn the_msi_carries_exactly_the_designed_tables() {
     );
     assert!(at("CostFinalize").1 < at("SetARPINSTALLLOCATION").1);
     assert!(at("SetARPINSTALLLOCATION").1 < at("RegisterProduct").1);
+    // The %ProgramData% guard: the installed launcher (18) in the script
+    // (1024), as SYSTEM (2048), its exit checked; after the files, before
+    // the services, never in a repair or a removal.
+    assert_eq!(
+        row(&actions, "ProgramDataFolders"),
+        [
+            "ProgramDataFolders".to_owned(),
+            "3090".to_owned(),
+            "f000_AcmeTool.exe".to_owned(),
+            format!(
+                "--seaworthy-install-programdata Acme Agent {sid} state:account logs:account updates update-logs"
+            ),
+            String::new()
+        ]
+    );
+    assert_eq!(
+        at("ProgramDataFolders").0,
+        "NOT Installed AND NOT REMOVE=\"ALL\""
+    );
+    assert!(at("RemoveExistingProducts").1 < at("InstallFiles").1);
+    assert!(at("InstallFiles").1 < at("ProgramDataFolders").1);
+    assert!(at("ProgramDataFolders").1 < at("InstallServices").1);
 
     // Every descriptor, bound to its object.
     let locks: BTreeMap<(String, String), String> = rows(&msi, "MsiLockPermissionsEx")
@@ -726,15 +816,11 @@ fn the_msi_carries_exactly_the_designed_tables() {
         .collect();
     // SYSTEM the owner (the installer takes a squatter's directory
     // back, which windows_msi_update's squat step shows on the runner).
-    let programdata = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)";
+    // The %ProgramData% folders take theirs from the launcher's guard (the
+    // ProgramDataFolders action above), never from a lock by path.
     let expected: BTreeMap<(String, String), String> = [
         (("HelperService", "ServiceInstall"), format!("D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLORC;;;{sid})")),
         (("InstallDir", "CreateFolder"), format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;{sid})")),
-        (("StateDir", "CreateFolder"), format!("{programdata}(A;OICI;0x1301bf;;;{sid})")),
-        (("LogsDir", "CreateFolder"), format!("{programdata}(A;OICI;0x1301bf;;;{sid})")),
-        (("UpdatesDir", "CreateFolder"), programdata.to_owned()),
-        (("DataDir", "CreateFolder"), programdata.to_owned()),
-        (("DataVendorDir", "CreateFolder"), programdata.to_owned()),
     ]
     .into_iter()
     .map(|((object, table), sddl)| ((object.to_owned(), table.to_owned()), sddl))

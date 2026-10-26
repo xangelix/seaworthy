@@ -40,24 +40,22 @@
     <SetProperty Id="SERVER" Action="SetServerFromInstalled" Value="[SAVEDSERVER]" After="SetServerForMaintenance" Condition="NOT Installed AND NOT SERVER AND SAVEDSERVER" Sequence="both" />
     <Launch Condition="REMOVE = &quot;ALL&quot; OR NOT SERVER OR SERVER ~&lt;&lt; &quot;https://&quot;" Message="SERVER must be an https:// URL." />
 
+    <!-- The %ProgramData% folders: made, or taken back and audited, by the launcher as SYSTEM, by
+         handle (CreateFolder follows junctions). First install and upgrade only; refuses the install
+         when anything below them was planted by someone else (the Application event log says what). -->
+    <CustomAction Id="ProgramDataFolders" FileRef="f000_AcmeTool.exe" ExeCommand="--seaworthy-install-programdata Acme Console - updates update-logs" Execute="deferred" Impersonate="no" Return="check" />
+
     <StandardDirectory Id="System64Folder" />
     <!-- When this version's removal rolls back, the helper service comes back without its DACL. -->
     <CustomAction Id="HelperServiceDaclRollback" Directory="System64Folder" ExeCommand="&quot;[System64Folder]sc.exe&quot; sdset acme-console-update D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLORC;;;IU)" Execute="rollback" Impersonate="no" Return="ignore" />
     <InstallExecuteSequence>
+      <Custom Action="ProgramDataFolders" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="HelperServiceDaclRollback" Before="DeleteServices" Condition="Installed AND REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="VendorDir" Name="Acme">
         <Directory Id="InstallDir" Name="Console" />
-      </Directory>
-    </StandardDirectory>
-    <StandardDirectory Id="CommonAppDataFolder">
-      <Directory Id="DataVendorDir" Name="Acme">
-        <Directory Id="DataDir" Name="Console">
-          <Directory Id="UpdatesDir" Name="updates" />
-          <Directory Id="LogsDir" Name="logs" />
-        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -80,26 +78,6 @@
           <PermissionEx Sddl="D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLORC;;;IU)" />
         </ServiceInstall>
         <ServiceControl Id="HelperServiceControl" Name="acme-console-update" Stop="both" Remove="uninstall" Wait="yes" />
-      </Component>
-      <Component Id="LogsDir" Directory="LogsDir" Guid="{7635E50D-DFE5-86F7-80DA-45BD7C3D5E51}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="DataVendorDirAcl" Directory="DataVendorDir" Guid="{CF04A21F-5643-8A47-A51C-D0D2D506BCEB}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="DataDirAcl" Directory="DataDir" Guid="{DDC2D826-C209-8C54-A8DB-39B0997CE33E}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
-      </Component>
-      <Component Id="UpdatesDir" Directory="UpdatesDir" Guid="{1331DF3E-AB63-89E4-ABFD-FB84D7273376}" Bitness="always64">
-        <CreateFolder>
-          <PermissionEx Sddl="O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;RC;;;OW)" />
-        </CreateFolder>
       </Component>
       <Component Id="UpdatePolicyDefault" Directory="InstallDir" Guid="{38570791-36F0-8CE1-A5BC-FFED0A0226CD}" Bitness="always64">
         <RegistryValue Root="HKLM" Key="SOFTWARE\Acme\Console" Name="UpdatePolicy" Type="string" Value="[UPDATES]" KeyPath="yes" />

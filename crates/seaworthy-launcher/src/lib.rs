@@ -52,6 +52,10 @@
 
 mod dialog;
 mod load;
+// The MSI's %ProgramData% guard runs on Windows only; its rules are
+// tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod programdata;
 #[cfg(test)]
 mod rustflags;
 mod select;
@@ -156,6 +160,11 @@ pub fn core_path(dir: &Path, core: &str, cpu: &str) -> PathBuf {
 /// Runs the launcher and exits the process with the core's exit code (or
 /// one of the `EXIT_*` codes).
 pub fn run(launcher: &Launcher) -> ! {
+    // Windows: the MSI's custom action making the product's %ProgramData%
+    // folders safe (programdata's module docs), never the core.
+    if let Some(code) = programdata::intercept() {
+        std::process::exit(code);
+    }
     let mut out = Report::default();
     let code = launch(launcher, &mut out);
     // No terminal to read stderr on: the launcher's own failure goes into

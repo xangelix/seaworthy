@@ -59,25 +59,35 @@
 //!   values. Not in the upgrading package's sequence: Windows Installer
 //!   allows nothing that writes to the script between `InstallInitialize`
 //!   and `RemoveExistingProducts` (error 1603).
-//! - **State and staging**: `%ProgramData%\<Vendor>\<Directory>\
-//!   state`, protected, the service account Modify
-//!   (`render::windows::state_dir_sddl`); `…\updates`, protected, SYSTEM
-//!   and Administrators only (`updates_dir_sddl`), when the helper ships.
-//!   The two directories above them are locked too (`data_dir_sddl`): any
-//!   user may create directories in `%ProgramData%`, so each of these
-//!   descriptors names SYSTEM the owner (`O:SY`: the installer takes a
-//!   pre-creating user's ownership back, since the update helper
-//!   and the service refuse an untrusted owner) and carries an OWNER
-//!   RIGHTS entry that strips an owner's implicit `WRITE_DAC`. All of them
-//!   stay on removal when they hold files.
-//! - **Logs** (a service product or a shipped helper):
-//!   `%ProgramData%\<Vendor>\<Directory>\logs`, locked like `state` (the
-//!   service's account may modify; a desktop product's, SYSTEM and
-//!   Administrators alone): where the service writes its log and the update
-//!   helper its own (`seaworthy_updater::helper::log_file`), never readable by
-//!   every user. Like `state` it stays on removal while it holds files: an
-//!   upgrade removes the old product first, and deleting the logs then
-//!   would empty them on every update.
+//! - **The `%ProgramData%` folders** (a service product or a shipped
+//!   helper): `%ProgramData%\<Vendor>\<Directory>` and below it the
+//!   service's `state` and `logs` (protected, the service account Modify:
+//!   `render::windows::state_dir_sddl`) and the helper's `updates` (its
+//!   staging) and `update-logs` (its log, `seaworthy_updater::helper::
+//!   log_file`), both SYSTEM and Administrators only (`updates_dir_sddl`,
+//!   `helper_log_dir_sddl`), none readable by every user. Each descriptor
+//!   names SYSTEM the owner and carries an OWNER RIGHTS entry that strips an
+//!   owner's implicit `WRITE_DAC`; the two above are `data_dir_sddl`. Any
+//!   user may create directories in `%ProgramData%`, before the product is
+//!   installed, and fill them; Windows Installer's `CreateFolder` and
+//!   `MsiLockPermissionsEx` work by path and follow a junction a user put
+//!   there, and a child with its own protected DACL keeps its owner and
+//!   grants under a locked parent. So no component creates these folders:
+//!   a deferred, no-impersonate custom action runs the installed launcher
+//!   as SYSTEM with `--seaworthy-install-programdata`, the folders and the
+//!   service's account (`PROGRAMDATA_ARGUMENT`), right after `InstallFiles`, on a first install or an
+//!   upgrade (`NOT Installed`, never a repair a standard user can start).
+//!   The launcher (`seaworthy-launcher`'s guard) creates each folder with
+//!   its descriptor or takes an existing one back by handle (never through
+//!   a reparse point, refusing one that moved), audits everything below
+//!   the product's directory (no reparse point, every object owned and
+//!   writable only by SYSTEM, Administrators, TrustedInstaller or the
+//!   account its folder admits), and refuses the install otherwise, naming
+//!   the object in the Application event log; then it propagates the
+//!   descriptors. The folders stay on removal: an upgrade removes the old
+//!   product first, and the service's state and logs must survive it. A
+//!   folder deleted by hand comes back with the next upgrade, not with a
+//!   repair.
 //! - **The update helper** (service products, when it ships): a second
 //!   `ServiceInstall`, `<service>-update`, LocalSystem, demand-start, whose
 //!   DACL lets the main service's account start it and query it, nothing
@@ -157,6 +167,16 @@ use crate::config::{Config, UpdatePolicy};
 use crate::layout::{Layout, Role};
 use crate::version::Release;
 use seaworthy_service::render::windows::{self as win, HelperGrantee};
+
+/// The argument the MSI's custom action starts the installed launcher with
+/// to make the product's `%ProgramData%` folders: seaworthy-launcher's
+/// guard (`programdata.rs` there) reads exactly this, then `<Vendor>
+/// <Directory> <account SID or -> [<folder>[:account]]...`, and applies
+/// to each folder the descriptor `render::windows` renders for it
+/// (`data_dir_sddl`, `state_dir_sddl` for a `:account` folder,
+/// `updates_dir_sddl`, `helper_log_dir_sddl`). Short, because Windows
+/// Installer's `CustomAction` target column holds 255 characters.
+pub const PROGRAMDATA_ARGUMENT: &str = "--seaworthy-install-programdata";
 
 /// A deterministic GUID (an RFC 9562 version 8 UUID) from SHA-256 of
 /// `parts`, NUL-joined, in registry form (`{…}`, uppercase).
@@ -526,8 +546,92 @@ pub fn wxs(
             sc(command)
         )
     };
+    // Every file's path below the install directory, and the directories
+    // they need, each with its id (sorted by component: a depth-first walk).
+    let prefix = format!("{}\\", layout.install_root);
+    let relatives = layout
+        .files
+        .iter()
+        .map(|file| {
+            file.install_path
+                .strip_prefix(&prefix)
+                .filter(|relative| {
+                    !relative.is_empty() && relative.split('\\').all(|part| !part.is_empty())
+                })
+                .ok_or_else(|| {
+                    DistError::Config(format!(
+                        "{} is not a file under {}",
+                        file.install_path, layout.install_root
+                    ))
+                })
+        })
+        .collect::<Result<Vec<&str>, DistError>>()?;
+    // The launcher's File id, as the file loop below names it.
+    let launcher_file = layout
+        .files
+        .iter()
+        .zip(&relatives)
+        .enumerate()
+        .find(|(_, (file, _))| file.role == Role::Launcher)
+        .map(|(n, (_, relative))| identifier("f", relative, n));
+    // The %ProgramData% folders: made and locked by the launcher's guard
+    // (the module docs), never by CreateFolder, which follows junctions.
+    let programdata = if service.is_some() || helper_ships {
+        let launcher = launcher_file.clone().ok_or_else(|| {
+            DistError::Config(format!(
+                "product {id}'s Windows layout has no launcher to make its %ProgramData% folders"
+            ))
+        })?;
+        // The service's virtual account, which its `state` and `logs`
+        // grant Modify (LocalSystem needs no grant: SYSTEM has full
+        // control); `-` for none. The guard builds each descriptor from
+        // this (the descriptors render::windows renders, byte for byte).
+        let account = service
+            .as_ref()
+            .and_then(|(record, ..)| record.account_sid.as_deref())
+            .filter(|sid| *sid != "SY");
+        let mut command = format!(
+            "{PROGRAMDATA_ARGUMENT} {vendor} {directory} {}",
+            account.unwrap_or("-")
+        );
+        if service.is_some() {
+            let grant = if account.is_some() { ":account" } else { "" };
+            command.push_str(&format!(" state{grant} logs{grant}"));
+        }
+        if helper_ships {
+            command.push_str(" updates update-logs");
+        }
+        Some((launcher, command))
+    } else {
+        None
+    };
     let mut sequence: Vec<String> = Vec::new();
     let mut rollbacks: Vec<&str> = Vec::new();
+    if let Some((launcher, command)) = &programdata {
+        line(4, "");
+        line(
+            4,
+            "<!-- The %ProgramData% folders: made, or taken back and audited, by the launcher as SYSTEM, by",
+        );
+        line(
+            4,
+            "     handle (CreateFolder follows junctions). First install and upgrade only; refuses the install",
+        );
+        line(
+            4,
+            "     when anything below them was planted by someone else (the Application event log says what). -->",
+        );
+        line(
+            4,
+            &format!(
+                "<CustomAction Id=\"ProgramDataFolders\" FileRef=\"{launcher}\" ExeCommand=\"{}\" Execute=\"deferred\" Impersonate=\"no\" Return=\"check\" />",
+                xml(command)
+            ),
+        );
+        sequence.push(
+            "<Custom Action=\"ProgramDataFolders\" After=\"InstallFiles\" Condition=\"NOT Installed AND NOT REMOVE=&quot;ALL&quot;\" />".to_owned(),
+        );
+    }
     if service.is_some() || helper_service.is_some() {
         line(4, "");
         line(4, "<StandardDirectory Id=\"System64Folder\" />");
@@ -616,26 +720,6 @@ pub fn wxs(
         }
         line(4, "</InstallExecuteSequence>");
     }
-    // Every file's path below the install directory, and the directories
-    // they need, each with its id (sorted by component: a depth-first walk).
-    let prefix = format!("{}\\", layout.install_root);
-    let relatives = layout
-        .files
-        .iter()
-        .map(|file| {
-            file.install_path
-                .strip_prefix(&prefix)
-                .filter(|relative| {
-                    !relative.is_empty() && relative.split('\\').all(|part| !part.is_empty())
-                })
-                .ok_or_else(|| {
-                    DistError::Config(format!(
-                        "{} is not a file under {}",
-                        file.install_path, layout.install_root
-                    ))
-                })
-        })
-        .collect::<Result<Vec<&str>, DistError>>()?;
     let mut directories: BTreeSet<Vec<&str>> = BTreeSet::new();
     for relative in &relatives {
         let parts: Vec<&str> = relative.split('\\').collect();
@@ -716,27 +800,6 @@ pub fn wxs(
         .unwrap_or_default();
     for (_, folder) in &shortcuts {
         line(4, &format!("<StandardDirectory Id=\"{folder}\" />"));
-    }
-    if service.is_some() || helper_ships {
-        line(4, "<StandardDirectory Id=\"CommonAppDataFolder\">");
-        line(
-            6,
-            &format!("<Directory Id=\"DataVendorDir\" Name=\"{}\">", xml(vendor)),
-        );
-        line(
-            8,
-            &format!("<Directory Id=\"DataDir\" Name=\"{}\">", xml(&directory)),
-        );
-        if service.is_some() {
-            line(10, "<Directory Id=\"StateDir\" Name=\"state\" />");
-        }
-        if helper_ships {
-            line(10, "<Directory Id=\"UpdatesDir\" Name=\"updates\" />");
-        }
-        line(10, "<Directory Id=\"LogsDir\" Name=\"logs\" />");
-        line(8, "</Directory>");
-        line(6, "</Directory>");
-        line(4, "</StandardDirectory>");
     }
     line(4, "");
     line(
@@ -850,7 +913,7 @@ pub fn wxs(
         }
         line(6, "</Component>");
     }
-    if let Some((_, program_sddl, state_sddl, _)) = &service {
+    if let Some((_, program_sddl, _, _)) = &service {
         line(
             6,
             &format!(
@@ -865,82 +928,8 @@ pub fn wxs(
         );
         line(8, "</CreateFolder>");
         line(6, "</Component>");
-        line(
-            6,
-            &format!(
-                "<Component Id=\"StateDir\" Directory=\"StateDir\" Guid=\"{}\" Bitness=\"always64\">",
-                component_guid("StateDir")
-            ),
-        );
-        line(8, "<CreateFolder>");
-        line(
-            10,
-            &format!("<PermissionEx Sddl=\"{}\" />", xml(state_sddl)),
-        );
-        line(8, "</CreateFolder>");
-        line(6, "</Component>");
-    }
-    if service.is_some() || helper_ships {
-        // The logs: the service's and the helper's, locked like
-        // `state` (the service's account writes; for a desktop product's
-        // helper, SYSTEM and Administrators alone), never readable by
-        // every user as an inherited Program Files folder was.
-        let logs_sddl = match &service {
-            Some((_, _, state_sddl, _)) => state_sddl.clone(),
-            None => win::updates_dir_sddl(),
-        };
-        line(
-            6,
-            &format!(
-                "<Component Id=\"LogsDir\" Directory=\"LogsDir\" Guid=\"{}\" Bitness=\"always64\">",
-                component_guid("LogsDir")
-            ),
-        );
-        line(8, "<CreateFolder>");
-        line(
-            10,
-            &format!("<PermissionEx Sddl=\"{}\" />", xml(&logs_sddl)),
-        );
-        line(8, "</CreateFolder>");
-        line(6, "</Component>");
-        for (component, dir) in [
-            ("DataVendorDirAcl", "DataVendorDir"),
-            ("DataDirAcl", "DataDir"),
-        ] {
-            line(
-                6,
-                &format!(
-                    "<Component Id=\"{component}\" Directory=\"{dir}\" Guid=\"{}\" Bitness=\"always64\">",
-                    component_guid(component)
-                ),
-            );
-            line(8, "<CreateFolder>");
-            line(
-                10,
-                &format!("<PermissionEx Sddl=\"{}\" />", xml(&win::data_dir_sddl())),
-            );
-            line(8, "</CreateFolder>");
-            line(6, "</Component>");
-        }
     }
     if helper_ships {
-        line(
-            6,
-            &format!(
-                "<Component Id=\"UpdatesDir\" Directory=\"UpdatesDir\" Guid=\"{}\" Bitness=\"always64\">",
-                component_guid("UpdatesDir")
-            ),
-        );
-        line(8, "<CreateFolder>");
-        line(
-            10,
-            &format!(
-                "<PermissionEx Sddl=\"{}\" />",
-                xml(&win::updates_dir_sddl())
-            ),
-        );
-        line(8, "</CreateFolder>");
-        line(6, "</Component>");
         line(
             6,
             &format!(
