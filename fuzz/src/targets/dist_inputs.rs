@@ -47,7 +47,7 @@ pub fn run(data: &[u8]) {
             }
         }
         _ => {
-            let _ = fips_symbol_findings(bytes, "aws_lc_fips_0_14_2_");
+            let _ = fips_symbol_findings(bytes, "aws_lc_fips_0_14_3_");
             let _ = elf_needed(bytes);
             let _ = pe_imports(bytes);
         }

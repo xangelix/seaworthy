@@ -45,7 +45,7 @@
 //!   approved there too. **ML-DSA is NOT on #5314/#5298.**
 //!   <https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5314>
 //! - **AWS-LC FIPS 4.2.0**, the module this crate LINKS under `fips`
-//!   (`aws-lc-fips-sys` 0.14.2, pinned; [`crate::module`] asserts the
+//!   (`aws-lc-fips-sys` 0.14.3, pinned; [`crate::module`] asserts the
 //!   version): "AWS-LC 4 Cryptographic Module" is on the CMVP *Modules In
 //!   Process* list (Comment Resolution since 2026-09-29), no certificate
 //!   yet. Its service indicator

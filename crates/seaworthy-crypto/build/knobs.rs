@@ -44,7 +44,7 @@ const TOOL_SUFFIXES: [&str; 8] = [
     "CMAKE_GENERATOR",
 ];
 
-/// Every `AWS_LC_FIPS_SYS_<suffix>` aws-lc-fips-sys 0.14.2 reads (its
+/// Every `AWS_LC_FIPS_SYS_<suffix>` aws-lc-fips-sys 0.14.3 reads (its
 /// builder's `optional_env*` / `env_crate_var_to_bool` calls) — the
 /// rerun triggers. Unknown suffixes are refused too (fail closed).
 const KNOWN_SUFFIXES: [&str; 35] = [
@@ -313,7 +313,7 @@ pub(crate) fn evaluate(vars: &[(String, String)], target: &str, fips: bool) -> V
             None => found.push(Finding {
                 key: name.clone(),
                 detail: format!(
-                    "{name} is not a knob this guard knows (aws-lc-fips-sys 0.14.2) — refused \
+                    "{name} is not a knob this guard knows (aws-lc-fips-sys 0.14.3) — refused \
                      until reviewed"
                 ),
             }),

@@ -2,15 +2,15 @@
 //! boot self-check, and the build provenance stamped into this binary.
 //!
 //! **The module.** Under the `fips` feature this crate links the AWS-LC
-//! FIPS 4.2.0 module, built from source by `aws-lc-fips-sys` 0.14.2 behind
-//! `aws-lc-rs` 1.18.1, both pinned with `=` in the workspace manifest (the
+//! FIPS 4.2.0 module, built from source by `aws-lc-fips-sys` 0.14.3 behind
+//! `aws-lc-rs` 1.18.2, both pinned with `=` in the workspace manifest (the
 //! lockfile alone is one `cargo update` away from a module that binds a
 //! different FIPS release). CMVP status: [`CMVP_STATUS`]. [`linked`] reads
 //! what is actually linked, at runtime; [`ensure_expected_module`] refuses
 //! anything but the pinned build; the `fips`-only
 //! `the_linked_module_is_the_pinned_aws_lc_fips_4_2_0` test and
 //! `scripts/verify-fips-binary.sh` (an `nm` check of a release binary: the
-//! `aws_lc_fips_0_14_2_*` symbols present, zero non-FIPS `aws_lc_0_*` /
+//! `aws_lc_fips_0_14_3_*` symbols present, zero non-FIPS `aws_lc_0_*` /
 //! `ring_core_*`) are the gates.
 //!
 //! **What [`crate::is_fips`] attests, and what it does not.** `is_fips()`
@@ -46,13 +46,13 @@ pub const EXPECTED_FIPS_MODULE_VERSION: &str = "4.2.0";
 pub const EXPECTED_FIPS_MODULE_BRANCH: u32 = 4;
 /// The `aws-lc-fips-sys` release that builds it (pinned `=` in the
 /// workspace manifest).
-pub const EXPECTED_FIPS_SYS_VERSION: &str = "0.14.2";
+pub const EXPECTED_FIPS_SYS_VERSION: &str = "0.14.3";
 /// The `aws-lc-rs` release that binds it (pinned `=` in the workspace
 /// manifest).
-pub const EXPECTED_AWS_LC_RS_VERSION: &str = "1.18.1";
+pub const EXPECTED_AWS_LC_RS_VERSION: &str = "1.18.2";
 /// The symbol prefix the pinned sys crate gives every module symbol: what
 /// `scripts/verify-fips-binary.sh` requires in a release binary.
-pub const FIPS_SYMBOL_PREFIX: &str = "aws_lc_fips_0_14_2_";
+pub const FIPS_SYMBOL_PREFIX: &str = "aws_lc_fips_0_14_3_";
 /// The module's CMVP status, the one wording docs and evidence use (the
 /// design assumes 4.2.0 will be validated; say "validated" only once the
 /// certificate issues and names 4.2.0).

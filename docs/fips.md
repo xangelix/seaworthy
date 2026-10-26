@@ -7,7 +7,7 @@ a FIPS release binary.
 
 `seaworthy-crypto/fips` links the **AWS-LC FIPS 4.2.0** module (CMVP: in process, Comment
 Resolution; its validated predecessor is AWS-LC 3, certificate #5314), built from source by
-`aws-lc-fips-sys` 0.14.2 behind `aws-lc-rs` 1.18.1. Both are pinned with `=` in the workspace
+`aws-lc-fips-sys` 0.14.3 behind `aws-lc-rs` 1.18.2. Both are pinned with `=` in the workspace
 manifest, and the linked module is asserted at runtime (`seaworthy_crypto::module`). Say
 "validated" only once a certificate names 4.2.0.
 
@@ -124,7 +124,7 @@ target/release/examples/fips_selfcheck --expect-fips
 
 - `scripts/verify-fips-binary.sh BINARY` is a standalone `nm` check (bash, nm, grep, awk), so you
   can run it over your own release binary. It needs the symbol table: build unstripped, check,
-  then strip the shipped copy. It requires the `aws_lc_fips_0_14_2_*` symbols with
+  then strip the shipped copy. It requires the `aws_lc_fips_0_14_3_*` symbols with
   `awslc_version_string` defined in text (the Security Policy's static-link check), and zero
   non-FIPS `aws_lc_<version>_*`, `ring_core_*` or other-version FIPS symbols. `--self-test`
   runs the script's own tests.

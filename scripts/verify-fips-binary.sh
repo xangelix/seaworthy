@@ -18,20 +18,20 @@
 #   5. ZERO FIPS-module symbols of ANOTHER version (`aws_lc_fips_*` without
 #      the expected prefix — a module the pin does not name).
 #
-# The default prefix is the pinned sys crate's: aws-lc-fips-sys 0.14.2 →
-# `aws_lc_fips_0_14_2_` (seaworthy_crypto::module::FIPS_SYMBOL_PREFIX; bump
+# The default prefix is the pinned sys crate's: aws-lc-fips-sys 0.14.3 →
+# `aws_lc_fips_0_14_3_` (seaworthy_crypto::module::FIPS_SYMBOL_PREFIX; bump
 # the two together). Standalone on purpose — bash, nm (binutils or llvm-nm;
 # set NM to override), grep, awk — so applications run it over their own
 # release binary. Windows FIPS builds link the module as a DLL pair and are
 # out of this script's scope.
 #
 # Usage (from the repository root, or anywhere):
-#   scripts/verify-fips-binary.sh [--prefix aws_lc_fips_0_14_2_] BINARY
+#   scripts/verify-fips-binary.sh [--prefix aws_lc_fips_0_14_3_] BINARY
 #   scripts/verify-fips-binary.sh [--prefix …] --nm-output FILE   # pre-captured `nm` output
 #   scripts/verify-fips-binary.sh --self-test                     # the script's own tests
 set -euo pipefail
 
-DEFAULT_PREFIX="aws_lc_fips_0_14_2_"
+DEFAULT_PREFIX="aws_lc_fips_0_14_3_"
 NM="${NM:-nm}"
 
 usage() {

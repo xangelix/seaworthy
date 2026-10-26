@@ -8,7 +8,7 @@
 //! **The module.** Under the `fips` feature every operation runs in the
 //! AWS-LC FIPS 4.2.0 module (CMVP: in process, Comment Resolution; its
 //! validated predecessor is AWS-LC 3, certificate #5314), built from source
-//! by `aws-lc-fips-sys` 0.14.2 behind `aws-lc-rs` 1.18.1, both pinned with
+//! by `aws-lc-fips-sys` 0.14.3 behind `aws-lc-rs` 1.18.2, both pinned with
 //! `=` and asserted at runtime ([`module`]).
 //!
 //! FIPS status of the three signature schemes (sourced from the CMVP record,

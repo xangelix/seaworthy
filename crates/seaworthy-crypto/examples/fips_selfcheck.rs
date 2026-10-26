@@ -2,7 +2,7 @@
 //!
 //! Build this example in release with the `fips` feature and its symbols
 //! kept, run `scripts/verify-fips-binary.sh` over it (the
-//! `aws_lc_fips_0_14_2_*` symbols present, zero non-FIPS `aws_lc_0_*` /
+//! `aws_lc_fips_0_14_3_*` symbols present, zero non-FIPS `aws_lc_0_*` /
 //! `ring_core_*`), then run it with `--expect-fips`: the boot self-check (a
 //! module-DRBG draw + the pinned-module assertion), then `is_fips()`, then
 //! the build provenance, printed, so the log is the evidence of which

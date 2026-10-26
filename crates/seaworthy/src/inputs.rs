@@ -185,11 +185,11 @@ mod tests {
     fn globs_match_star_only() {
         assert!(glob_matches(
             "aws_lc_fips_*_crypto.dll",
-            "aws_lc_fips_0_14_2_crypto.dll"
+            "aws_lc_fips_0_14_3_crypto.dll"
         ));
         assert!(!glob_matches(
             "aws_lc_fips_*_crypto.dll",
-            "aws_lc_fips_0_14_2_rust_wrapper.dll"
+            "aws_lc_fips_0_14_3_rust_wrapper.dll"
         ));
         assert!(glob_matches("*.dll", "x.dll"));
         assert!(!glob_matches("*.dll", "x.dl"));

@@ -28,7 +28,7 @@ fips = ["aws-lc-rs/fips", "dep:aws-lc-fips-sys", "rustls/fips"]
 
 [dependencies]
 # PINNED EXACTLY in the workspace manifest: the aws-lc-rs release selects
-# the FIPS module it binds (1.18.1 -> aws-lc-fips-sys 0.14.2 -> AWS-LC FIPS
+# the FIPS module it binds (1.18.2 -> aws-lc-fips-sys 0.14.3 -> AWS-LC FIPS
 # 4.2.0), and the lockfile alone is one `cargo update` away from a release
 # that binds a different module. Bump both pins together, deliberately:
 # `module::EXPECTED_*`, `tests/module_pin.rs`,

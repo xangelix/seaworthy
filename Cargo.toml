@@ -35,8 +35,8 @@ seaworthy-service = { version = "0.1.0", path = "crates/seaworthy-service" }
 seaworthy-test-support = { path = "crates/seaworthy-test-support" }
 seaworthy-updater = { version = "0.1.0", path = "crates/seaworthy-updater" }
 
-aws-lc-fips-sys = "=0.14.2"
-aws-lc-rs = { version = "=1.18.1", default-features = false }
+aws-lc-fips-sys = "=0.14.3"
+aws-lc-rs = { version = "=1.18.2", default-features = false }
 base64 = "0.23"
 bollard = { version = "0.21.1", default-features = false }
 bytes = "1.12"
