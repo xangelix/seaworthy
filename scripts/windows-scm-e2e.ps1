@@ -10,7 +10,8 @@
     reads the System event log: never run it on a machine you care about.
 
     The service under test is a product: an SCM fixture service (a launcher `scm.exe` and
-    one core per CPU level, `scm_core_*.dll`) that the seaworthy CLI's MSI (-Msi) lays out
+    one core per CPU level, `scm_core_*.dll`: crates/seaworthy-launcher/e2e's `scm` and
+    `scm_core`, scm/seaworthy.toml's [product.scm]) that the seaworthy CLI's MSI (-Msi) lays out
     under %ProgramFiles%\AcmeE2E\Scm and registers as `acme-e2e` under its virtual account,
     with its failure actions, its DACLs and its %ProgramData%\AcmeE2E\Scm\state directory
     (seaworthy-service installs nothing itself). `windows_scm_e2e.exe`
@@ -27,8 +28,9 @@
         sid; exit: pid, code, reason = the ServiceExit or RunError text), a heartbeat in
         `<state>\status.txt` naming the pid whose tasks ran, a per-process log in
         `<state>\logs\service-<pid>.log`;
-      - a file dropped into `<state>\control\` triggers `fatal` (an escalated task:
-        RunError::TaskFailed), `panic` (a task panic) or `abort` (a real crash);
+      - a file dropped into `<state>\control\` triggers `fatal` (the body's
+        Outcome::Fatal: RunError::Fatal), `panic` (a panic in the body: RunError::TaskPanicked)
+        or `abort` (a real crash);
       - it polls the stub's `/required` every poll_ms; a demand for another version asks the
         update helper `<ServiceName>-update` through seaworthy-updater's request and keeps
         running, logging -RequestFailedPattern when no helper is installed (none is here).
@@ -59,6 +61,10 @@
 
 .PARAMETER Phase
     All            the full suite (default).
+    Service        the suite without the entropy cases (a hosted runner's required lane:
+                   GitHub's Windows runners are Hyper-V guests, where the first-draw rate
+                   is the hypervisor's, not the code's; docs/testing-windows.md).
+    Entropy        the entropy cases alone (no administrator, no MSI): the rate as data.
     SelfTest       pure-logic self-tests of this script (parsers, quoting, JUnit) --
                    runs on any PowerShell (Linux pwsh included); with -FixtureExe it
                    also round-trips the version-gate stub.
@@ -70,6 +76,12 @@
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-scm-e2e.ps1 `
         -BinDir C:\e2e\bin -Msi C:\e2e\acme-e2e.msi -JUnitDir C:\e2e\junit
+
+.EXAMPLE
+    # The Windows lab's bundle (scripts/windows-lab-build.ps1): its bin\ and the SCM MSI.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-scm-e2e.ps1 -Phase Service `
+        -BinDir <bundle>\bin -Msi (Get-Item <bundle>\scm\packages\*.msi).FullName `
+        -RustScmTestExe <bundle>\bin\windows_scm-test.exe
 #>
 [CmdletBinding()]
 param(
@@ -95,7 +107,7 @@ param(
     # The Rust half: crates/seaworthy-service/tests/windows_scm.rs (-RustScmTestExe runs
     # that test executable directly; otherwise nextest runs it from the archive) and the
     # whole archive's suite natively on Windows.
-    [string]$RustScmTestExe,
+    [string]$RustScmTestExe = $env:SEAWORTHY_RUST_SCM_TEST_EXE,
     [string]$NextestExe = $env:SEAWORTHY_NEXTEST_EXE,
     [string]$NextestArchive = $env:SEAWORTHY_NEXTEST_ARCHIVE,
     [string]$NextestProfile = $env:SEAWORTHY_NEXTEST_PROFILE,
@@ -122,7 +134,7 @@ param(
     [int]$EntropyDiagTrials = $(if ($env:SEAWORTHY_ENTROPY_DIAG_TRIALS) { [int]$env:SEAWORTHY_ENTROPY_DIAG_TRIALS } else { 500 }),
     [int]$EntropyDiagParallel = $(if ($env:SEAWORTHY_ENTROPY_DIAG_PARALLEL) { [int]$env:SEAWORTHY_ENTROPY_DIAG_PARALLEL } else { 4 }),
     [int]$EntropyDiagCold = $(if ($env:SEAWORTHY_ENTROPY_DIAG_COLD) { [int]$env:SEAWORTHY_ENTROPY_DIAG_COLD } else { 400 }),
-    [ValidateSet('All', 'SelfTest')][string]$Phase = 'All',
+    [ValidateSet('All', 'Service', 'Entropy', 'SelfTest')][string]$Phase = 'All',
     [switch]$KeepInstalled
 )
 
@@ -912,7 +924,7 @@ function Invoke-Nextest {
 # Diagnostics + cleanup
 
 function Write-Diagnostics {
-    if ($Phase -eq 'SelfTest') { return }
+    if ($Phase -eq 'SelfTest' -or $Phase -eq 'Entropy') { return }
     Write-Log "diagnostics: service state $(Format-ScState (Get-ScState))"
     foreach ($file in @('starts.log', 'exits.log', 'status.txt')) {
         foreach ($line in (Read-Lines (Join-Path $script:StateDir $file))) { Write-Log "  $file| $line" }
@@ -1249,12 +1261,12 @@ function Invoke-MainSuite {
     }
 
     Invoke-Case 'failure.fatal_exit_is_restarted' {
-        # The fixture's escalation: RunError::TaskFailed -> Stopped + service-specific 1.
+        # The fixture's fatal outcome: RunError::Fatal -> Stopped + service-specific 1.
         $w = Watch-Restart -Trigger { Send-Control 'fatal' } -TimeoutSec ($RestartDelayMs / 1000 + 90)
         Assert-True ($w.Stopped.Win32Exit -eq 1066 -and $w.Stopped.SpecificExit -eq 1) "Stopped with ERROR_SERVICE_SPECIFIC_ERROR / 1 (got $(Format-ScState $w.Stopped))"
         Assert-True ($w.Elapsed -ge ($RestartDelayMs / 1000 - 1)) 'the restart honored the failure-action delay'
         $exit = @(Get-ExitsOf $w.OldPid)
-        Assert-True ($exit.Count -eq 1 -and $exit[0].code -eq '1' -and $exit[0].reason -match 'failed repeatedly') 'the old process saw the escalation (exit code 1)'
+        Assert-True ($exit.Count -eq 1 -and $exit[0].code -eq '1' -and $exit[0].reason -match '^fatal service error: Injected\("fatal"\)') "the old process saw its fatal outcome (exit code 1; got $(@($exit | ForEach-Object { "code=$($_.code) reason=$($_.reason)" }) -join ' | '))"
     }
 
     Invoke-Case 'failure.panic_is_restarted' {
@@ -1386,6 +1398,43 @@ function Invoke-MainSuite {
         Write-Log "state directory after removal: exists=$(Test-Path -LiteralPath $script:StateDir)"
     }
 
+    Invoke-Case 'rust.windows_scm_integration_tests' -Independent {
+        # crates/seaworthy-service/tests/windows_scm.rs: typed ServiceError answers against
+        # the real SCM (double-gated: #[ignore] + SEAWORTHY_WINDOWS_SCM_E2E=1).
+        if ($RustScmTestExe) {
+            Assert-True (Test-Path -LiteralPath $RustScmTestExe -PathType Leaf) "-RustScmTestExe $RustScmTestExe does not exist"
+            $r = Invoke-Native -Exe $RustScmTestExe -Arguments @('--ignored', '--test-threads', '1') -Environment @{ SEAWORTHY_WINDOWS_SCM_E2E = '1' } -TimeoutSec 900
+            Write-NativeOutput $r 'rust'
+            Assert-True ($r.ExitCode -eq 0) "the Rust SCM integration tests passed (exit $($r.ExitCode))"
+        } else {
+            $r = Invoke-Nextest -Filter 'binary(windows_scm)' -RunIgnored 'only' -JUnitName 'nextest-windows-scm.xml' -TimeoutSec 900
+            Assert-True ($r.ExitCode -eq 0) "the Rust SCM integration tests passed (exit $($r.ExitCode))"
+            $summary = [regex]::Match(($r.StdOut + $r.StdErr), '(\d+) tests? run: (\d+) passed')
+            Assert-True ($summary.Success -and [int]$summary.Groups[1].Value -ge 1 -and $summary.Groups[1].Value -eq $summary.Groups[2].Value) 'the SCM integration tests actually ran, and all passed'
+        }
+    }
+
+    Invoke-Case 'rust.nextest_suite_native_windows' -Independent {
+        # Every non-ignored test in the archive (the crates it carries), natively on
+        # Windows -- the lane Wine approximates. Tests that write real HKLM keys (the
+        # update policy against the live registry) opt in through
+        # SEAWORTHY_WINDOWS_LIVE_REGISTRY and run only here: an administrator on a
+        # disposable machine.
+        $env:SEAWORTHY_WINDOWS_LIVE_REGISTRY = '1'
+        try {
+            $r = Invoke-Nextest -Filter 'all()' -RunIgnored 'default' -JUnitName 'nextest-windows.xml' -TimeoutSec 2400
+        } finally {
+            Remove-Item Env:\SEAWORTHY_WINDOWS_LIVE_REGISTRY -ErrorAction SilentlyContinue
+        }
+        Assert-True ($r.ExitCode -eq 0) "the archive's suite passed natively on Windows (exit $($r.ExitCode))"
+    }
+}
+
+# ===========================================================================
+# The entropy cases (Phase All and Entropy)
+# ===========================================================================
+
+function Invoke-EntropySuite {
     Invoke-Case 'entropy.first_draw_never_aborts' -Independent {
         # AWS-LC seeds on the first RAND_bytes of a process; with CPU-jitter entropy
         # linked in, a failed startup health test ABORTS the process.
@@ -1393,7 +1442,9 @@ function Invoke-MainSuite {
         # see the rate. Windows builds keep jitter (FIPS builds cannot opt out; the
         # non-FIPS opt-out is commented out in .cargo/config.toml): 0 aborts expected on
         # bare metal; inside small virtual machines the rate can be non-zero, and this
-        # case then turns red.
+        # case then turns red. A Hyper-V guest (a GitHub-hosted runner) runs it as
+        # -Phase Entropy, informational: the rate there is the hypervisor's
+        # (docs/testing-windows.md).
         if (-not ($EntropyProbeExe -and (Test-Path -LiteralPath $EntropyProbeExe -PathType Leaf))) {
             Skip-Case "no entropy probe ($EntropyProbeExe)"
         }
@@ -1427,37 +1478,6 @@ function Invoke-MainSuite {
         foreach ($run in $runs) {
             Assert-True ($run.Crashed -lt $run.Processes) "$($run.Label): every diagnostic process failed (see above)"
         }
-    }
-
-    Invoke-Case 'rust.windows_scm_integration_tests' -Independent {
-        # crates/seaworthy-service/tests/windows_scm.rs: typed ServiceError answers against
-        # the real SCM (double-gated: #[ignore] + SEAWORTHY_WINDOWS_SCM_E2E=1).
-        if ($RustScmTestExe) {
-            Assert-True (Test-Path -LiteralPath $RustScmTestExe -PathType Leaf) "-RustScmTestExe $RustScmTestExe does not exist"
-            $r = Invoke-Native -Exe $RustScmTestExe -Arguments @('--ignored', '--test-threads', '1') -Environment @{ SEAWORTHY_WINDOWS_SCM_E2E = '1' } -TimeoutSec 900
-            Write-NativeOutput $r 'rust'
-            Assert-True ($r.ExitCode -eq 0) "the Rust SCM integration tests passed (exit $($r.ExitCode))"
-        } else {
-            $r = Invoke-Nextest -Filter 'binary(windows_scm)' -RunIgnored 'only' -JUnitName 'nextest-windows-scm.xml' -TimeoutSec 900
-            Assert-True ($r.ExitCode -eq 0) "the Rust SCM integration tests passed (exit $($r.ExitCode))"
-            $summary = [regex]::Match(($r.StdOut + $r.StdErr), '(\d+) tests? run: (\d+) passed')
-            Assert-True ($summary.Success -and [int]$summary.Groups[1].Value -ge 1 -and $summary.Groups[1].Value -eq $summary.Groups[2].Value) 'the SCM integration tests actually ran, and all passed'
-        }
-    }
-
-    Invoke-Case 'rust.nextest_suite_native_windows' -Independent {
-        # Every non-ignored test in the archive (the crates it carries), natively on
-        # Windows -- the lane Wine approximates. Tests that write real HKLM keys (the
-        # update policy against the live registry) opt in through
-        # SEAWORTHY_WINDOWS_LIVE_REGISTRY and run only here: an administrator on a
-        # disposable machine.
-        $env:SEAWORTHY_WINDOWS_LIVE_REGISTRY = '1'
-        try {
-            $r = Invoke-Nextest -Filter 'all()' -RunIgnored 'default' -JUnitName 'nextest-windows.xml' -TimeoutSec 2400
-        } finally {
-            Remove-Item Env:\SEAWORTHY_WINDOWS_LIVE_REGISTRY -ErrorAction SilentlyContinue
-        }
-        Assert-True ($r.ExitCode -eq 0) "the archive's suite passed natively on Windows (exit $($r.ExitCode))"
     }
 }
 
@@ -1590,7 +1610,12 @@ New-Item -ItemType Directory -Force -Path $JUnitDir | Out-Null
 $suite = "windows-scm-e2e"
 try {
     switch ($Phase) {
-        'All' { Invoke-MainSuite }
+        'All' { Invoke-MainSuite; Invoke-EntropySuite }
+        'Service' { Invoke-MainSuite }
+        'Entropy' {
+            $suite = 'windows-scm-entropy'
+            Invoke-EntropySuite
+        }
         'SelfTest' {
             $suite = 'windows-scm-e2e-selftest'
             $script:DataRoot = Join-Path ([System.IO.Path]::GetTempPath()) "seaworthy-e2e-selftest-$PID"
@@ -1606,7 +1631,7 @@ try {
     if ($script:StubProcess) {
         Stop-Process -Id $script:StubProcess.Id -Force -ErrorAction SilentlyContinue
     }
-    if ($Phase -eq 'All') {
+    if ($Phase -eq 'All' -or $Phase -eq 'Service') {
         try { Save-Artifacts } catch { Write-Host "saving diagnostics failed: $_" }
         if (-not $KeepInstalled -and $script:IsWin) {
             try { Remove-ProductQuietly } catch { Write-Host "cleanup of $ProductName failed: $_" }
