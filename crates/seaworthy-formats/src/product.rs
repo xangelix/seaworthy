@@ -389,21 +389,29 @@ impl Product {
     /// The macOS support directory,
     /// `/Library/Application Support/<Vendor>/<Directory>`, the counterpart
     /// of Windows' `%ProgramData%\<Vendor>\<Directory>`: the service's
-    /// `state` and the helper's `updates` live below it.
+    /// `state` and the helper's `updates` live below it. The macOS paths
+    /// are joined with `/`, not the host's separator: the seaworthy CLI
+    /// writes them into a package's plists and scripts on any host.
     #[must_use]
     pub fn macos_support_directory(&self) -> PathBuf {
-        PathBuf::from("/Library/Application Support")
-            .join(&self.vendor)
-            .join(&self.windows_directory)
+        PathBuf::from(self.macos_support())
+    }
+
+    fn macos_support(&self) -> String {
+        format!(
+            "/Library/Application Support/{}/{}",
+            self.vendor, self.windows_directory
+        )
     }
 
     /// The macOS log directory, `/Library/Logs/<Vendor>/<Directory>`: the
     /// service's and the helper's daemons write their output there.
     #[must_use]
     pub fn macos_log_directory(&self) -> PathBuf {
-        PathBuf::from("/Library/Logs")
-            .join(&self.vendor)
-            .join(&self.windows_directory)
+        PathBuf::from(format!(
+            "/Library/Logs/{}/{}",
+            self.vendor, self.windows_directory
+        ))
     }
 
     /// The macOS helper's staging directory,
@@ -411,7 +419,7 @@ impl Product {
     /// it, as on Windows).
     #[must_use]
     pub fn macos_staging_directory(&self) -> PathBuf {
-        self.macos_support_directory().join("updates")
+        PathBuf::from(format!("{}/updates", self.macos_support()))
     }
 
     /// The macOS update request file, `<support directory>/state/`
@@ -422,11 +430,10 @@ impl Product {
     #[must_use]
     pub fn macos_request_file(&self) -> Option<PathBuf> {
         self.service.as_ref()?.state_directory.as_ref()?;
-        Some(
-            self.macos_support_directory()
-                .join("state")
-                .join(UPDATE_REQUEST_FILE),
-        )
+        Some(PathBuf::from(format!(
+            "{}/state/{UPDATE_REQUEST_FILE}",
+            self.macos_support()
+        )))
     }
 
     /// The Windows data directory, `<ProgramData>\<Vendor>\<Directory>`
@@ -592,24 +599,24 @@ windows-directory = "Desk"
             Some(PathBuf::from("/var/lib/acme/agent/update-request"))
         );
         assert_eq!(agent.helper_service().as_deref(), Some("AcmeAgent-update"));
-        // macOS: Windows' layout under /Library.
+        // macOS: Windows' layout under /Library, joined with `/` on every
+        // host (compared as text: a Windows PathBuf equals one with `\`).
+        let text = |path: PathBuf| path.to_str().unwrap().to_owned();
         assert_eq!(
-            agent.macos_support_directory(),
-            PathBuf::from("/Library/Application Support/Acme/Agent")
+            text(agent.macos_support_directory()),
+            "/Library/Application Support/Acme/Agent"
         );
         assert_eq!(
-            agent.macos_log_directory(),
-            PathBuf::from("/Library/Logs/Acme/Agent")
+            text(agent.macos_log_directory()),
+            "/Library/Logs/Acme/Agent"
         );
         assert_eq!(
-            agent.macos_staging_directory(),
-            PathBuf::from("/Library/Application Support/Acme/Agent/updates")
+            text(agent.macos_staging_directory()),
+            "/Library/Application Support/Acme/Agent/updates"
         );
         assert_eq!(
-            agent.macos_request_file(),
-            Some(PathBuf::from(
-                "/Library/Application Support/Acme/Agent/state/update-request"
-            ))
+            agent.macos_request_file().map(text).as_deref(),
+            Some("/Library/Application Support/Acme/Agent/state/update-request")
         );
         assert_eq!(agent.policy_key(), "SOFTWARE\\Policies\\Acme\\Agent");
         assert_eq!(agent.install_key(), "SOFTWARE\\Acme\\Agent");
