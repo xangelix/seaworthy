@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "The test harness of seaworthy's lab lanes: a small TLS lab server serving a release tree and a product's required-version endpoint, a throwaway CA, the required-version client a fixture helper's version source uses, and the lanes' shared helpers. Unpublished."
 publish = false
 

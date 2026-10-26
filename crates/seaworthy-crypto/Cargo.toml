@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Minimal cryptography facade for seaworthy on AWS-LC: ML-DSA-87, ECDSA P-256 and Ed25519 signatures, SHA-2, randomness and a TLS client configuration, with an optional FIPS module"
 readme = "README.md"
 keywords = ["crypto", "fips", "aws-lc", "post-quantum", "signature"]

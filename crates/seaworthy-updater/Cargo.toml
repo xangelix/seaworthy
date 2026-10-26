@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Verified updates for applications shipped with seaworthy: the app's update request and the machine's update policy, and (feature `helper`) a privileged update helper that verifies signed release manifests and installs packages through apt, dnf, pacman, msiexec or macOS's installer under a version floor. Native only."
 readme = "README.md"
 keywords = ["updater", "packages", "deployment", "signature", "msi"]

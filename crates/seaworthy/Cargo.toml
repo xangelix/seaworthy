@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "The seaworthy packaging tool: verifies built launchers and per-CPU cores against a seaworthy.toml, lays out install trees, builds reproducible deb, rpm and pacman packages, tarballs, zips, MSIs, macOS bundles and Group Policy templates, signs release manifests and publishes signed repositories. It never compiles product code."
 readme = "README.md"
 keywords = ["packaging", "msi", "deb", "rpm", "release"]

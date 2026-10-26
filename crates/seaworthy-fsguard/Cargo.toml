@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Ownership and permission audits of administrator-owned folders for the seaworthy crates: the Windows owner/DACL rule and the handle-based reads behind it (no reparse point followed), and the Unix owner/mode rule"
 readme = "README.md"
 keywords = ["acl", "permissions", "security", "windows", "filesystem"]

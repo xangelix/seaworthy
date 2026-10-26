@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Docker-backed integration-test harness for seaworthy's own suites (testcontainers): digest-pinned public images, an S3-compatible store, systemd hosts per Linux distribution, skip-graceful without a docker daemon. Unpublished; dev-dependency use only."
 publish = false
 

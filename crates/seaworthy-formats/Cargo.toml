@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "The signed contract between seaworthy's release tooling and its update helper: release versions and their order, the signed release manifest (ML-DSA-87 / ECDSA P-256 / Ed25519 key sets), product names, artifact formats and their magic, the update-policy values and the size limits. Pure: no I/O."
 readme = "README.md"
 keywords = ["release", "manifest", "signature", "updater", "packaging"]

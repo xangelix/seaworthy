@@ -19,7 +19,6 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xangelix/seaworthy"
-homepage = "https://github.com/xangelix/seaworthy"
 
 # One version per dependency for the whole family. A crate takes what it
 # needs with `name.workspace = true` (adding features locally); a dependency

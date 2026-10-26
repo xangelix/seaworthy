@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Service definitions for Linux, Windows and macOS: one validated spec rendered to systemd units, Windows service records and launchd plists with least-privilege defaults, plus an optional runtime (SCM dispatcher, signal loop, start/stop/status)"
 readme = "README.md"
 keywords = ["service", "daemon", "systemd", "windows-service", "launchd"]

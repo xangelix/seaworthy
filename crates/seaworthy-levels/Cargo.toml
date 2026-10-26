@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "The x86-64 and aarch64 CPU feature tables, host detection (raw CPUID; sysctl on Apple Silicon macOS), and the requirement record each per-CPU core carries — what seaworthy-launcher selects cores by"
 readme = "README.md"
 keywords = ["cpu", "cpuid", "simd", "x86-64", "aarch64"]

@@ -4,5 +4,5 @@
 # repository root) uses the root rust-toolchain.toml instead. A date-stamped
 # nightly, never the floating `nightly`: Dependabot proposes newer ones.
 [toolchain]
-channel = "nightly-2026-10-10"
+channel = "nightly-2026-10-26"
 profile = "minimal"

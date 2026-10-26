@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "A thin launcher that loads the best per-CPU build of a product: reads each core's requirement record from the file, loads the first one the host fully supports, and runs it in-process — no code written to disk at runtime"
 readme = "README.md"
 keywords = ["cpu", "launcher", "simd", "x86-64", "aarch64"]
