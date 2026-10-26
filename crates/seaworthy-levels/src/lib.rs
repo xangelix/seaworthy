@@ -75,7 +75,8 @@ pub mod table;
 pub use aarch64::{AARCH64_FEATURES, Arm64Feature, Signal, lookup_aarch64};
 pub use binary::{
     BinaryError, CPULIST_SECTION, MACHO_CPULIST_SECTION, MACHO_RECORD_SECTION, MACHO_SEGMENT,
-    RECORD_SECTION, cpu_list_from_bytes, read_cpu_list, read_requirement, requirement_from_bytes,
+    MAX_BINARY_BYTES, MAX_READ_BYTES, RECORD_SECTION, cpu_list_from_bytes, read_cpu_list,
+    read_requirement, requirement_from_bytes, requirement_from_file,
 };
 #[cfg(target_arch = "x86_64")]
 pub use detect::Native;

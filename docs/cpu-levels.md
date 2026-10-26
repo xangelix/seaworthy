@@ -122,7 +122,8 @@ refuses to build what no record could describe:
 Both parsers are strict (fixed line order, `\n` endings, shape-checked
 values, at most 4 KiB), and the readers accept ELF, PE and
 single-architecture Mach-O files only, reading the headers and the one
-section through a read cache. Nothing of a core runs while its record is
+section through a read cache (files up to 2 GiB, at most 256 MiB read from
+one file: a malformed file can't make the cache grow without bound). Nothing of a core runs while its record is
 read: loading a library runs its initializers, which may already use
 instructions the CPU lacks.
 

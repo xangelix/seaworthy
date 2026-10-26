@@ -74,7 +74,10 @@ launcher's choice — is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
 4. **Records are read, never executed.** `read_requirement` parses the
    file through a read cache — the headers, the section table, what the
    format parser needs (for ELF, the symbol tables) and the one section;
-   never the whole image, memory bounded by the file — and accepts ELF, PE
+   never the whole image. A malformed file can make the parser ask for the
+   same bytes again and again, so the reader refuses a file over 2 GiB
+   (`MAX_BINARY_BYTES`) and takes at most 256 MiB from one file in all
+   (`MAX_READ_BYTES`). It accepts ELF, PE
    and a single-architecture Mach-O only (`.cpureq`/`.cpulist`;
    `__DATA,__cpureq`/`__DATA,__cpulist` in a Mach-O; a universal binary is
    refused), and the section exactly once. The record inside may be at
