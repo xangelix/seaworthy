@@ -939,11 +939,22 @@ dependencies = [
  "object",
  "seaworthy",
  "seaworthy-formats",
+ "seaworthy-lab",
  "seaworthy-levels",
  "seaworthy-service",
  "seaworthy-updater",
  "url",
  "zstd",
+]
+
+[[package]]
+name = "seaworthy-lab"
+version = "0.1.0"
+dependencies = [
+ "seaworthy-crypto",
+ "seaworthy-formats",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]

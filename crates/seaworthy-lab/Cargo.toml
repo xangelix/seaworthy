@@ -1,0 +1,63 @@
+[package]
+name = "seaworthy-lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The test harness of seaworthy's lab lanes: a small TLS lab server serving a release tree and a product's required-version endpoint, a throwaway CA, the required-version client a fixture helper's version source uses, and the lanes' shared helpers. Unpublished."
+publish = false
+
+[features]
+default = ["server", "ca", "client"]
+# The lab server (`server`, `cli`): files from a release tree and the
+# required-version endpoint, over plain HTTP or TLS on seaworthy-crypto's
+# provider. Blocking threads, no async runtime.
+server = ["dep:rustls"]
+# The throwaway CA (`ca`): a name-constrained root and one leaf, every key
+# and signature through seaworthy-crypto; the root's key is never written.
+ca = ["dep:base64", "dep:rcgen", "dep:time"]
+# The required-version client (`client`): what the fixture's update helper
+# asks for the version to install, over TLS with the operating system's
+# trust store, as the update helper downloads.
+client = ["dep:reqwest", "dep:rustls", "dep:rustls-platform-verifier", "dep:tokio"]
+
+[dependencies]
+# Release-manifest decoding and re-encoding (the foreign-key manifest) and
+# the version-token rule the endpoint and the client apply.
+seaworthy-formats.workspace = true
+# ML-DSA-87 for the foreign-key manifest; ECDSA P-256, SHA-256 and the RNG
+# for the CA; the TLS provider and protocol versions for the server; the
+# TLS client builder for the client. The lab never picks a provider itself.
+seaworthy-crypto.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+# server: the TLS server side, on seaworthy-crypto's provider (an allowlisted
+# site in scripts/tls-construction-allowlist.txt).
+rustls = { workspace = true, optional = true, features = ["std"] }
+# ca: X.509 encoding without a crypto backend; `time` for the validity,
+# base64 for the PEM files.
+base64 = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+time = { workspace = true, optional = true, features = ["std"] }
+# client: rustls with no provider of its own; the TLS configuration is
+# seaworthy-crypto's client builder with the platform verifier attached.
+reqwest = { workspace = true, optional = true, features = ["rustls-no-provider"] }
+rustls-platform-verifier = { workspace = true, optional = true }
+# client: the `required-version` command's runtime (reqwest's timeouts
+# need the timer).
+tokio = { workspace = true, optional = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[[bin]]
+name = "seaworthy-lab"
+path = "src/bin/seaworthy-lab.rs"
+required-features = ["server", "ca", "client"]
+
+[lints]
+workspace = true

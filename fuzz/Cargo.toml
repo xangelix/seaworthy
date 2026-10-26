@@ -44,6 +44,9 @@ seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing
 # client's XML parsers, key rules and SigV4 encoding (s3_xml; public API,
 # so no seam).
 seaworthy = { path = "../crates/seaworthy", default-features = false, features = ["publish-s3"] }
+# The lab server's request-head parser (lab_request): the pure module
+# alone, without the server, CA or client.
+seaworthy-lab = { path = "../crates/seaworthy-lab", default-features = false }
 url = "2"
 # dist_archive's independent readers: the tarball's zstd and the zip's
 # deflate (both already in the CLI's graph).
@@ -69,6 +72,13 @@ bench = false
 [[bin]]
 name = "dist_pe"
 path = "fuzz_targets/dist_pe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lab_request"
+path = "fuzz_targets/lab_request.rs"
 test = false
 doc = false
 bench = false

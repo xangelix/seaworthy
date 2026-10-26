@@ -1,0 +1,2 @@
+GET /a/../%2e%2e/C:/NUL/con.txt?x#y HTTP/1.1
+

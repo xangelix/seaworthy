@@ -35,7 +35,8 @@ configuration file, with every piece optional.
 | `seaworthy` | The command-line tool: plan, build, package, sign, verify, publish |
 
 `seaworthy-test-support` (unpublished) is the docker harness of seaworthy's own integration
-tests.
+tests, and `seaworthy-lab` (unpublished) the harness of its lab lanes, which install and update
+real packages on Linux, macOS and Windows ([docs/testing.md](docs/testing.md)).
 
 Use only the crates (and features) you need: a local-only desktop tool can take the launcher and
 packaging alone; a product with a server can add services and updates.

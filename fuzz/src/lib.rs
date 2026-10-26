@@ -46,6 +46,7 @@ targets![
     dist_archive,
     dist_inputs,
     dist_pe,
+    lab_request,
     levels_records,
     s3_xml,
     service_unit,

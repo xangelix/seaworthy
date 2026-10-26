@@ -1,0 +1,4 @@
+GET /repo/releases/acme-agent/stable/1.0.0%2Bg1/x86_64-unknown-linux-gnu/acme-agent.deb HTTP/1.1
+Host: packages.lab.invalid
+User-Agent: test
+

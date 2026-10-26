@@ -46,6 +46,9 @@ libc = "0.2.189"
 miniz_oxide = "0.8.9"
 object = { version = "0.37.3", default-features = false }
 quick-xml = "0.42.0"
+# The lab's throwaway CA (seaworthy-lab): X.509 encoding only, no crypto
+# backend of its own (every key and signature is seaworthy-crypto's).
+rcgen = { version = "0.14.10", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
 rustls = { version = "0.23.46", default-features = false }
 rustls-platform-verifier = "0.7.1"
@@ -56,6 +59,8 @@ subtle = "2.6.1"
 tempfile = "3.27"
 testcontainers = { version = "0.28.0", default-features = false }
 thiserror = "2.0.21"
+# The lab CA's validity window (rcgen's date type).
+time = { version = "0.3.55", default-features = false }
 tokio = { version = "1.53", default-features = false }
 toml = { version = "0.9.12", default-features = false, features = ["parse", "serde"] }
 tracing = "0.1.44"
