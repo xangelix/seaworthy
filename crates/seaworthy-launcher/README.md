@@ -40,7 +40,10 @@ launcher falls back is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
 2. **The record describes the core, or the core doesn't build.** The build
    script refuses `-C target-feature=+name` for a name no record can carry
    (APX's `+nf`, `+ndd`, … reach LLVM unreported), and any enabled feature
-   without a `seaworthy-levels` row. `core_main!` checks at compile time
+   without a `seaworthy-levels` row. It reads the flags as rustc does: every
+   spelling of the option (`-C x`, `-Cx`, `--codegen x`, `--codegen=x`,
+   `target_feature` as well as `target-feature`) and `@argfile` arguments,
+   expanded (an argfile must be named by an absolute path). `core_main!` checks at compile time
    that the core crate was compiled with the same CPU flags as the build
    script saw — flags given to the core crate alone (`cargo rustc -- -C
    target-cpu=…`) fail the build, naming the first feature they disagree

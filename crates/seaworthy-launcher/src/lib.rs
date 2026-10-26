@@ -942,4 +942,94 @@ mod tests {
             ["sse"]
         );
     }
+
+    #[test]
+    fn every_spelling_rustc_accepts_is_read() {
+        let flags = |s: &[&str]| s.iter().map(|f| (*f).to_owned()).collect::<Vec<_>>();
+        let known = |name: &str| seaworthy_levels::known("x86_64-unknown-linux-gnu", name);
+        // rustc takes `_` for `-` in an option's key: APX through
+        // `target_feature` must be refused like `target-feature`.
+        for spelling in [
+            &["-C", "target_feature=+egpr,+ndd,+nf"][..],
+            &["-Ctarget_feature=+egpr,+ndd,+nf"],
+            &["--codegen", "target_feature=+egpr,+ndd,+nf"],
+            &["--codegen=target_feature=+egpr,+ndd,+nf"],
+            &["-Ctarget-feature=+egpr,+ndd,+nf"],
+        ] {
+            assert_eq!(
+                rustflags::enabled_unknown_features(&flags(spelling), known),
+                ["egpr", "ndd", "nf"],
+                "{spelling:?}"
+            );
+            assert!(rustflags::sets_target_features(&flags(spelling)));
+        }
+        assert_eq!(
+            rustflags::target_cpu(&flags(&["-Ctarget_cpu=znver4"])).as_deref(),
+            Some("znver4")
+        );
+        assert_eq!(
+            rustflags::target_cpu(&flags(&[
+                "-C",
+                "target-cpu=x86-64-v2",
+                "--codegen=target_cpu=x86-64-v4"
+            ]))
+            .as_deref(),
+            Some("x86-64-v4"),
+            "the last one wins, whatever its spelling"
+        );
+        // A value keeps its own spelling: only the key is normalized.
+        assert_eq!(
+            rustflags::target_cpu(&flags(&["-Ctarget_cpu=x86_64_v9"])).as_deref(),
+            Some("x86_64_v9")
+        );
+    }
+
+    #[test]
+    fn argfiles_expand_as_rustc_reads_them() {
+        let flags = |s: &[&str]| s.iter().map(|f| (*f).to_owned()).collect::<Vec<_>>();
+        let read = |path: &Path| -> Result<String, String> {
+            match path.to_str() {
+                Some("/flags/apx") => Ok("-C\r\ntarget_feature=+egpr\n@/flags/nested\n".to_owned()),
+                Some("/flags/cpu") => Ok("-Ctarget-cpu=x86-64-v3".to_owned()),
+                other => Err(format!("no file {other:?}")),
+            }
+        };
+        let (expanded, files) =
+            rustflags::expand_argfiles(flags(&["--cfg", "x", "@/flags/apx", "@/flags/cpu"]), read)
+                .expect("expands");
+        // One argument per line, `\r\n` too, and no nesting: an `@` line is
+        // an argument, as rustc reads it.
+        assert_eq!(
+            expanded,
+            [
+                "--cfg",
+                "x",
+                "-C",
+                "target_feature=+egpr",
+                "@/flags/nested",
+                "-Ctarget-cpu=x86-64-v3"
+            ]
+        );
+        assert_eq!(
+            files,
+            [PathBuf::from("/flags/apx"), PathBuf::from("/flags/cpu")]
+        );
+        let known = |name: &str| seaworthy_levels::known("x86_64-unknown-linux-gnu", name);
+        assert_eq!(
+            rustflags::enabled_unknown_features(&expanded, known),
+            ["egpr"]
+        );
+        assert_eq!(
+            rustflags::target_cpu(&expanded).as_deref(),
+            Some("x86-64-v3")
+        );
+        // Refused: a relative path (rustc's working directory is unknown
+        // here), the unstable shell syntax, and a file that can't be read.
+        for bad in ["@flags/apx", "@shell:/flags/apx", "@/flags/missing"] {
+            assert!(
+                rustflags::expand_argfiles(flags(&[bad]), read).is_err(),
+                "{bad}"
+            );
+        }
+    }
 }

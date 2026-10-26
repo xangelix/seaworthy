@@ -110,7 +110,10 @@ without reporting them (APX on `diamondrapids` and `novalake`), and
 refuses to build what no record could describe:
 
 - `-C target-feature=+name` for a name `seaworthy-levels` has no row for
-  (APX's `+nf`, `+ndd`, `+egpr` reach LLVM unreported);
+  (APX's `+nf`, `+ndd`, `+egpr` reach LLVM unreported), in every spelling
+  rustc accepts (`-C`, `-C<option>`, `--codegen`, `target_feature` as well as
+  `target-feature`) and inside `@argfile`s, which the script expands as rustc
+  does (an argfile in the flags must be named by an absolute path);
 - any enabled feature without a row (a toolchain newer than the tables);
 - flags only the core crate saw (`cargo rustc -- -C target-cpu=…`):
   `core_main!` compares the core crate's `cfg!(target_feature)` with the

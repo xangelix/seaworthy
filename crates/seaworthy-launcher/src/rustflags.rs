@@ -1,6 +1,12 @@
 //! Reading the effective `-C target-cpu` out of the flags cargo hands a
 //! build script (`CARGO_ENCODED_RUSTFLAGS`, `0x1f`-separated). Shared by
 //! `build.rs` (which includes this file by path) and the crate's tests.
+//!
+//! The flags are read the way rustc reads them, so no spelling slips past:
+//! `@path` arguments expand to the file's lines ([`expand_argfiles`]), and
+//! a codegen option is found in every form rustc takes (`-C x`, `-Cx`,
+//! `--codegen x`, `--codegen=x`), its key with `_` and `-` alike
+//! (`target_feature=` is `target-feature=`).
 
 /// Splits `CARGO_ENCODED_RUSTFLAGS` into its arguments.
 pub(crate) fn split(encoded: &str) -> Vec<String> {
@@ -10,20 +16,68 @@ pub(crate) fn split(encoded: &str) -> Vec<String> {
     encoded.split('\u{1f}').map(str::to_owned).collect()
 }
 
-/// The `-C` / `--codegen` option values in `flags`, in order: `-C x`,
-/// `-Cx`, `--codegen x` and `--codegen=x`.
-fn codegen_options(flags: &[String]) -> Vec<&str> {
+/// Expands every `@path` argument into the lines of the file at `path`,
+/// as rustc does (one argument per line, no nesting: a line starting with
+/// `@` is an argument). `read` reads a file; the paths it was asked for are
+/// returned too, so a build script can rerun when one changes.
+///
+/// # Errors
+/// A relative argfile path (rustc reads it from its own working directory,
+/// which a build script can't know), an `@shell:` argfile (unstable rustc
+/// syntax with its own quoting), or a file `read` can't read.
+pub(crate) fn expand_argfiles(
+    flags: Vec<String>,
+    read: impl Fn(&std::path::Path) -> Result<String, String>,
+) -> Result<(Vec<String>, Vec<std::path::PathBuf>), String> {
+    let mut out = Vec::with_capacity(flags.len());
+    let mut files = Vec::new();
+    for flag in flags {
+        let Some(path) = flag.strip_prefix('@') else {
+            out.push(flag);
+            continue;
+        };
+        if path.starts_with("shell:") {
+            return Err(format!(
+                "`{flag}`: shell-quoted argfiles are unstable rustc syntax; list the flags themselves"
+            ));
+        }
+        let path = std::path::Path::new(path);
+        if !path.is_absolute() {
+            return Err(format!(
+                "`{flag}`: an argfile in the build's flags must be an absolute path (rustc reads a relative one from a directory this build script can't know)"
+            ));
+        }
+        let text = read(path)?;
+        out.extend(text.lines().map(str::to_owned));
+        files.push(path.to_path_buf());
+    }
+    Ok((out, files))
+}
+
+/// A codegen option with its key normalized: rustc accepts `_` and `-`
+/// alike in option names (`target_cpu=x` is `target-cpu=x`).
+fn normalized(option: &str) -> String {
+    match option.split_once('=') {
+        Some((key, value)) => format!("{}={value}", key.replace('_', "-")),
+        None => option.replace('_', "-"),
+    }
+}
+
+/// The `-C` / `--codegen` option values in `flags`, in order, each key
+/// normalized ([`normalized`]): `-C x`, `-Cx`, `--codegen x` and
+/// `--codegen=x`.
+fn codegen_options(flags: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut iter = flags.iter();
     while let Some(flag) = iter.next() {
         if flag == "-C" || flag == "--codegen" {
             if let Some(value) = iter.next() {
-                out.push(value.as_str());
+                out.push(normalized(value));
             }
         } else if let Some(value) = flag.strip_prefix("--codegen=") {
-            out.push(value);
+            out.push(normalized(value));
         } else if let Some(value) = flag.strip_prefix("-C") {
-            out.push(value);
+            out.push(normalized(value));
         }
     }
     out
@@ -34,8 +88,7 @@ pub(crate) fn target_cpu(flags: &[String]) -> Option<String> {
     codegen_options(flags)
         .into_iter()
         .rev()
-        .find_map(|option| option.strip_prefix("target-cpu="))
-        .map(str::to_owned)
+        .find_map(|option| option.strip_prefix("target-cpu=").map(str::to_owned))
 }
 
 /// Target features that are not CPU features: `crt-static` selects the
@@ -47,12 +100,13 @@ pub(crate) const NON_CPU_FEATURES: [&str; 1] = ["crt-static"];
 
 /// The `-C target-feature=…` entries in `flags`, in order, as written
 /// (`+avx2`, `-sse4.2`, `+crt-static`).
-fn target_feature_entries(flags: &[String]) -> Vec<&str> {
+fn target_feature_entries(flags: &[String]) -> Vec<String> {
     codegen_options(flags)
-        .into_iter()
+        .iter()
         .filter_map(|option| option.strip_prefix("target-feature="))
         .flat_map(|list| list.split(','))
         .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
         .collect()
 }
 
@@ -62,7 +116,7 @@ fn target_feature_entries(flags: &[String]) -> Vec<&str> {
 /// CPU-related, so the build script warns.
 pub(crate) fn sets_target_features(flags: &[String]) -> bool {
     target_feature_entries(flags)
-        .into_iter()
+        .iter()
         .map(|entry| entry.trim_start_matches(['+', '-']))
         .any(|name| !name.is_empty() && !NON_CPU_FEATURES.contains(&name))
 }
@@ -75,11 +129,12 @@ pub(crate) fn sets_target_features(flags: &[String]) -> bool {
 pub(crate) fn enabled_unknown_features(
     flags: &[String],
     known: impl Fn(&str) -> bool,
-) -> Vec<&str> {
+) -> Vec<String> {
     target_feature_entries(flags)
-        .into_iter()
+        .iter()
         .filter_map(|entry| entry.strip_prefix('+'))
         .filter(|name| !name.is_empty() && !NON_CPU_FEATURES.contains(name) && !known(name))
+        .map(str::to_owned)
         .collect()
 }
 

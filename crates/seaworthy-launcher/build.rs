@@ -19,7 +19,9 @@
 //! `novalake`), and it refuses what no record could describe: a
 //! `-C target-feature=+name` naming something seaworthy-levels has no row for
 //! on the target's architecture (x86-64 or aarch64), and any enabled name
-//! without a row.
+//! without a row. The flags are read as rustc reads them: every spelling of
+//! a codegen option (`-C`, `-C<option>`, `--codegen`, `_` or `-` in its
+//! key) and `@argfile` arguments expanded.
 
 // The crate's own rules hold here too (this script and `src/rustflags.rs`
 // parse what cargo and rustc hand them).
@@ -69,7 +71,19 @@ fn main() {
     let target = env("TARGET");
     let rustc = env("RUSTC");
     let out_dir = env("OUT_DIR");
-    let flags = rustflags::split(&std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default());
+    // The flags as rustc reads them: `@path` arguments expanded to the
+    // file's lines, so a feature can't hide in an argfile.
+    let (flags, argfiles) = rustflags::expand_argfiles(
+        rustflags::split(&std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default()),
+        |path| {
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read the argfile {}: {e}", path.display()))
+        },
+    )
+    .unwrap_or_else(|e| fail(&e));
+    for argfile in &argfiles {
+        println!("cargo:rerun-if-changed={}", argfile.display());
+    }
 
     let cpu =
         rustflags::target_cpu(&flags).unwrap_or_else(|| rustflags::default_cpu(&target).to_owned());
