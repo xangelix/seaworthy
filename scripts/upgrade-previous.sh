@@ -73,7 +73,9 @@ trap 'rm -rf "$tmp"' EXIT
 get() { # <url> <out file>
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error \
         --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 120 --max-filesize $((16 * 1024 * 1024)) \
-        -o "$2" -H @"$tmp/auth" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$1"
+        -o "$2" -H @"$tmp/auth" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$1" &&
+        # curl stops a transfer at --max-filesize only from 8.4 on.
+        [ "$(wc -c < "$2")" -le $((16 * 1024 * 1024)) ]
 }
 
 get "$api/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=$branch&status=success&exclude_pull_requests=true&per_page=100" \
@@ -109,6 +111,8 @@ curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-er
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$api/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" ||
     fail "downloading run $run_number's $name artifact failed"
+# curl stops a transfer at --max-filesize only from 8.4 on.
+[ "$(wc -c < "$tmp/artifact.zip")" -le $((1024 * 1024 * 1024)) ] || fail "the artifact is larger than 1 GiB"
 actual="$(sha256 "$tmp/artifact.zip")"
 [ "sha256:$actual" = "$digest" ] || fail "run $run_number's $name artifact is sha256:$actual, but GitHub recorded $digest"
 say "the artifact matches its recorded digest ($digest)"
