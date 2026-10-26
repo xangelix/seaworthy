@@ -888,8 +888,12 @@ fn the_build_step_carries_out_the_plan() {
         use object::Object as _;
         elf.exports()
             .unwrap()
-            .iter()
-            .map(|e| String::from_utf8_lossy(e.name()).into_owned())
+            .filter_map(|e| {
+                e.unwrap()
+                    .name()
+                    .into_name()
+                    .map(|name| String::from_utf8_lossy(name).into_owned())
+            })
             .collect()
     };
     assert!(exports("cores/x86-64-v3/libtiny_core.so").contains(&"tiny_core_avx2".to_owned()));

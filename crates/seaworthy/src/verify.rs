@@ -862,7 +862,10 @@ pub fn binary_format_findings(image: &[u8], os: Os, kind: BinaryKind) -> Vec<Str
                 header.machine.get(LE)
             ));
         }
-        let dll = header.characteristics.get(LE) & object::pe::IMAGE_FILE_DLL != 0;
+        let dll = header
+            .characteristics
+            .get(LE)
+            .contains(object::pe::IMAGE_FILE_DLL);
         match (kind, dll) {
             (BinaryKind::Executable, true) => {
                 findings.push("a DLL where an executable belongs".to_owned())
@@ -979,14 +982,16 @@ pub fn macho_facts(image: &[u8]) -> Result<MachoFacts, String> {
             facts
                 .dylibs
                 .push(String::from_utf8_lossy(name).into_owned());
-        } else if let Some(build) = command.build_version().map_err(|e| e.to_string())? {
+        } else if let Some((build, _tools)) =
+            command.build_version(endian).map_err(|e| e.to_string())?
+        {
             if build.platform.get(endian) != object::macho::PLATFORM_MACOS {
                 return Err(format!(
                     "built for another platform than macOS (LC_BUILD_VERSION platform {})",
-                    build.platform.get(endian)
+                    build.platform.get(endian).0
                 ));
             }
-            facts.minimum = Some(decode(build.minos.get(endian)));
+            facts.minimum = Some(decode(build.minos.get(endian).0));
         } else if command.cmd() == object::macho::LC_RPATH {
             let rpath = command
                 .data::<object::macho::RpathCommand<object::Endianness>>()
@@ -1001,7 +1006,7 @@ pub fn macho_facts(image: &[u8]) -> Result<MachoFacts, String> {
             let version = command
                 .data::<object::macho::VersionMinCommand<object::Endianness>>()
                 .map_err(|e| e.to_string())?;
-            facts.minimum = Some(decode(version.version.get(endian)));
+            facts.minimum = Some(decode(version.version.get(endian).0));
         }
     }
     Ok(facts)
@@ -1197,10 +1202,14 @@ pub fn elf_glibc_needs(image: &[u8]) -> Result<Vec<GlibcNeed>, String> {
         .strings(endian, image, link)
         .map_err(|e| e.to_string())?;
     // By version index, so the symbols can be attached.
-    let mut needs: BTreeMap<u16, GlibcNeed> = BTreeMap::new();
+    let mut needs: BTreeMap<object::elf::VersionIndex, GlibcNeed> = BTreeMap::new();
     while let Some((_, mut auxiliaries)) = verneeds.next().map_err(|e| e.to_string())? {
         while let Some(aux) = auxiliaries.next().map_err(|e| e.to_string())? {
-            if aux.vna_flags.get(endian) & object::elf::VER_FLG_WEAK != 0 {
+            if aux
+                .vna_flags
+                .get(endian)
+                .contains(object::elf::VER_FLG_WEAK)
+            {
                 continue;
             }
             let name =
@@ -1276,9 +1285,8 @@ pub fn elf_static_tls(image: &[u8]) -> Result<bool, String> {
         return Ok(false);
     };
     Ok(entries.iter().any(|d| {
-        d.tag32(endian) == Some(object::elf::DT_FLAGS)
-            && d.val32(endian)
-                .is_some_and(|flags| flags & object::elf::DF_STATIC_TLS != 0)
+        d.tag(endian) == object::elf::DT_FLAGS
+            && object::elf::DynamicFlags(d.val(endian)).contains(object::elf::DF_STATIC_TLS)
     }))
 }
 
@@ -1313,7 +1321,7 @@ pub fn elf_needed(image: &[u8]) -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())?;
     entries
         .iter()
-        .filter(|d| d.tag32(endian) == Some(object::elf::DT_NEEDED))
+        .filter(|d| d.tag(endian) == object::elf::DT_NEEDED)
         .map(|d| {
             d.string(endian, strings)
                 .map(|s| String::from_utf8_lossy(s).into_owned())

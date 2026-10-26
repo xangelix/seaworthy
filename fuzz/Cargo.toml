@@ -56,7 +56,7 @@ url = "2"
 zstd = { version = "0.14", default-features = false }
 miniz_oxide = "0.8"
 # dist_pe's check that a stamped image still parses (read side only).
-object = { version = "0.37", default-features = false, features = ["read_core", "pe", "std"] }
+object = { version = "0.40", default-features = false, features = ["read_core", "pe", "std"] }
 
 [[bin]]
 name = "dist_archive"
