@@ -76,8 +76,11 @@
 //! same daemon with its log file, beside the update helper's on-demand
 //! daemon.
 
-// No FFI here: the Windows calls go through `windows-service`.
-#![forbid(unsafe_code)]
+// The renderers have no FFI. The runtime's state-directory audit
+// (run::state_audit) reads security descriptors through windows-sys and
+// the effective uid through libc, each `unsafe` block allowed on its own
+// with its `// SAFETY:` invariant (the workspace denies unsafe code).
+#![cfg_attr(not(feature = "runtime"), forbid(unsafe_code))]
 // The security baseline beyond the workspace lints: no panicking index or
 // slice and no `unreachable!` in library code (tests may index).
 #![deny(clippy::indexing_slicing, clippy::unreachable)]

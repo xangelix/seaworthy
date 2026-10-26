@@ -47,6 +47,10 @@ pub enum ServiceError {
     /// the OS error's debug form so no context is lost.
     #[error("platform error: {0}")]
     Platform(String),
+    /// A service's state directory holds something it can't trust
+    /// ([`crate::run::audit_state_directory`]): the object and why.
+    #[error("untrusted state directory: {0}")]
+    UntrustedState(String),
 }
 
 // Maps the SCM error callers actually branch on; everything else keeps its

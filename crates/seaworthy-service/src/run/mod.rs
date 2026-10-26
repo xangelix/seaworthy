@@ -96,11 +96,13 @@ impl Drop for ServiceRuntime {
 // state machine's every exit path.
 #[cfg(any(windows, test))]
 mod scm;
+pub mod state_audit;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 mod windows;
 
+pub use state_audit::audit_state_directory;
 #[cfg(unix)]
 pub use unix::run_service;
 #[cfg(windows)]

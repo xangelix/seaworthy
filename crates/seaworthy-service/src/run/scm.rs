@@ -149,12 +149,16 @@ pub(crate) const PRODUCTION_TIMING: ScmTiming = ScmTiming {
 // ---------------------------------------------------------------------------
 
 /// Run init + body under the SCM status protocol. `shutdown_rx` is fed by
-/// the caller's control handler (STOP and SHUTDOWN). `hard_exit` is the
-/// last resort when even the final `Stopped` report fails (production:
-/// `std::process::exit`); a test hook records the code and returns.
+/// the caller's control handler (STOP and SHUTDOWN). `precheck` runs once
+/// `Running` is reported, before `init` (production: the state
+/// directory's audit); its error is a failure like a fatal one. `hard_exit`
+/// is the last resort when even the final `Stopped` report fails
+/// (production: `std::process::exit`); a test hook records the code and
+/// returns.
 pub(crate) fn drive<R, IFut, B, BFut, I, E>(
     reporter: &R,
     shutdown_rx: ShutdownRx,
+    precheck: impl FnOnce() -> Result<(), String>,
     init: IFut,
     body: B,
     timing: ScmTiming,
@@ -173,7 +177,7 @@ where
     // of the SCM's `extern "system"` ServiceMain aborts the process with
     // no `Stopped` report at all.
     let result = catch_unwind(AssertUnwindSafe(|| {
-        drive_inner(reporter, shutdown_rx, init, body, timing)
+        drive_inner(reporter, shutdown_rx, precheck, init, body, timing)
     }))
     .unwrap_or_else(|panic| {
         Err(RunError::TaskPanicked(format!(
@@ -208,6 +212,7 @@ where
 fn drive_inner<R, IFut, B, BFut, I, E>(
     reporter: &R,
     shutdown_rx: ShutdownRx,
+    precheck: impl FnOnce() -> Result<(), String>,
     init: IFut,
     body: B,
     timing: ScmTiming,
@@ -242,6 +247,16 @@ where
         0,
         Duration::ZERO,
     )?;
+
+    // A service that can't trust its own state refuses to run: the caller
+    // (`drive`) reports `Stopped` + EXIT_CODE_FATAL.
+    if let Err(why) = precheck() {
+        runtime.shut_down();
+        return Err(RunError::Platform(format!(
+            "refusing to run: {}",
+            crate::log::line_safe(&why)
+        )));
+    }
 
     let outcome = runtime.block_on(async move {
         let mut shutdown_rx = shutdown_rx;
@@ -445,13 +460,62 @@ mod tests {
         E: fmt::Debug + Send + 'static,
     {
         let exited = Mutex::new(None);
-        let result = drive(recorder, shutdown_rx, init, body, FAST, |code| {
-            *exited.lock().expect("exited") = Some(code);
-        });
+        let result = drive(
+            recorder,
+            shutdown_rx,
+            || Ok(()),
+            init,
+            body,
+            FAST,
+            |code| {
+                *exited.lock().expect("exited") = Some(code);
+            },
+        );
         (result, exited.into_inner().expect("exited"))
     }
 
     // ---- every failure path reports Stopped + a non-zero code ----
+
+    #[test]
+    fn an_untrusted_state_refuses_to_run_before_init() {
+        let recorder = Recorder::default();
+        let init_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran = std::sync::Arc::clone(&init_ran);
+        let exited = Mutex::new(None);
+        let result = drive(
+            &recorder,
+            channel(),
+            || {
+                Err(
+                    "C:\\ProgramData\\Acme\\Agent\\state\\x grants S-1-5-21-1 write access"
+                        .to_owned(),
+                )
+            },
+            async move {
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Outcome::<(), Infallible>::Success(())
+            },
+            |(), _| async { Outcome::Success(()) },
+            FAST,
+            |code| *exited.lock().expect("exited") = Some(code),
+        );
+        let error = result.expect_err("refused");
+        assert!(
+            format!("{error:?}").contains("refusing to run"),
+            "{error:?}"
+        );
+        assert!(
+            !init_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "init never ran"
+        );
+        let last = recorder.last();
+        assert_eq!(last.state, ScmState::Stopped);
+        assert_eq!(
+            last.exit_code,
+            ScmExitCode::ServiceSpecific(EXIT_CODE_FATAL as u32)
+        );
+        assert_eq!(*exited.lock().expect("exited"), None, "the report worked");
+    }
 
     #[test]
     fn init_fatal_reports_stopped_with_the_fatal_code() {
@@ -503,6 +567,7 @@ mod tests {
         let result = drive(
             &Shared(std::sync::Arc::clone(&states)),
             channel(),
+            || Ok(()),
             async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 *snapshot.lock().expect("snapshot") =
@@ -588,6 +653,7 @@ mod tests {
         let result = drive(
             &reporter,
             shutdown_rx,
+            || Ok(()),
             // The stop comes from init itself, once the blocking work is in
             // flight (a stop queued up front could win the race before init
             // was ever polled).

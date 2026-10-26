@@ -315,6 +315,7 @@ mod scm {
             ServiceError::InvalidSpec(_) => "InvalidSpec",
             ServiceError::Io(_) => "Io",
             ServiceError::Platform(_) => "Platform",
+            ServiceError::UntrustedState(_) => "UntrustedState",
         }
     }
 }

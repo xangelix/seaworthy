@@ -391,6 +391,15 @@ fn run_console(init: ErasedInit, body: ErasedBody) -> Result<ServiceExit, RunErr
 /// * `service_name` must match the name the service was installed under —
 ///   the control handler registers under it.
 ///
+/// Before `init`, once `Running` is reported, the state directory the
+/// seaworthy CLI's MSI made for this program
+/// (`%ProgramData%\<Vendor>\<Directory>\state` for a program installed in
+/// `%ProgramFiles%\<Vendor>\<Directory>`) is audited
+/// ([`crate::run::audit_state_directory`]'s rule, for the process's own
+/// account): anything in it that someone other than SYSTEM,
+/// Administrators, TrustedInstaller or the service could have written,
+/// or a reparse point, refuses the start as a failure.
+///
 /// Every failure (a `Fatal` outcome, a panic, a status report failure)
 /// reports `Stopped` with the service-specific
 /// [`EXIT_CODE_FATAL`] and returns the error. A control-handler
@@ -435,6 +444,9 @@ where
     scm::drive(
         &reporter,
         shutdown_rx,
+        // The MSI's state directory, audited before init: a service that
+        // can't trust its own state refuses to run (run::state_audit).
+        crate::run::state_audit::audit_installed_state,
         init,
         body,
         scm::PRODUCTION_TIMING,
