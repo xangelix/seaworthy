@@ -11,11 +11,13 @@
 # the README, and then `SHA256SUMS` over the archives.
 #
 # The archives are deterministic for given inputs: entries sorted, owner and
-# group 0, modes normalized, every timestamp set to SOURCE_DATE_EPOCH (default:
-# the commit time of HEAD), gzip without a name or time stamp, zip entries
-# written by Python's zipfile with fixed times and modes. Needs GNU tar, gzip,
-# python3 and sha256sum (GitHub's Ubuntu runners have them).
+# group 0, modes normalized (0755 directories and programs, 0644 the rest,
+# whatever the caller's umask), every timestamp set to SOURCE_DATE_EPOCH
+# (default: the commit time of HEAD), gzip without a name or time stamp, zip
+# entries written by Python's zipfile with fixed times and modes. Needs GNU
+# tar, gzip, python3 and sha256sum (GitHub's Ubuntu runners have them).
 set -euo pipefail
+umask 022
 
 die() { echo "package-release: $*" >&2; exit 2; }
 
@@ -78,7 +80,7 @@ for dir in "$bins"/bin-*/; do
 
     name="seaworthy-$version-$target"
     stage="$work/$name"
-    mkdir -p "$stage"
+    install -d -m 0755 "$stage"
     install -m 0755 "$dir/$exe" "$stage/$exe"
     for doc in LICENSE-APACHE LICENSE-MIT README.md; do
         install -m 0644 "$root/$doc" "$stage/$doc"
@@ -91,7 +93,7 @@ for dir in "$bins"/bin-*/; do
             ;;
         *)
             tar --sort=name --format=gnu --owner=0 --group=0 --numeric-owner \
-                --mtime="@$SOURCE_DATE_EPOCH" --mode='u+rw,go+r,go-w' \
+                --mtime="@$SOURCE_DATE_EPOCH" --mode='u=rwX,go=rX' \
                 -C "$work" -cf - "$name" | gzip -n -9 >"$out/$name.tar.gz"
             ;;
     esac

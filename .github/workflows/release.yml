@@ -124,12 +124,29 @@ jobs:
       - name: cargo build --release
         env:
           TARGET: ${{ matrix.target }}
-          RUSTFLAGS: ${{ matrix.rustflags }}
+          TARGET_RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             # C code in dependencies (AWS-LC) must build against musl too.
             export "CC_${TARGET//-/_}=musl-gcc"
           fi
+          # No build machine path in the binary: the panic locations of
+          # registry crates and the build directory name /cargo and
+          # /seaworthy, and the standard library's stay /rustc/<commit> even
+          # where rust-src is installed (rustc otherwise points them at the
+          # local copy), so the bytes don't depend on where the runner keeps
+          # them. AWS-LC's build maps its own C sources' paths. Passed
+          # unsplit (CARGO_ENCODED_RUSTFLAGS), so a path with a space stays
+          # one flag.
+          sysroot="$(rustc --print sysroot)"
+          commit="$(rustc -vV | sed -n 's/^commit-hash: //p')"
+          flags=()
+          [ -z "$TARGET_RUSTFLAGS" ] || read -r -a flags <<<"$TARGET_RUSTFLAGS"
+          flags+=("--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+            "--remap-path-prefix=$GITHUB_WORKSPACE=/seaworthy"
+            "--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$commit")
+          CARGO_ENCODED_RUSTFLAGS="$(IFS=$'\x1f'; printf '%s' "${flags[*]}")"
+          export CARGO_ENCODED_RUSTFLAGS
           cargo build --release --locked --package seaworthy --target "$TARGET"
       - name: Stage the binary
         env:
@@ -137,6 +154,13 @@ jobs:
         run: |
           exe=seaworthy
           if [ "$RUNNER_OS" = Windows ]; then exe=seaworthy.exe; fi
+          # The remapping above held: no path of this machine in the bytes.
+          for path in "$GITHUB_WORKSPACE" "${CARGO_HOME:-$HOME/.cargo}" "$HOME" "${USERPROFILE:-$HOME}"; do
+            if grep -a -q -F -- "$path" "target/$TARGET/release/$exe"; then
+              echo "::error::the $TARGET binary holds the build machine's path $path"
+              exit 1
+            fi
+          done
           mkdir -p "staging/bin-$TARGET"
           cp "target/$TARGET/release/$exe" "staging/bin-$TARGET/$exe"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

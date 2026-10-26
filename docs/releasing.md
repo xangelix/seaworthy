@@ -82,6 +82,12 @@ allocator is slower than glibc's; if that ever shows in packaging throughput, th
 its global allocator without changing the target. The release binaries are built without the
 `fips` feature: a FIPS build is built from source by whoever needs it.
 
+**No build paths.** The build remaps the cargo home and the checkout to `/cargo` and `/seaworthy`
+(`--remap-path-prefix`; AWS-LC's build maps its C sources itself), so the binaries don't carry the
+runner's directories, and a build step fails if one still names the checkout, the cargo home or
+the home directory. The same commit, toolchain and lockfile then build the same bytes wherever the
+directories are; the archives around them are deterministic (`scripts/ci/package-release.sh`).
+
 ## Publishing to crates.io
 
 Publishing is manual for now. Automating it (crates.io trusted publishing from GitHub Actions,
