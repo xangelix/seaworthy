@@ -182,6 +182,101 @@ jobs:
       - name: cargo test (container suites required)
         run: cargo test --workspace --locked --features "$FEATURES"
 
+  packaging:
+    name: Packaging tools (Arch Linux)
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      # Every packaging test runs: a missing tool fails instead of skipping.
+      SEAWORTHY_REQUIRE_PACKAGE_TOOLS: "1"
+      # The container suites run in the `containers` job.
+      SEAWORTHY_TEST_CONTAINERS_REQUIRED: "0"
+      # pwsh for the Windows scripts' tests: Microsoft's release tarball,
+      # pinned by the SHA-256 the release publishes (hashes.sha256).
+      PWSH_VERSION: "7.6.7"
+      PWSH_SHA256: 6896f9e3a6b0a354bf470835a96da76d2f801cd50dcf047ad7c4563bf93bf431
+      CONTAINER: seaworthy-packaging
+    # The tests run in the digest-pinned Arch Linux image the conformance
+    # lane uses (seaworthy-test-support's ARCH pin): pacman's repo-add and
+    # pacman-conf exist only there, the GitLab template's tools image is
+    # typically Arch, and Arch packages every other tool from its signed
+    # repositories. Not a job container: harden-runner can't monitor one,
+    # so the image runs as an unprivileged container on the monitored VM,
+    # and the tests run in it as the runner's own uid.
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the pinned Arch Linux container
+        run: |
+          image="$(sed -n 's/^pub const ARCH: &str = "\(.*\)";$/\1/p' crates/seaworthy-test-support/src/images.rs)"
+          if ! [[ "$image" =~ ^archlinux:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::no digest-pinned ARCH image in crates/seaworthy-test-support/src/images.rs"
+            exit 1
+          fi
+          docker pull --quiet "$image"
+          docker run --detach --name "$CONTAINER" --volume "$GITHUB_WORKSPACE:/work" \
+            --workdir /work "$image" sleep infinity
+      - name: Install the packaging tools
+        run: |
+          docker exec --interactive --env PWSH_VERSION --env PWSH_SHA256 \
+            --env BUILDER_UID="$(id -u)" --env BUILDER_GID="$(id -g)" \
+            "$CONTAINER" bash -euo pipefail -s <<'SCRIPT'
+          # Arch's signed repositories (pacman verifies every package).
+          pacman -Syu --noconfirm --needed --noprogressbar base-devel git rustup cmake openssl \
+            zlib dpkg rpm-tools createrepo_c pacman gnupg libarchive msitools \
+            desktop-file-utils unzip zstd llvm libxml2 icu dash >/dev/null
+          # pwsh: https only, bounded, the pinned SHA-256 checked before extracting.
+          mkdir -p /tmp/pwsh /opt/pwsh
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+            --connect-timeout 30 --max-time 600 --max-filesize $((256 * 1024 * 1024)) \
+            -o /tmp/pwsh/pwsh.tar.gz \
+            "https://github.com/PowerShell/PowerShell/releases/download/v$PWSH_VERSION/powershell-$PWSH_VERSION-linux-x64.tar.gz"
+          echo "$PWSH_SHA256  /tmp/pwsh/pwsh.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/pwsh/pwsh.tar.gz -C /opt/pwsh
+          chmod 0755 /opt/pwsh/pwsh
+          ln -s /opt/pwsh/pwsh /usr/local/bin/pwsh
+          rm -rf /tmp/pwsh
+          # The tests run as the runner's uid, which owns the checkout.
+          getent group "$BUILDER_GID" >/dev/null || groupadd --gid "$BUILDER_GID" builder
+          useradd --uid "$BUILDER_UID" --gid "$BUILDER_GID" --create-home builder
+          SCRIPT
+      - name: cargo test (seaworthy, seaworthy-updater), every packaging tool required
+        run: |
+          docker exec --interactive --user builder --env HOME=/home/builder \
+            --env CARGO_TERM_COLOR --env CARGO_INCREMENTAL --env CARGO_NET_RETRY \
+            --env RUSTUP_MAX_RETRIES --env RUST_BACKTRACE --env SEAWORTHY_REQUIRE_PACKAGE_TOOLS \
+            --env SEAWORTHY_TEST_CONTAINERS_REQUIRED "$CONTAINER" bash -euo pipefail -s <<'SCRIPT'
+          # rust-toolchain.toml's pinned toolchain.
+          rustup set profile minimal
+          rustup toolchain install
+          # nFPM at its pin (a checksummed release), osslsigncode built from a
+          # checksummed source archive, shellcheck from a checksummed release.
+          NFPM="$(scripts/ci/install-nfpm.sh)"
+          osslsigncode="$(scripts/ci/install-osslsigncode.sh)"
+          scripts/ci/install-tool.sh shellcheck
+          PATH="$(dirname "$osslsigncode"):$PWD/target/tools:$PATH"
+          export NFPM PATH
+          for tool in nfpm osslsigncode dpkg-deb dpkg-scanpackages rpm rpmbuild rpmkeys rpmsign \
+            createrepo_c repo-add pacman-conf gpg bsdtar wixl msiinfo msiextract \
+            desktop-file-validate pwsh shellcheck llvm-rc llvm-readobj dash; do
+            [ "$tool" = nfpm ] && tool="$NFPM"
+            command -v "$tool" >/dev/null || { echo "::error::$tool is missing"; exit 1; }
+          done
+          cargo test --locked -p seaworthy -p seaworthy-updater \
+            --features seaworthy-updater/helper,seaworthy-updater/relaunch
+          SCRIPT
+      - name: Remove the container
+        if: always()
+        run: docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+
   msrv:
     name: MSRV (${{ needs.plan.outputs.msrv }})
     needs: plan
@@ -398,7 +493,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [plan, fmt, clippy, test, containers, msrv, docs, deny, fips, fuzz-replay, checks, lint]
+    needs: [plan, fmt, clippy, test, containers, packaging, msrv, docs, deny, fips, fuzz-replay, checks, lint]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -410,7 +505,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
-          jq -e '["clippy", "test", "containers", "msrv", "docs", "fips"] as $gated
+          jq -e '["clippy", "test", "containers", "packaging", "msrv", "docs", "fips"] as $gated
             | to_entries
             | all(.value.result == "success"
                   or (.value.result == "skipped" and (.key | IN($gated[]))))' <<<"$NEEDS" >/dev/null \
