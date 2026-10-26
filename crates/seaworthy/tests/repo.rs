@@ -1443,6 +1443,36 @@ fn a_published_path_never_gets_other_bytes() {
     .unwrap();
     assert!(rollback.rollback);
     assert!(!first.rollback);
+    // Releases order by version, then sequence, as clients order them: a
+    // maintenance release of an older line cut later (2.0.5, sequence 20,
+    // after 2.1.0, sequence 9) is older, whatever its sequence; a newer
+    // version is newer even with a lower sequence.
+    let maintenance = fixture.package_release("dist-maintenance", "2.0.5", 20);
+    let err = fixture
+        .build_after(
+            &fixture.listings_in(&maintenance),
+            &at("r-maintenance"),
+            DATE + 165,
+            Some(&first),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("acme-agent 2.0.5+cafe12 (sequence 20) is older than the published 2.1.0+cafe12 (sequence 9)"),
+        "{err}"
+    );
+    let reset = fixture.package_release("dist-reset", "2.1.1", 3);
+    assert!(
+        !fixture
+            .build_after(
+                &fixture.listings_in(&reset),
+                &at("r-reset"),
+                DATE + 166,
+                Some(&first),
+            )
+            .unwrap()
+            .rollback
+    );
     // Products released apart (per-product pipelines): one product's
     // sequence below another's published one is no rollback.
     let newer = fixture.package_release("dist-newer", "2.2.0", 12);
@@ -2157,7 +2187,8 @@ fn the_package_command_builds_the_repository_package_and_repo_publishes_it() {
         ])
         .env("PATH", &path_with_wrappers)
         .env("SEAWORTHY_REPO_KEY_ASC", &armored)
-        .env("SEAWORTHY_TEST_MARKER", "visible")
+        .env("ACME_TEST_MARKER", "visible")
+        .env("SEAWORTHY_TOOL_ENV", "ACME_TEST_MARKER")
         .output()
         .unwrap();
     assert!(
@@ -2173,7 +2204,7 @@ fn the_package_command_builds_the_repository_package_and_repo_publishes_it() {
     );
     let env = std::fs::read_to_string(&seen).unwrap();
     assert!(
-        env.contains("SEAWORTHY_TEST_MARKER=visible"),
+        env.contains("ACME_TEST_MARKER=visible"),
         "the tools ran: {env}"
     );
     assert!(
@@ -2203,7 +2234,8 @@ fn the_package_command_builds_the_repository_package_and_repo_publishes_it() {
         .env("PATH", &path_with_wrappers)
         .env("SEAWORTHY_REPO_KEY_ASC", &armored)
         .env("SEAWORTHY_RELEASE_KEY_HEX", "00ff")
-        .env("SEAWORTHY_TEST_MARKER", "visible")
+        .env("ACME_TEST_MARKER", "visible")
+        .env("SEAWORTHY_TOOL_ENV", "ACME_TEST_MARKER")
         .output()
         .unwrap();
     assert!(
@@ -2213,7 +2245,7 @@ fn the_package_command_builds_the_repository_package_and_repo_publishes_it() {
     );
     let env = std::fs::read_to_string(&seen).unwrap();
     assert!(
-        env.contains("SEAWORTHY_TEST_MARKER=visible"),
+        env.contains("ACME_TEST_MARKER=visible"),
         "the tools ran: {env}"
     );
     assert!(

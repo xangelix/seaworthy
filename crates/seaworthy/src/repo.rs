@@ -469,7 +469,8 @@ pub struct Options<'a> {
     /// so each publication's indexes are newer than the last.
     pub date: u64,
     /// The last publication's plan: no immutable path may get other bytes,
-    /// `date` must be later, and no release older than its (by sequence).
+    /// `date` must be later, and no release older than its (by version,
+    /// then sequence, as clients order releases).
     pub previous: Option<&'a Plan>,
     /// Publish releases older than the last publication's on purpose (a
     /// rollback): the plan says so, and `publish` accepts it.
@@ -844,40 +845,64 @@ fn check_previous(
     Ok(())
 }
 
-/// Whether a release is older (by sequence) than the last publication's of
-/// the same product: refused unless `allow_older` (a deliberate rollback),
-/// since a pipeline running out of order would otherwise roll the
-/// repositories back to an older release.
+/// A published release's (version, sequence): its token's version (the
+/// part before `+`) with its sequence, ordered as every client orders
+/// releases ([`Release`]: the version first, then the sequence).
+///
+/// # Errors
+/// [`DistError::Layout`] for a token whose version doesn't parse: an
+/// unreadable published release is never taken for an older one.
+pub fn published_release(release: &PlanRelease) -> Result<Release, DistError> {
+    let version = release
+        .token
+        .split_once('+')
+        .map_or(release.token.as_str(), |(version, _)| version);
+    Release::new(version, release.sequence).map_err(|e| {
+        DistError::Layout(format!(
+            "the published {} {} (sequence {}) names no release this seaworthy orders: {e}",
+            release.package, release.token, release.sequence
+        ))
+    })
+}
+
+/// Whether a release is older than the last publication's of the same
+/// product, ordered as the clients order releases — (version, sequence),
+/// the version first ([`Release`]): refused unless `allow_older` (a
+/// deliberate rollback), since a pipeline running out of order, or a
+/// maintenance release of an older line cut after a newer one (1.2.1 after
+/// 1.3.0, with the higher sequence), would otherwise roll the
+/// repositories back: apt, dnf and pacman would offer it as the latest.
 fn check_older(
     listings: &[Listing],
     previous: &Plan,
     allow_older: bool,
 ) -> Result<bool, DistError> {
-    let older: Vec<String> = listings
-        .iter()
-        .filter_map(|listing| {
-            previous
-                .releases
-                .iter()
-                .find(|r| r.product == listing.product && r.sequence > listing.sequence)
-                .map(|published| {
-                    format!(
-                        "{} {} (sequence {}) is older than the published {} (sequence {})",
-                        listing.package,
-                        listing.token,
-                        listing.sequence,
-                        published.token,
-                        published.sequence
-                    )
-                })
-        })
-        .collect();
+    let mut older = Vec::new();
+    for listing in listings {
+        let ours = Release::new(&listing.version, listing.sequence)?;
+        for published in previous
+            .releases
+            .iter()
+            .filter(|r| r.product == listing.product)
+        {
+            if published_release(published)? > ours {
+                older.push(format!(
+                    "{} {} (sequence {}) is older than the published {} (sequence {})",
+                    listing.package,
+                    listing.token,
+                    listing.sequence,
+                    published.token,
+                    published.sequence
+                ));
+            }
+        }
+    }
     if older.is_empty() {
         return Ok(false);
     }
     if !allow_older {
         return Err(DistError::Layout(format!(
-            "{}: a pipeline running out of order would roll the repositories back (to roll back on purpose, repo --allow-older)",
+            "{}: releases are ordered by version, then sequence, as clients order them; publishing an older one rolls the repositories back (to roll back on purpose, repo --allow-older)",
             older.join("; ")
         )));
     }

@@ -664,22 +664,27 @@ fn check_follows(
         && !plan.rollback
         && let Some(newest) = newest_plan
     {
-        // A pipeline running out of order must not roll the repositories
-        // back; a deliberate rollback says so (repo --allow-older).
+        // A pipeline running out of order, or an older line's release cut
+        // after a newer one, must not roll the repositories back; releases
+        // order by version, then sequence, as clients order them. A
+        // deliberate rollback says so (repo --allow-older).
         for release in &plan.releases {
-            if let Some(published) = newest
+            let ours = crate::repo::published_release(release)?;
+            for published in newest
                 .releases
                 .iter()
-                .find(|r| r.product == release.product && r.sequence > release.sequence)
+                .filter(|r| r.product == release.product)
             {
-                return Err(DistError::Layout(format!(
-                    "the plan publishes {} {} (sequence {}), older than the published {} (sequence {}): a pipeline ran out of order (to roll back on purpose, repo --allow-older)",
-                    release.package,
-                    release.token,
-                    release.sequence,
-                    published.token,
-                    published.sequence
-                )));
+                if crate::repo::published_release(published)? > ours {
+                    return Err(DistError::Layout(format!(
+                        "the plan publishes {} {} (sequence {}), older than the published {} (sequence {}): releases order by version, then sequence (to roll back on purpose, repo --allow-older)",
+                        release.package,
+                        release.token,
+                        release.sequence,
+                        published.token,
+                        published.sequence
+                    )));
+                }
             }
         }
     }
@@ -1447,6 +1452,60 @@ mod tests {
                 false
             )
             .is_ok()
+        );
+    }
+
+    /// Releases order by version, then sequence, as clients order them: a
+    /// maintenance release of an older line cut after a newer one has the
+    /// higher sequence but is older; a newer version with a lower sequence
+    /// (another project's counter, a reset) is newer.
+    #[test]
+    fn releases_order_by_version_then_sequence() {
+        let release = |token: &str, sequence: u64| crate::repo::PlanRelease {
+            product: "agent".into(),
+            package: "acme-agent".into(),
+            token: token.into(),
+            sequence,
+        };
+        let follows = |published: crate::repo::PlanRelease, ours: crate::repo::PlanRelease| {
+            let mut before = plan(10, &["apt/a"]);
+            before.releases = vec![published];
+            let mut after = plan(20, &["apt/b"]);
+            after.releases = vec![ours];
+            let before_bytes = plan_bytes(&before).unwrap();
+            let after_bytes = plan_bytes(&after).unwrap();
+            check_follows(
+                &after,
+                &after_bytes,
+                Some(&(before_bytes, before.clone())),
+                &[published_of(&before)],
+                false,
+            )
+            .map_err(|e| e.to_string())
+        };
+        fn published_of(plan: &Plan) -> Published {
+            Published {
+                plan: plan.clone(),
+                written: None,
+                digest: seaworthy_crypto::digest::sha256_hex(&plan_bytes(plan).unwrap()),
+            }
+        }
+        let err = follows(release("1.3.0+abc", 150), release("1.2.1+def", 200)).unwrap_err();
+        assert!(
+            err.contains("acme-agent 1.2.1+def (sequence 200), older than the published 1.3.0+abc (sequence 150)"),
+            "{err}"
+        );
+        let err = follows(release("1.3.0", 150), release("1.3.0", 149)).unwrap_err();
+        assert!(err.contains("older than the published"), "{err}");
+        assert!(follows(release("1.3.0", 150), release("1.4.0-rc.1", 3)).is_ok());
+        assert!(follows(release("1.3.0", 150), release("1.3.0", 151)).is_ok());
+        assert!(follows(release("1.3.0-rc.2", 150), release("1.3.0", 140)).is_ok());
+        // A published token that names no release is never taken for an
+        // older one.
+        let err = follows(release("1.3", 150), release("1.3.0", 151)).unwrap_err();
+        assert!(
+            err.contains("names no release this seaworthy orders"),
+            "{err}"
         );
     }
 
