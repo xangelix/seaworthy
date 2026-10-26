@@ -906,7 +906,7 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     );
     assert!(!out.status.success());
     assert!(
-        said(&out).contains("a release needs CI_COMMIT_TAG"),
+        said(&out).contains("a release needs a tag (SEAWORTHY_TAG, CI_COMMIT_TAG)"),
         "{}",
         said(&out)
     );
@@ -922,7 +922,9 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     );
     assert!(!out.status.success());
     assert!(
-        said(&out).contains("CI_PIPELINE_IID is unset (the release sequence)"),
+        said(&out).contains(
+            "no release sequence: SEAWORTHY_SEQUENCE (or GitLab's CI_PIPELINE_IID) is unset"
+        ),
         "{}",
         said(&out)
     );
@@ -2139,7 +2141,8 @@ fn the_prepare_step_builds_the_tool_plans_and_lints() {
     let out = prepare(&[("SEAWORTHY_RELEASE", "1"), ("CI_PIPELINE_IID", "5")]);
     assert!(!out.status.success());
     assert!(
-        said(&out).contains("a release needs CI_COMMIT_TAG, the template's version-file"),
+        said(&out)
+            .contains("a release needs a tag (SEAWORTHY_TAG, CI_COMMIT_TAG), the version file"),
         "{}",
         said(&out)
     );
@@ -2219,6 +2222,119 @@ fn the_build_step_names_the_release_for_the_product_s_build_scripts() {
     );
 }
 
+/// Off GitLab the release is named by SEAWORTHY_TAG, SEAWORTHY_SEQUENCE
+/// and SEAWORTHY_COMMIT (the GitHub workflow sets them), and prepare
+/// installs a seaworthy already built from the checkout
+/// (SEAWORTHY_TOOL_BIN) instead of building one. A sequence that isn't a
+/// positive integer is refused.
+#[test]
+fn off_gitlab_the_release_comes_from_seaworthy_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path().join(".seaworthy");
+    for file in [
+        "scripts/ci/seaworthy.sh",
+        "scripts/ci/seaworthy-build.ps1",
+        "scripts/ci/seaworthy-msi.ps1",
+        "scripts/ci/azure-sign.sh",
+        "scripts/ci/install-nfpm.sh",
+        "scripts/ci/install-osslsigncode.sh",
+        "ci/gitlab/seaworthy.yml",
+    ] {
+        let to = checkout.join(file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(repo_root().join(file), &to).unwrap();
+    }
+    std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
+    // No cargo may run: the tool is already built.
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script_at(
+        &bin.join("cargo"),
+        "#!/bin/bash\necho 'cargo ran' >&2\nexit 1\n",
+    );
+    std::fs::write(dir.path().join("seaworthy.toml"), WINDOWS_PRODUCT).unwrap();
+    let path = path_with(&bin);
+    let tool = env!("CARGO_BIN_EXE_seaworthy");
+    let prepare = |extra: &[(&str, &str)]| {
+        let mut env = vec![("PATH", path.as_str()), ("SEAWORTHY_TOOL_BIN", tool)];
+        env.extend_from_slice(extra);
+        step(dir.path(), &["prepare"], &env)
+    };
+    let out = prepare(&[
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_TAG", "v1.4.0-rc.2"),
+        ("SEAWORTHY_SEQUENCE", "812"),
+        ("SEAWORTHY_COMMIT", "0a1b2c3d"),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(!said(&out).contains("cargo ran"), "{}", said(&out));
+    assert!(
+        said(&out).contains(&format!("seaworthy from {tool}")),
+        "{}",
+        said(&out)
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("seaworthy/bin/seaworthy")).unwrap(),
+        std::fs::read(tool).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("seaworthy/release.env")).unwrap(),
+        "SEAWORTHY_RELEASE_VERSION=1.4.0-rc.2\nSEAWORTHY_RELEASE_BUILD=0a1b2c3d\n"
+    );
+    assert!(
+        dir.path()
+            .join("seaworthy/plan-x86_64-unknown-linux-gnu.tsv")
+            .is_file()
+    );
+    // The neutral variables win over GitLab's.
+    let out = prepare(&[
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_TAG", "v2.0.0"),
+        ("CI_COMMIT_TAG", "v9.9.9"),
+        ("SEAWORTHY_SEQUENCE", "9"),
+        ("CI_PIPELINE_IID", "1"),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        std::fs::read_to_string(dir.path().join("seaworthy/release.env"))
+            .unwrap()
+            .starts_with("SEAWORTHY_RELEASE_VERSION=2.0.0\n")
+    );
+    // A release with no tag, version file or version is refused, by the
+    // variables' names.
+    let out = prepare(&[("SEAWORTHY_RELEASE", "1"), ("SEAWORTHY_SEQUENCE", "9")]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("a release needs a tag (SEAWORTHY_TAG"),
+        "{}",
+        said(&out)
+    );
+    for sequence in ["0", "-3", "12a", "1.5"] {
+        let out = prepare(&[
+            ("SEAWORTHY_RELEASE", "1"),
+            ("SEAWORTHY_TAG", "v1.0.0"),
+            ("SEAWORTHY_SEQUENCE", sequence),
+        ]);
+        assert!(!out.status.success(), "{sequence}");
+        assert!(
+            said(&out).contains("isn't a positive integer"),
+            "{sequence}: {}",
+            said(&out)
+        );
+    }
+    // A missing prebuilt tool is named.
+    let out = step(
+        dir.path(),
+        &["prepare"],
+        &[
+            ("PATH", path.as_str()),
+            ("SEAWORTHY_TOOL_BIN", "/nonexistent/seaworthy"),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(said(&out).contains("SEAWORTHY_TOOL_BIN"), "{}", said(&out));
+}
+
 /// A product with a launcher, a helper and two cores, for the caller's
 /// extra rustflags.
 const EXTRA_FLAGS_PRODUCT: &str = r#"
@@ -2289,8 +2405,9 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("seaworthy.toml"), EXTRA_FLAGS_PRODUCT).unwrap();
     std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-    tool_into(dir.path());
-    let plan = Command::new(dir.path().join("seaworthy/bin/seaworthy"))
+    std::fs::create_dir_all(dir.path().join("seaworthy")).unwrap();
+    // This build's seaworthy, run in place: the build step needs no copy.
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
         .current_dir(dir.path())
         .args(["build-plan", "--triple", triple])
         .output()
@@ -2421,8 +2538,8 @@ fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("seaworthy.toml"), EXTRA_FLAGS_PRODUCT).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
-    tool_into(&dir);
-    let plan = Command::new(dir.join("seaworthy/bin/seaworthy"))
+    std::fs::create_dir_all(dir.join("seaworthy")).unwrap();
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
         .current_dir(&dir)
         .args(["build-plan", "--triple", triple])
         .output()

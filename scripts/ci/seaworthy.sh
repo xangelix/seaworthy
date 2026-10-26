@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# scripts/ci/seaworthy.sh — the steps of seaworthy's GitLab CI template
-# (ci/gitlab/seaworthy.yml). Each of the template's jobs runs one step; the
-# logic lives here, not in YAML.
+# scripts/ci/seaworthy.sh — the steps of seaworthy's CI: the GitLab CI
+# templates (ci/gitlab/seaworthy*.yml) and the reusable GitHub workflow
+# (.github/workflows/dist.yml). Each job runs one step; the logic lives
+# here, not in YAML. GitLab's variables name the release by default; the
+# SEAWORTHY_* ones below name it on any CI.
 #
 #   seaworthy.sh prepare           seaworthy built from the seaworthy
 #                                   checkout, seaworthy.toml checked, the
@@ -14,9 +16,10 @@
 #                                   macOS (signed on a release, Authenticode
 #                                   alone on a dev build)
 #   seaworthy.sh package-macos     on the Mac: seaworthy built there,
-#                                   package --platforms macos (the dmg, ad
-#                                   hoc-signed; never signed or released
-#                                   until Developer ID signing), into
+#                                   package --platforms macos (the dmg or
+#                                   pkg: ad hoc-signed, or on a release with
+#                                   SEAWORTHY_MACOS_SIGN=1 Developer
+#                                   ID-signed and notarized), into
 #                                   dist-macos/
 #   seaworthy.sh adopt-msi         seaworthy adopt-msi for each MSI the
 #                                   Windows MSI job built (signed on a
@@ -85,6 +88,20 @@
 #   SEAWORTHY_VERSION         the release version (default: the tag, less a
 #                             leading v; else SEAWORTHY_VERSION_FILE's;
 #                             else 0.0.0-alpha outside a release)
+#   SEAWORTHY_TAG             the release's tag (default CI_COMMIT_TAG)
+#   SEAWORTHY_SEQUENCE        the release sequence, a counter that only grows
+#                             (default CI_PIPELINE_IID)
+#   SEAWORTHY_COMMIT          the commit's short SHA, the default build
+#                             metadata (default CI_COMMIT_SHORT_SHA)
+#   SEAWORTHY_TOOL_BIN        prepare, package-macos: a seaworthy binary
+#                             already built from the checkout (the GitHub
+#                             workflow's setup-seaworthy action), installed
+#                             instead of building one
+#   SEAWORTHY_MACOS_SIGN      1: on a release, package-macos signs with
+#                             SEAWORTHY_SIGNING (its [apple] Developer ID,
+#                             then notarization), and its listing is the
+#                             release's; else the macOS outputs stay ad
+#                             hoc-signed, outside the release
 #   SEAWORTHY_BUILD_COMMAND   a command (run with bash in the checkout)
 #                             printing the release's build metadata — the
 #                             build part of the product's version token,
@@ -257,15 +274,16 @@ version() {
     fi
     local declared=""
     [ -z "${SEAWORTHY_VERSION_FILE:-}" ] || declared="$(package_version "$SEAWORTHY_VERSION_FILE")" || exit 1
-    if release && [ -n "${CI_COMMIT_TAG:-}" ]; then
-        local tagged="${CI_COMMIT_TAG#v}"
+    local tag="${SEAWORTHY_TAG:-${CI_COMMIT_TAG:-}}"
+    if release && [ -n "$tag" ]; then
+        local tagged="${tag#v}"
         [ -z "$declared" ] || [ "$declared" = "$tagged" ] ||
-            fail "the tag $CI_COMMIT_TAG names $tagged, but $SEAWORTHY_VERSION_FILE declares $declared: tag the version the product declares"
+            fail "the tag $tag names $tagged, but $SEAWORTHY_VERSION_FILE declares $declared: tag the version the product declares"
         echo "$tagged"
     elif [ -n "$declared" ]; then
         echo "$declared"
     elif release; then
-        fail "a release needs CI_COMMIT_TAG, the template's version-file, or SEAWORTHY_VERSION"
+        fail "a release needs a tag (SEAWORTHY_TAG, CI_COMMIT_TAG), the version file (the template's version-file), or SEAWORTHY_VERSION"
     else
         echo 0.0.0-alpha
     fi
@@ -276,7 +294,7 @@ version() {
 # product composes its own), else the commit's short SHA.
 build_metadata() {
     if [ -z "${SEAWORTHY_BUILD_COMMAND:-}" ]; then
-        echo "${CI_COMMIT_SHORT_SHA:-}"
+        echo "${SEAWORTHY_COMMIT:-${CI_COMMIT_SHORT_SHA:-}}"
         return
     fi
     local built
@@ -308,8 +326,10 @@ release_identity() {
 }
 
 sequence() {
-    [ -n "${CI_PIPELINE_IID:-}" ] || fail "CI_PIPELINE_IID is unset (the release sequence)"
-    echo "$CI_PIPELINE_IID"
+    local sequence="${SEAWORTHY_SEQUENCE:-${CI_PIPELINE_IID:-}}"
+    [ -n "$sequence" ] || fail "no release sequence: SEAWORTHY_SEQUENCE (or GitLab's CI_PIPELINE_IID) is unset"
+    [[ "$sequence" =~ ^[1-9][0-9]{0,18}$ ]] || fail "the release sequence ${sequence@Q} isn't a positive integer"
+    echo "$sequence"
 }
 
 # The template marker: the template's text without its marker line, hashed
@@ -335,8 +355,17 @@ check_checkout() { # <checkout>
 
 # seaworthy, built from the checkout into <path>. Its target directory sits
 # outside the checkout: a cache restored before the fetch must not make the
-# checkout's directory exist.
+# checkout's directory exist. SEAWORTHY_TOOL_BIN names one already built
+# from the checkout (the GitHub workflow's setup-seaworthy action, keyed by
+# the checkout's commit), installed as is.
 build_tool() { # <checkout> <path>
+    if [ -n "${SEAWORTHY_TOOL_BIN:-}" ]; then
+        need_file "$SEAWORTHY_TOOL_BIN" "seaworthy (SEAWORTHY_TOOL_BIN)"
+        say "seaworthy from $SEAWORTHY_TOOL_BIN"
+        mkdir -p "$(dirname "$2")"
+        install -m 0755 "$SEAWORTHY_TOOL_BIN" "$2"
+        return
+    fi
     local tool_target="${SEAWORTHY_TOOL_TARGET:-$work/tool-target}"
     say "building seaworthy from $1"
     cargo build --quiet --release --locked --manifest-path "$1/Cargo.toml" -p seaworthy \
@@ -366,7 +395,7 @@ prepare() {
     say "the release: $release_version${release_build:++$release_build}"
     # A version the package job would refuse (a tag, a version file's
     # `2.0.0-dev`) fails here, before the builds — on every pipeline.
-    local check_sequence="${CI_PIPELINE_IID:-1}"
+    local check_sequence="${SEAWORTHY_SEQUENCE:-${CI_PIPELINE_IID:-1}}"
     if release; then
         check_sequence="$(sequence)"
     fi
@@ -596,9 +625,11 @@ package() {
 
 # On the Mac (codesign and hdiutil are macOS's own): seaworthy built from
 # the seaworthy checkout, each product's macOS outputs packaged from the build
-# step's artifacts, ad hoc-signed, and their listings and files copied into
-# dist-macos/ for the pipeline's artifacts. Never signed, and never in a
-# release's listing, even on a release: no secrets reach it.
+# step's artifacts and their listings and files copied into dist-macos/ for
+# the pipeline's artifacts. Ad hoc-signed and outside the release, unless a
+# release sets SEAWORTHY_MACOS_SIGN=1: then signing.toml's [apple] Developer
+# ID signs them and the notary service notarizes them (under the secrets
+# prefix, when one is set).
 package_macos() {
     [ "$(uname -s)" = Darwin ] || fail "package-macos runs on the Mac (macOS's codesign and hdiutil)"
     local checkout="${SEAWORTHY_CHECKOUT:-.seaworthy}"
@@ -611,7 +642,12 @@ package_macos() {
     local release_version release_sequence release_build
     packaging_release
     local signing=()
-    if release; then
+    if release && [ "${SEAWORTHY_MACOS_SIGN:-0}" = 1 ]; then
+        local file="${SEAWORTHY_SIGNING:-signing.toml}"
+        need_file "$file" "signing.toml (its [apple] Developer ID signs a release's macOS outputs)"
+        signing=(--signing "$file")
+        say "a release: the macOS outputs are Developer ID-signed and notarized ([apple] in $file)"
+    elif release; then
         say "a release: its macOS outputs stay ad hoc-signed pipeline artifacts, outside the release"
     elif ci_test_sign; then
         say "a CI test build: manifests by the CI test keys"
@@ -620,7 +656,7 @@ package_macos() {
     source_date_epoch
     local scratch="${SEAWORTHY_MACOS_SCRATCH:-$work/macos}"
     rm -rf "$scratch/dist" "$work/dist-macos"
-    "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$scratch/dist" \
+    with_secrets "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$scratch/dist" \
         --release "$release_version" --sequence "$release_sequence" --build "$release_build" \
         --platforms macos "${signing[@]}"
     local listing product copied=0
