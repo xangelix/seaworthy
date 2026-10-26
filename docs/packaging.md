@@ -27,9 +27,44 @@ artifacts ──▶ verify ──▶ layout ──▶ package ──▶ repo ─
 
 Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
 the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
-the launcher and helper once, the core once per CPU target in its own target directory, the per-CPU
-flags as `target.<triple>.rustflags`. It refuses a product whose cargo configuration sets
-`build.rustflags`, which cargo would ignore once target flags are set.
+the launcher and helper once (in the target directory `base`), the core once per CPU target in its
+own target directory (named for the CPU), the per-CPU flags as `target.<triple>.rustflags`. It
+refuses a product whose cargo configuration sets `build.rustflags`, which cargo would ignore once
+target flags are set.
+
+### Extra build flags
+
+A product's own flags belong in `.cargo/config.toml`'s `target.<triple>.rustflags` (or
+`target.'cfg(…)'.rustflags`), which cargo joins to the per-CPU flags. Flags that only a release
+build should get, or that name files of the build machine, come from the environment of the CI's
+build step instead (`scripts/ci/seaworthy.sh build`, `seaworthy-build.ps1`, and the GitHub workflow's
+`rustflags` and `core-rustflags` inputs):
+
+| Variable | Builds | Example |
+|---|---|---|
+| `SEAWORTHY_RUSTFLAGS` | every build: the launcher, the helper and each core | `--cfg release_build` |
+| `SEAWORTHY_CORE_RUSTFLAGS` | the cores alone (each step whose target directory isn't `base`) | `-Cprofile-use={workspace}/pgo/{triple}.profdata` |
+
+Each is split on whitespace, and its words follow the plan's flags in that build's
+`target.<triple>.rustflags` (every build's, then the cores'). Three placeholders expand:
+`{workspace}`, the workspace manifest's directory as an absolute path (cargo runs each
+dependency's `rustc` in that dependency's own directory, so a relative path would name a different
+file for each crate); `{triple}`, the target triple; and `{cpu}`, the step's target directory: the
+core's CPU, or `base`. A flag that chooses the CPU or its features (`target-cpu`, `target-feature`)
+is refused: the plan sets them per core, and each core's requirement record must name exactly what
+it was built for. So is a quote (the flags travel as TOML strings) and any other `{placeholder}`.
+
+Any other environment a build needs (a C compiler's flags, a cargo `[env]` value) is the build job's
+own environment, which every `cargo` call inherits.
+
+**Profile-guided optimization**: build an instrumented core, run it on representative work, merge
+the profiles with `llvm-profdata merge` (from the `llvm-tools` component of the same toolchain),
+commit the result, and pass it to every core. A profile collected on one CPU target serves the
+others (LLVM matches functions by their control flow; a mismatch is a warning, not an error):
+
+```sh
+SEAWORTHY_CORE_RUSTFLAGS='-Cprofile-use={workspace}/pgo/{triple}.profdata'
+```
 
 ## Verify
 

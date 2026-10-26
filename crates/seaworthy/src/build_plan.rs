@@ -60,6 +60,12 @@
 //! ignores `build.rustflags` once any target flags are set, so
 //! [`check_cargo_config`] refuses it.
 //!
+//! The launcher's and helper's build steps use the target directory
+//! `base`; each core's, its CPU's name. The scripts that carry the plan
+//! out rely on it: they add the caller's `SEAWORTHY_RUSTFLAGS` to every
+//! build and `SEAWORTHY_CORE_RUSTFLAGS` to each step whose target
+//! directory isn't `base` (`docs/packaging.md`, "Extra build flags").
+//!
 //! The text form ([`render`]) is one step per line, tab-separated:
 //!
 //! ```text

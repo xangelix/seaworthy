@@ -20,6 +20,13 @@
                                                         the core: at least one, and one set
                                                         of bytes per name
 
+    SEAWORTHY_RUSTFLAGS (every build) and SEAWORTHY_CORE_RUSTFLAGS (the cores' builds
+    alone: each step whose target directory isn't base) add the caller's flags after the
+    plan's, as scripts/ci/seaworthy.sh build does: whitespace-separated, with {workspace}
+    (the workspace manifest's directory, absolute), {triple} and {cpu} (the step's target
+    directory) expanded; a flag choosing the CPU or its features, a quote, or another
+    {placeholder} is refused.
+
     Runs in the MSVC build image (the template's windows-image: VS Build Tools, CMake,
     Go, NASM, rustup), where the AWS-LC-FIPS module builds natively. Before building, it
     enters the x64 MSVC developer environment (vswhere, then vcvarsall.bat x64) unless
@@ -134,7 +141,42 @@ if (Test-Path -LiteralPath $ReleaseEnv) {
     Say "building release $($env:SEAWORTHY_RELEASE_VERSION)+$($env:SEAWORTHY_RELEASE_BUILD)"
 }
 if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS -or $env:CARGO_BUILD_RUSTFLAGS) {
-    Fail "RUSTFLAGS (or CARGO_BUILD_RUSTFLAGS) is set: it would replace or drop the per-CPU flags (put product flags in .cargo/config.toml's target.<triple>.rustflags)"
+    Fail "RUSTFLAGS (or CARGO_BUILD_RUSTFLAGS) is set: it would replace or drop the per-CPU flags (put product flags in .cargo/config.toml's target.<triple>.rustflags, or in SEAWORTHY_RUSTFLAGS / SEAWORTHY_CORE_RUSTFLAGS)"
+}
+
+# {workspace} in the caller's flags: the workspace root, absolute (cargo runs
+# a dependency's rustc in that dependency's own directory). Resolved against
+# PowerShell's location, which .NET's current directory needn't follow.
+$Workspace = ''
+if ("$($env:SEAWORTHY_RUSTFLAGS) $($env:SEAWORTHY_CORE_RUSTFLAGS)".Contains('{workspace}')) {
+    $ManifestPath = $Manifest
+    if (-not [System.IO.Path]::IsPathRooted($ManifestPath)) { $ManifestPath = Join-Path (Get-Location).Path $ManifestPath }
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        Fail "{workspace} names the workspace manifest's directory, but $Manifest doesn't exist (SEAWORTHY_MANIFEST)"
+    }
+    $Workspace = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ManifestPath))
+}
+
+# The caller's extra rustflags for one build step: the words of $Flags,
+# {workspace}, {triple} and {cpu} (the step's target directory: its CPU, or
+# base for the launcher and helper) expanded. Refused: a flag choosing the
+# CPU or its features (the plan's alone: each core's record must name what
+# it was built for), a quote (the flags travel as TOML literal strings) and
+# any other {placeholder}.
+function Get-ExtraFlags([string]$Flags, [string]$Cpu) {
+    $Out = @()
+    foreach ($Word in @("$Flags" -split '\s+' | Where-Object { $_ })) {
+        if ($Word.Contains('target-cpu') -or $Word.Contains('target-feature')) {
+            Fail "extra rustflags may not choose the CPU or its features ('$Word'): the build plan sets them per core"
+        }
+        $Word = $Word.Replace('{workspace}', $Workspace).Replace('{triple}', $Triple).Replace('{cpu}', $Cpu)
+        if ($Word.Contains("'")) { Fail "extra rustflags may not hold a quote: $Word" }
+        if ($Word -match '\{[A-Za-z_]+\}') {
+            Fail "extra rustflags: unknown placeholder $($Matches[0]) in '$Word' ({workspace}, {triple} and {cpu} expand)"
+        }
+        $Out += $Word
+    }
+    return ,$Out
 }
 $Extra = @()
 if ($CargoArgs) { $Extra = @($CargoArgs -split '\s+' | Where-Object { $_ }) }
@@ -151,11 +193,19 @@ foreach ($Text in (Get-Content -LiteralPath $Plan)) {
             $Dir = $Fields[1]
             $CargoSelect = @($Fields[3] -split ' ' | Where-Object { $_ })
             $Config = @('--config', 'profile.release.strip=false')
-            if ($Fields[2] -ne '-') {
-                # TOML literal strings, no spaces: one argument, unchanged by
-                # Windows PowerShell 5.1's argument passing (which mangles
-                # double quotes).
-                $Quoted = @($Fields[2] -split ' ' | Where-Object { $_ } | ForEach-Object { "'" + $_ + "'" })
+            $Flags = @()
+            if ($Fields[2] -ne '-') { $Flags += @($Fields[2] -split ' ' | Where-Object { $_ }) }
+            # The caller's flags after the plan's: every build's, then (a
+            # core's step: its target directory is its CPU, never base) the
+            # cores'.
+            $Flags += Get-ExtraFlags $env:SEAWORTHY_RUSTFLAGS $Dir
+            if ($Dir -ne 'base') { $Flags += Get-ExtraFlags $env:SEAWORTHY_CORE_RUSTFLAGS $Dir }
+            if ($Flags.Count -gt 0) {
+                # TOML literal strings: one argument, unchanged by Windows
+                # PowerShell 5.1's argument passing (which mangles double
+                # quotes). A {workspace} path with a space stays inside its
+                # quotes, one argument.
+                $Quoted = @($Flags | ForEach-Object { "'" + $_ + "'" })
                 $Config += @('--config', ("target.$Triple.rustflags=[" + ($Quoted -join ',') + ']'))
             }
             $ManifestArgs = @('--manifest-path', $Manifest)

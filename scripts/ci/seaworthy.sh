@@ -62,6 +62,14 @@
 #   SEAWORTHY_MANIFEST        build: the workspace manifest (default Cargo.toml)
 #   SEAWORTHY_CARGO_ARGS      build: more cargo arguments for every build
 #                             (word-split, e.g. --features fips)
+#   SEAWORTHY_RUSTFLAGS       build: more rustflags for every build, after
+#                             the plan's (word-split; {workspace}, {triple}
+#                             and {cpu} expand: docs/packaging.md, "Extra
+#                             build flags")
+#   SEAWORTHY_CORE_RUSTFLAGS  build: more rustflags for the cores' builds
+#                             alone (the plan's steps whose target directory
+#                             isn't base), after SEAWORTHY_RUSTFLAGS', such
+#                             as -Cprofile-use={workspace}/pgo/{triple}.profdata
 #   SEAWORTHY_SERVER_JOBS     prepare: the server deploy jobs, comma-separated
 #   SEAWORTHY_CLIENT_JOBS     prepare: client jobs beside the publish job
 #                             (the web console's deploy), comma-separated
@@ -401,7 +409,7 @@ build() { # <triple>
     # The per-CPU flags go in as target.<triple>.rustflags, which joins the
     # product's own config; RUSTFLAGS would replace both.
     [ -z "${RUSTFLAGS:-}" ] && [ -z "${CARGO_ENCODED_RUSTFLAGS:-}" ] && [ -z "${CARGO_BUILD_RUSTFLAGS:-}" ] ||
-        fail "RUSTFLAGS (or CARGO_BUILD_RUSTFLAGS) is set: it would replace or drop the per-CPU flags (put product flags in .cargo/config.toml's target.<triple>.rustflags)"
+        fail "RUSTFLAGS (or CARGO_BUILD_RUSTFLAGS) is set: it would replace or drop the per-CPU flags (put product flags in .cargo/config.toml's target.<triple>.rustflags, or in SEAWORTHY_RUSTFLAGS / SEAWORTHY_CORE_RUSTFLAGS)"
     local identity
     identity="$(release_identity)"
     # The release's name, for the product's build scripts (its version
@@ -414,23 +422,42 @@ build() { # <triple>
     local manifest="${SEAWORTHY_MANIFEST:-Cargo.toml}"
     local kind a b c line=0 extra=()
     read -r -a extra <<<"${SEAWORTHY_CARGO_ARGS:-}"
+    # {workspace} in the caller's flags: the workspace root, absolute, as
+    # every crate's rustc needs it (cargo runs a dependency's rustc in that
+    # dependency's own directory).
+    local workspace=""
+    case "${SEAWORTHY_RUSTFLAGS:-} ${SEAWORTHY_CORE_RUSTFLAGS:-}" in
+        *"{workspace}"*)
+            [ -f "$manifest" ] || fail "{workspace} names the workspace manifest's directory, but $manifest doesn't exist (SEAWORTHY_MANIFEST)"
+            workspace="$(cd "$(dirname "$manifest")" && pwd -P)"
+            ;;
+    esac
     while IFS=$'\t' read -r kind a b c; do
         line=$((line + 1))
         case "$kind" in
             build)
                 local args=() flags=() rustflags=()
                 read -r -a args <<<"$c"
-                if [ "$b" != - ]; then
-                    # TOML literal strings, no spaces: one word every shell
-                    # passes as is.
-                    read -r -a flags <<<"$b"
+                [ "$b" = - ] || read -r -a flags <<<"$b"
+                # The caller's flags after the plan's: every build's, then
+                # (a core's step: its target directory is its CPU, never
+                # base) the cores'.
+                extra_flags "$a" "$triple" "$workspace" "${SEAWORTHY_RUSTFLAGS:-}"
+                flags+=("${expanded[@]}")
+                if [ "$a" != base ]; then
+                    extra_flags "$a" "$triple" "$workspace" "${SEAWORTHY_CORE_RUSTFLAGS:-}"
+                    flags+=("${expanded[@]}")
+                fi
+                if [ "${#flags[@]}" -gt 0 ]; then
+                    # TOML literal strings (extra_flags refuses a quote):
+                    # one word every shell passes as is.
                     local toml="" flag
                     for flag in "${flags[@]}"; do toml="$toml'$flag',"; done
                     rustflags=(--config "target.$triple.rustflags=[${toml%,}]")
                 fi
                 local manifest_args=(--manifest-path "$manifest")
                 case " $c " in *" --manifest-path "*) manifest_args=() ;; esac
-                say "cargo build ${args[*]} ($a${flags:+, ${flags[*]}})"
+                say "cargo build ${args[*]} ($a${flags[*]:+, ${flags[*]}})"
                 cargo build --quiet --release --locked --target "$triple" --target-dir "$target_root/$a" \
                     --config profile.release.strip=false "${rustflags[@]}" "${manifest_args[@]}" \
                     "${args[@]}" "${extra[@]}"
@@ -469,6 +496,36 @@ build() { # <triple>
         esac
     done < "$plan"
     say "built: $(find "$artifacts/$triple" -type f | wc -l) file(s) under $artifacts/$triple"
+}
+
+# The caller's extra rustflags for one build step, in `expanded`: the
+# words of <flags>, {workspace} (the workspace root, absolute), {triple}
+# and {cpu} (the step's target directory: its CPU, or base for the
+# launcher and helper) expanded. Refused: a flag choosing the CPU or its
+# features (the plan's alone: each core's requirement record must name
+# exactly what it was built for), a quote (the flags travel as TOML literal
+# strings) and any other {placeholder}.
+expanded=()
+extra_flags() { # <target dir> <triple> <workspace> <flags>
+    local cpu="$1" triple="$2" workspace="$3" words=() word
+    expanded=()
+    read -r -a words <<<"$4"
+    for word in "${words[@]}"; do
+        case "$word" in
+            *target-cpu* | *target-feature*)
+                fail "extra rustflags may not choose the CPU or its features (${word@Q}): the build plan sets them per core" ;;
+        esac
+        word="${word//\{workspace\}/$workspace}"
+        word="${word//\{triple\}/$triple}"
+        word="${word//\{cpu\}/$cpu}"
+        case "$word" in
+            *"'"*) fail "extra rustflags may not hold a quote: ${word@Q}" ;;
+        esac
+        if [[ "$word" =~ \{[A-Za-z_]+\} ]]; then
+            fail "extra rustflags: unknown placeholder ${BASH_REMATCH[0]} in ${word@Q} ({workspace}, {triple} and {cpu} expand)"
+        fi
+        expanded+=("$word")
+    done
 }
 
 # What this release is, before any setup: release_version,

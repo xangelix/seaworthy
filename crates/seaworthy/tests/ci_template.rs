@@ -2219,6 +2219,296 @@ fn the_build_step_names_the_release_for_the_product_s_build_scripts() {
     );
 }
 
+/// A product with a launcher, a helper and two cores, for the caller's
+/// extra rustflags.
+const EXTRA_FLAGS_PRODUCT: &str = r#"
+[defaults]
+vendor = "Acme"
+targets = ["x86-64-v3", "x86-64-v2"]
+channel = "stable"
+release-signatures = ["ml-dsa-87"]
+maintainer = "Acme <pkg@acme.test>"
+license = "MIT"
+
+[product.console]
+display-name = "Acme Console"
+description = "The Acme console."
+executable = "AcmeTool"
+core = "acme_core"
+helper = "AcmeToolUpdate"
+kind = "desktop"
+windows-directory = "Console"
+outputs = ["deb", "zip"]
+"#;
+
+/// The rustflags each build got, by its target directory's name: the
+/// `target.<triple>.rustflags=[…]` argument of every call a stub cargo
+/// recorded (one `.args` file per call, one argument per line).
+fn rustflags_by_target_dir(log: &Path, triple: &str) -> std::collections::BTreeMap<String, String> {
+    let prefix = format!("target.{triple}.rustflags=");
+    let mut seen = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(log).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "args") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let dir = lines
+            .iter()
+            .position(|l| *l == "--target-dir")
+            .map(|at| lines[at + 1])
+            .unwrap();
+        let name = Path::new(dir)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let flags = lines
+            .iter()
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .unwrap_or("")
+            .to_owned();
+        // The launcher and helper share `base`: both builds must agree.
+        if let Some(earlier) = seen.insert(name.clone(), flags.clone()) {
+            assert_eq!(earlier, flags, "{name}'s builds got different flags");
+        }
+    }
+    seen
+}
+
+/// The caller's extra rustflags (`SEAWORTHY_RUSTFLAGS` for every build,
+/// `SEAWORTHY_CORE_RUSTFLAGS` for the cores alone: PGO's `-Cprofile-use`,
+/// say) join each build's `target.<triple>.rustflags` after the plan's
+/// per-CPU flags, with `{workspace}` (absolute), `{triple}` and `{cpu}`
+/// expanded. Refused: a flag choosing the CPU or its features, a quote, an
+/// unknown placeholder, and `{workspace}` without the workspace manifest.
+#[test]
+fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
+    let triple = "x86_64-unknown-linux-gnu";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("seaworthy.toml"), EXTRA_FLAGS_PRODUCT).unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    tool_into(dir.path());
+    let plan = Command::new(dir.path().join("seaworthy/bin/seaworthy"))
+        .current_dir(dir.path())
+        .args(["build-plan", "--triple", triple])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{}", said(&plan));
+    std::fs::write(
+        dir.path().join(format!("seaworthy/plan-{triple}.tsv")),
+        &plan.stdout,
+    )
+    .unwrap();
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.path().join("log");
+    std::fs::create_dir_all(&log).unwrap();
+    script_at(
+        &bin.join("cargo"),
+        &format!(
+            "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
+             dir=\"\" name=\"\" kind=\"\"\n\
+             while [ $# -gt 0 ]; do case \"$1\" in --target-dir) dir=\"$2\"; shift ;; --bin) name=\"$2\"; kind=bin; shift ;; -p) name=\"$2\"; kind=lib; shift ;; esac; shift; done\n\
+             release=\"$dir/{triple}/release\"; mkdir -p \"$release\"\n\
+             if [ \"$kind\" = bin ]; then echo bin > \"$release/$name\"; else echo so > \"$release/lib$name.so\"; fi\n",
+            log = log.display()
+        ),
+    );
+    let path = path_with(&bin);
+    let build = |env: &[(&str, &str)]| {
+        for entry in std::fs::read_dir(&log).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let mut all = vec![("PATH", path.as_str())];
+        all.extend_from_slice(env);
+        step(dir.path(), &["build", triple], &all)
+    };
+    let workspace = dir.path().canonicalize().unwrap();
+    let out = build(&[
+        (
+            "SEAWORTHY_RUSTFLAGS",
+            "--cfg every_build -Cdebuginfo=line-tables-only",
+        ),
+        (
+            "SEAWORTHY_CORE_RUSTFLAGS",
+            "-Cprofile-use={workspace}/pgo/{triple}-{cpu}.profdata  -Cllvm-args=-pgo-warn-mismatch=false",
+        ),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    let flags = rustflags_by_target_dir(&log, triple);
+    assert_eq!(
+        flags["base"], "['--cfg','every_build','-Cdebuginfo=line-tables-only']",
+        "the launcher and helper get every build's flags, never the cores'"
+    );
+    for cpu in ["x86-64-v3", "x86-64-v2"] {
+        assert_eq!(
+            flags[cpu],
+            format!(
+                "['-C','target-cpu={cpu}','--cfg','every_build','-Cdebuginfo=line-tables-only',\
+                 '-Cprofile-use={}/pgo/{triple}-{cpu}.profdata','-Cllvm-args=-pgo-warn-mismatch=false']",
+                workspace.display()
+            ),
+            "{cpu}: the plan's flags first, then every build's, then the cores'"
+        );
+    }
+    // Without extra flags the launcher's build gets none at all.
+    let out = build(&[]);
+    assert!(out.status.success(), "{}", said(&out));
+    let flags = rustflags_by_target_dir(&log, triple);
+    assert_eq!(flags["base"], "");
+    assert_eq!(flags["x86-64-v3"], "['-C','target-cpu=x86-64-v3']");
+    for (variable, value, why) in [
+        (
+            "SEAWORTHY_CORE_RUSTFLAGS",
+            "-Ctarget-cpu=native",
+            "may not choose the CPU or its features",
+        ),
+        (
+            "SEAWORTHY_RUSTFLAGS",
+            "-C target-feature=+avx2",
+            "may not choose the CPU or its features",
+        ),
+        (
+            "SEAWORTHY_CORE_RUSTFLAGS",
+            "--cfg=feature='x'",
+            "may not hold a quote",
+        ),
+        (
+            "SEAWORTHY_RUSTFLAGS",
+            "-Cprofile-use={workspce}/a",
+            "unknown placeholder {workspce}",
+        ),
+    ] {
+        let out = build(&[(variable, value)]);
+        assert!(!out.status.success(), "{value}: {}", said(&out));
+        assert!(said(&out).contains(why), "{value}: {}", said(&out));
+    }
+    std::fs::remove_file(dir.path().join("Cargo.toml")).unwrap();
+    let out = build(&[(
+        "SEAWORTHY_CORE_RUSTFLAGS",
+        "-Cprofile-use={workspace}/a.profdata",
+    )]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("{workspace} names the workspace manifest's directory"),
+        "{}",
+        said(&out)
+    );
+}
+
+/// The Windows build adds the caller's extra rustflags as the Linux step
+/// does: after the plan's (static C runtime included), the cores' on the
+/// cores alone, `{workspace}` absolute (a path with a space stays one
+/// argument), and the same refusals.
+#[test]
+fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
+    let have_pwsh = pwsh()
+        .args(["-NoProfile", "-Command", "exit 0"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !have_pwsh {
+        eprintln!(
+            "SKIPPED: pwsh is not installed (Windows PowerShell 5.1 runs this script on the runner)"
+        );
+        return;
+    }
+    let triple = "x86_64-pc-windows-msvc";
+    let top = tempfile::tempdir().unwrap();
+    // A workspace whose path holds a space.
+    let dir = top.path().join("acme product");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("seaworthy.toml"), EXTRA_FLAGS_PRODUCT).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+    tool_into(&dir);
+    let plan = Command::new(dir.join("seaworthy/bin/seaworthy"))
+        .current_dir(&dir)
+        .args(["build-plan", "--triple", triple])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{}", said(&plan));
+    std::fs::write(
+        dir.join(format!("seaworthy/plan-{triple}.tsv")),
+        &plan.stdout,
+    )
+    .unwrap();
+    let bin = dir.join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("log");
+    std::fs::create_dir_all(&log).unwrap();
+    script_at(&bin.join("cargo"), &windows_cargo_stub(&log));
+    let script = repo_root().join("scripts/ci/seaworthy-build.ps1");
+    let run = |env: &[(&str, &str)]| {
+        for entry in std::fs::read_dir(&log).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir.join("seaworthy/target"));
+        let mut command = pwsh();
+        command
+            .current_dir(&dir)
+            .args(["-NoProfile", "-NonInteractive", "-File"])
+            .arg(&script)
+            .env("PATH", path_with(&bin))
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
+            .env_remove("SEAWORTHY_RUSTFLAGS")
+            .env_remove("SEAWORTHY_CORE_RUSTFLAGS");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command.output().unwrap()
+    };
+    let out = run(&[
+        ("SEAWORTHY_RUSTFLAGS", "--cfg every_build"),
+        (
+            "SEAWORTHY_CORE_RUSTFLAGS",
+            "-Cprofile-use={workspace}/pgo/{triple}-{cpu}.profdata",
+        ),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    let flags = rustflags_by_target_dir(&log, triple);
+    assert_eq!(
+        flags["base"],
+        "['-C','target-feature=+crt-static','--cfg','every_build']"
+    );
+    let workspace = dir.canonicalize().unwrap();
+    for cpu in ["x86-64-v3", "x86-64-v2"] {
+        assert_eq!(
+            flags[cpu],
+            format!(
+                "['-C','target-cpu={cpu}','-C','target-feature=+crt-static','--cfg','every_build',\
+                 '-Cprofile-use={}/pgo/{triple}-{cpu}.profdata']",
+                workspace.display()
+            )
+        );
+    }
+    for (variable, value, why) in [
+        (
+            "SEAWORTHY_CORE_RUSTFLAGS",
+            "-Ctarget-cpu=native",
+            "may not choose the CPU or its features",
+        ),
+        (
+            "SEAWORTHY_RUSTFLAGS",
+            "--cfg=feature='x'",
+            "may not hold a quote",
+        ),
+        (
+            "SEAWORTHY_CORE_RUSTFLAGS",
+            "-Cprofile-use={workspce}/a",
+            "unknown placeholder {workspce}",
+        ),
+    ] {
+        let out = run(&[(variable, value)]);
+        assert!(!out.status.success(), "{value}: {}", said(&out));
+        assert!(said(&out).contains(why), "{value}: {}", said(&out));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The MSI jobs
 

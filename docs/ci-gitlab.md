@@ -222,6 +222,16 @@ ships must not depend on what another pipeline left in a cache.
 `target.'cfg(…)'.rustflags`), which join the per-CPU flags. Cargo ignores `build.rustflags` once any
 target flags are set, so `build-plan` refuses it in the repository's cargo configuration, and the
 build refuses `RUSTFLAGS` and `CARGO_BUILD_RUSTFLAGS`, which would replace or drop the per-CPU flags.
+Flags that only CI should add (profile-guided optimization's `-Cprofile-use`, say) go in the build
+jobs' `SEAWORTHY_RUSTFLAGS` and `SEAWORTHY_CORE_RUSTFLAGS` variables
+([packaging.md](packaging.md#extra-build-flags)); set them on the template's jobs in the product's
+CI (GitLab merges a job's `variables`), and any other environment a build needs the same way:
+
+```yaml
+seaworthy-build-linux:
+  variables:
+    SEAWORTHY_CORE_RUSTFLAGS: -Cprofile-use={workspace}/pgo/{triple}.profdata
+```
 
 ## The release order
 
