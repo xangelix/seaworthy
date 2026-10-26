@@ -1344,11 +1344,13 @@ chmod 0755 /run/seaworthy-conformance-polkit.sh"#
         );
         // Active means forked. Before systemd 255 the child is a copy of
         // systemd (root, every capability) until it executes the program:
-        // wait for the program itself. A sandbox systemd can't set up never
-        // gets there, and the poll shows the unit's journal.
+        // wait for the program itself, by its command line (world-readable;
+        // its `exe` link needs CAP_SYS_PTRACE, which a container's root
+        // lacks). A sandbox systemd can't set up never gets there, and the
+        // poll shows the unit's journal.
         self.poll(
             &format!(
-                "[ \"$(readlink /proc/$(systemctl show -p MainPID --value {service})/exe)\" = \"$(readlink -f '{}')\" ]",
+                "[ \"$(tr '\\0' '\\n' < /proc/$(systemctl show -p MainPID --value {service})/cmdline | head -n 1)\" = '{}' ]",
                 self.lane.product.executable
             ),
             60,
