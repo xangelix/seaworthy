@@ -342,8 +342,9 @@ what `repo` built to an S3-compatible store, under `publish.toml`'s prefix. The 
    repository package's URL against `public-url`, the published plans (the current one and the
    history in `plans/`) for this repository and an older date (an identical current plan means
    already published), and every immutable path against the bucket by the SHA-256 `publish` stored
-   as its metadata (else the store's checksum, else its bytes): present with the same bytes, it's
-   skipped; with other bytes, the publication is refused.
+   as its metadata (else the store's checksum, else its bytes, read under a deadline sized by the
+   object and never past its stated size): present with the same bytes, it's skipped; with other
+   bytes, the publication is refused.
 2. **Then, in order:** the missing immutable files, create-only (`If-None-Match: *`) with
    `Cache-Control: public, max-age=31536000, immutable`; the plan into `plans/` (from here on it may
    be live); the indexes in the plan's order with a short `max-age` (`index-max-age-seconds`,
@@ -351,7 +352,8 @@ what `repo` built to an S3-compatible store, under `publish.toml`'s prefix. The 
    Every upload carries its SHA-256, which the store verifies, and is read back at once: its size,
    SHA-256 metadata, `Content-Type` and `Cache-Control` must be what was sent.
 3. **Afterwards**, every index, every release manifest and the plan are fetched back through
-   `public-url` (with a cache-busting query) and compared byte for byte.
+   `public-url` (with a cache-busting query) and compared byte for byte. Every transfer, upload,
+   read or fetch-back, has a deadline of two minutes plus its size at 256 KiB/s.
 4. **Pruning:** a file the current plan doesn't list is deleted once the retention period
    (`retention-days`, default 30) has passed since the plan after the last one listing it went live;
    a file no plan ever listed, since it was written. Only keys under the repository's own

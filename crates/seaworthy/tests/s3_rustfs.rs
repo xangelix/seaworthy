@@ -218,7 +218,10 @@ async fn rustfs_lists_pages_streams_and_deletes() {
 
     // A streamed read is byte-exact (a key needing percent-encoding too).
     for key in ["rpm/a+b c.txt", "rpm/repodata/repomd.xml"] {
-        let mut stream = backend.get_stream(&spath(key)).await.expect("stream");
+        let mut stream = backend
+            .get_stream(&spath(key), std::time::Duration::from_secs(60))
+            .await
+            .expect("stream");
         let mut body = Vec::new();
         while let Some(chunk) = stream.next().await {
             body.extend_from_slice(&chunk.expect("chunk"));

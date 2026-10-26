@@ -911,6 +911,9 @@ struct Script {
     drop_cache_control: bool,
     /// DELETE is refused (403).
     refuse_delete: bool,
+    /// A GET of a key ending with this answers these bytes after the
+    /// object's (a HEAD still states the object's size).
+    longer_get: Option<(String, Vec<u8>)>,
 }
 
 /// One logged request: method, key, `If-None-Match`.
@@ -1139,6 +1142,14 @@ fn handle(
             }
             for (k, v) in &object.metadata {
                 out.push((format!("x-amz-meta-{k}"), v.clone()));
+            }
+            if method == "GET"
+                && let Some((suffix, extra)) = &script.longer_get
+                && key.ends_with(suffix.as_str())
+            {
+                let mut body = object.body.clone();
+                body.extend_from_slice(extra);
+                return response("200 OK", &out, &body, false);
             }
             response("200 OK", &out, &object.body, method == "HEAD")
         }
@@ -1427,6 +1438,23 @@ fn objects_without_the_publishers_metadata_are_compared_by_their_bytes() {
         .unwrap_err()
         .to_string();
     assert!(err.contains(&format!("{} (1 bytes)", files[0].0)), "{err}");
+    // The size its HEAD states, but a body running past it: refused, and
+    // nothing uploaded.
+    let s3 = MemoryS3::start();
+    s3.plant(&format!("packages/{}", files[0].0), &files[0].1);
+    s3.script.lock().unwrap().longer_get = Some((files[0].0.clone(), vec![b'x'; 70_000]));
+    let err = publish(&repo, &s3.target(), &credentials(), &options(DATE))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(&format!(
+            "{} (more than its {} bytes when read)",
+            files[0].0,
+            files[0].1.len()
+        )),
+        "{err}"
+    );
+    assert!(s3.puts().is_empty(), "{:?}", s3.puts());
 }
 
 #[test]

@@ -390,8 +390,12 @@ fn spath(s: &str) -> StoragePath {
     StoragePath::new(s).expect("valid test path")
 }
 
+/// A streamed read's deadline in these tests: generous, nothing here is
+/// slow.
+const STREAM_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn collect(backend: &S3Backend, path: &StoragePath) -> Result<Vec<u8>, StorageError> {
-    let mut stream = backend.get_stream(path).await?;
+    let mut stream = backend.get_stream(path, STREAM_DEADLINE).await?;
     let mut out = Vec::new();
     while let Some(chunk) = stream.next().await {
         out.extend_from_slice(&chunk?);
@@ -764,7 +768,7 @@ async fn management_calls_are_bounded_by_the_configured_timeout() {
     for result in [
         backend.head_object_detail(&path).await.map(drop),
         backend.get_object(&path, 10).await.map(drop),
-        backend.get_stream(&path).await.map(drop),
+        backend.get_stream(&path, STREAM_DEADLINE).await.map(drop),
         backend.delete_object(&path).await,
         backend
             .put_object(&path, Bytes::from_static(b"x"), &PutOptions::create_only())
@@ -780,6 +784,51 @@ async fn management_calls_are_bounded_by_the_configured_timeout() {
         start.elapsed() < std::time::Duration::from_secs(10),
         "bounded at the configured knob, not the TCP stack's mercy"
     );
+    server.stop().await;
+}
+
+/// A streamed read runs under its own total deadline: a store trickling
+/// a byte at a time (each well inside the per-read timeout) can't keep
+/// the reader past it. Deadlines out of range are refused before any
+/// request.
+#[tokio::test]
+async fn a_streamed_read_is_bounded_by_its_total_deadline() {
+    let server = http_stub::spawn_trickling(1000, std::time::Duration::from_millis(100)).await;
+    let backend = backend_on(&server);
+    let path = spath("apt/pool/a.deb");
+    let start = std::time::Instant::now();
+    let mut stream = backend
+        .get_stream(&path, std::time::Duration::from_millis(500))
+        .await
+        .expect("the head arrives at once");
+    let mut read = 0;
+    let ended = loop {
+        match stream.next().await {
+            Some(Ok(chunk)) => read += chunk.len(),
+            Some(Err(error)) => break error,
+            None => panic!("the trickle ended the body after {read} bytes"),
+        }
+    };
+    assert!(matches!(ended, StorageError::Timeout), "{ended:?}");
+    assert!(read < 1000, "{read}");
+    assert!(stream.next().await.is_none(), "nothing after the timeout");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    for deadline in [
+        std::time::Duration::ZERO,
+        seaworthy::s3::MAX_PUT_TIMEOUT + std::time::Duration::from_secs(1),
+    ] {
+        assert!(
+            matches!(
+                backend.get_stream(&path, deadline).await.map(drop),
+                Err(StorageError::Validation(_))
+            ),
+            "{deadline:?}"
+        );
+    }
     server.stop().await;
 }
 

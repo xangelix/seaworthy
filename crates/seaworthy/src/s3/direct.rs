@@ -47,8 +47,9 @@ pub const USER_METADATA_PREFIX: &str = "x-amz-meta-";
 /// The most user metadata entries one put carries (S3 allows 2 KiB in all).
 pub const MAX_USER_METADATA: usize = 8;
 
-/// The longest deadline a single put may ask for: the slowest plausible
-/// upload of [`MAX_SINGLE_PUT_BYTES`] still ends.
+/// The longest deadline a single put, or a streamed read
+/// ([`S3Backend::get_stream`]), may ask for: the slowest plausible
+/// transfer of [`MAX_SINGLE_PUT_BYTES`] still ends.
 pub const MAX_PUT_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 
 /// How [`S3Backend::put_object`] writes.

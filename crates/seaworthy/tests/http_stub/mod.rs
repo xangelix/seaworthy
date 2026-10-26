@@ -292,6 +292,50 @@ fn status_line(code: u16) -> &'static str {
     }
 }
 
+/// A raw HTTP server answering every request with a 200 declaring
+/// `length` bytes, then trickling the body a byte every `every` (each well
+/// inside a client's per-read timeout), until the client hangs up.
+pub async fn spawn_trickling(length: u64, every: std::time::Duration) -> StubServer {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr").to_string();
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = &mut rx => break,
+            };
+            let Ok((mut socket, _)) = accepted else {
+                continue;
+            };
+            tokio::spawn(async move {
+                if read_request(&mut socket).await.is_none() {
+                    return;
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {length}\r\n\r\n"
+                );
+                if socket.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                for _ in 0..length {
+                    if socket.write_all(b"x").await.is_err() || socket.flush().await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(every).await;
+                }
+            });
+        }
+    });
+    StubServer {
+        addr,
+        shutdown: Some(tx),
+        task,
+    }
+}
+
 /// A raw HTTP server that accepts connections and NEVER responds (the
 /// timeout tests' black hole). Sockets are held until `stop`.
 pub async fn spawn_hanging() -> StubServer {

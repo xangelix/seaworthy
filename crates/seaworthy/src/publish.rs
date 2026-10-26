@@ -93,11 +93,12 @@ const MAX_KEY_BYTES: usize = 1024;
 const MAX_PLAN_BYTES: u64 = 64 * 1024 * 1024;
 /// How many times a request that may succeed on retry is tried.
 const ATTEMPTS: u32 = 4;
-/// The slowest upload a put waits for (bytes per second), on top of a
-/// fixed allowance: a 1 GiB file gets about 70 minutes.
-const MIN_UPLOAD_RATE: u64 = 256 * 1024;
-/// A fetch-back's whole deadline.
-const FETCH_DEADLINE: Duration = Duration::from_secs(600);
+/// The slowest transfer a put, a read of an object's bytes or a fetch-back
+/// waits for (bytes per second), on top of a fixed allowance
+/// ([`transfer_deadline`]): a 1 GiB file gets about 70 minutes.
+const MIN_TRANSFER_RATE: u64 = 256 * 1024;
+/// The fixed allowance of every transfer's deadline (seconds).
+const TRANSFER_BASE_SECONDS: u64 = 120;
 
 /// The most `ListObjectsV2` pages one listing follows (at the default
 /// 1000 keys a page, a million keys): a store answering truncated pages
@@ -738,6 +739,17 @@ enum Compared {
     Other(String),
 }
 
+/// An object's bytes, read back and hashed ([`Store::hash_object`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Hashed {
+    /// Exactly the size expected: their SHA-256.
+    Digest(Vec<u8>),
+    /// Fewer bytes than expected: how many.
+    Short(u64),
+    /// More than expected: reading stopped at the first chunk past them.
+    Long,
+}
+
 /// A plan in the history, when it was written there, and its digest.
 #[derive(Debug, Clone)]
 pub struct Published {
@@ -855,7 +867,19 @@ impl Store {
             .map_err(|_| DistError::Layout(format!("{sha256:?} isn't a hex SHA-256")))?;
         let found = match stored_sha256(&detail) {
             Some(found) => found,
-            None => self.hash_object(key, size).await?,
+            None => match self.hash_object(key, size, transfer_deadline(size)).await? {
+                Hashed::Digest(digest) => digest,
+                Hashed::Short(read) => {
+                    return Ok(Compared::Other(format!(
+                        "{read} of its {size} bytes when read"
+                    )));
+                }
+                Hashed::Long => {
+                    return Ok(Compared::Other(format!(
+                        "more than its {size} bytes when read"
+                    )));
+                }
+            },
         };
         Ok(if found == expected {
             Compared::Same
@@ -864,28 +888,43 @@ impl Store {
         })
     }
 
-    /// The object's bytes, streamed and hashed (at most `size` of them; an
-    /// empty digest when there are more or fewer). The store's stream is
-    /// unbounded: reading stops at the first chunk past `size`.
-    async fn hash_object(&self, key: &str, size: u64) -> Result<Vec<u8>, DistError> {
+    /// The object's bytes, streamed and hashed: the request and the whole
+    /// body within `deadline` ([`transfer_deadline`] of the size), so a
+    /// store trickling bytes can't hold the publication past it. The
+    /// store's stream is unbounded in size: reading stops at the first
+    /// chunk past `size`.
+    async fn hash_object(
+        &self,
+        key: &str,
+        size: u64,
+        deadline: Duration,
+    ) -> Result<Hashed, DistError> {
         use futures_util::StreamExt as _;
         let path = Self::path(key)?;
-        let mut stream =
-            Self::retried(&format!("reading {key}"), || self.backend.get_stream(&path)).await?;
+        let mut stream = Self::retried(&format!("reading {key}"), || {
+            self.backend.get_stream(&path, deadline)
+        })
+        .await?;
         let mut hasher = seaworthy_crypto::digest::Sha256::new();
         let mut read = 0_u64;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DistError::Tool(format!("reading {key}: {e}")))?;
-            read += chunk.len() as u64;
+            let chunk = chunk.map_err(|e| match e {
+                StorageError::Timeout => DistError::Tool(format!(
+                    "reading {key}: not all of its {size} bytes within {} s",
+                    deadline.as_secs_f64().ceil()
+                )),
+                e => DistError::Tool(format!("reading {key}: {e}")),
+            })?;
+            read = read.saturating_add(chunk.len() as u64);
             if read > size {
-                break;
+                return Ok(Hashed::Long);
             }
             hasher.update(&chunk);
         }
         if read != size {
-            return Ok(Vec::new());
+            return Ok(Hashed::Short(read));
         }
-        Ok(hasher.finish().to_vec())
+        Ok(Hashed::Digest(hasher.finish().to_vec()))
     }
 
     /// Uploads `body`, then reads the object back: its size, SHA-256, type
@@ -905,7 +944,7 @@ impl Store {
             .with_cache_control(cache_control)
             .with_metadata(SHA256_METADATA, sha256)
             .with_max_body_bytes(MAX_FILE_BYTES)
-            .with_timeout(upload_deadline(size));
+            .with_timeout(transfer_deadline(size));
         options.create_only = create_only;
         let outcome = Self::retried(&format!("uploading {key}"), || {
             self.backend.put_object(&path, body.clone(), &options)
@@ -1041,9 +1080,13 @@ fn stored_sha256(detail: &ObjectDetail) -> Option<Vec<u8>> {
         .filter(|digest| digest.len() == 32)
 }
 
-/// A put's deadline: two minutes, plus the body at [`MIN_UPLOAD_RATE`].
-fn upload_deadline(size: u64) -> Duration {
-    Duration::from_secs(120 + size / MIN_UPLOAD_RATE).min(crate::s3::MAX_PUT_TIMEOUT)
+/// The deadline of a transfer of `size` bytes, whichever way (a put, a
+/// read of an object's bytes, a fetch-back through the public URL): two
+/// minutes, plus the body at [`MIN_TRANSFER_RATE`], at most
+/// [`crate::s3::MAX_PUT_TIMEOUT`].
+fn transfer_deadline(size: u64) -> Duration {
+    Duration::from_secs(TRANSFER_BASE_SECONDS.saturating_add(size / MIN_TRANSFER_RATE))
+        .min(crate::s3::MAX_PUT_TIMEOUT)
 }
 
 /// What pruning deletes: of the `listed` keys (each with its modification
@@ -1146,12 +1189,13 @@ async fn verify_public(
     checks.push((CURRENT_PLAN, &plan_digest, plan_bytes.len() as u64));
     for (key, sha256, size) in &checks {
         let url = public_file_url(public_url, key, sha256);
-        let fetched = tokio::time::timeout(FETCH_DEADLINE, fetch(client, &url, *size))
+        let deadline = transfer_deadline(*size);
+        let fetched = tokio::time::timeout(deadline, fetch(client, &url, *size))
             .await
             .map_err(|_| {
                 DistError::Tool(format!(
                     "published, but {url} doesn't serve it: no full answer within {} s",
-                    FETCH_DEADLINE.as_secs()
+                    deadline.as_secs()
                 ))
             })?
             .map_err(|why| {
@@ -1176,7 +1220,8 @@ pub fn public_file_url(public_url: &str, key: &str, sha256: &str) -> String {
     )
 }
 
-/// One GET, its body at most `size` bytes.
+/// One GET, its body at most `size` bytes: reading stops at the first
+/// chunk past them (the caller bounds the time).
 async fn fetch(client: &reqwest::Client, url: &str, size: u64) -> Result<Vec<u8>, String> {
     let mut response = client
         .get(url)
@@ -1504,14 +1549,95 @@ mod tests {
         );
     }
 
+    /// A store answering every request with a 200 declaring `length`
+    /// bytes, then writing `chunk` every `every` until the client hangs up.
+    async fn store_writing(length: u64, chunk: &'static [u8], every: Duration) -> Store {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n");
+                    if socket.write_all(answer.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    while socket.write_all(chunk).await.is_ok() {
+                        tokio::time::sleep(every).await;
+                    }
+                });
+            }
+        });
+        let target = Target {
+            endpoint,
+            bucket: "files".into(),
+            region: "auto".into(),
+            prefix: "packages".into(),
+            public_url: None,
+            index_max_age_seconds: 60,
+            retention_days: 30,
+        };
+        let credentials = Credentials::new("AKIDEXAMPLE".into(), "secret".into(), None);
+        Store::new(&target, &credentials).unwrap()
+    }
+
+    #[tokio::test]
+    async fn reading_an_object_is_bounded_by_its_deadline() {
+        // A byte every 100 ms of a 1000-byte object: well inside the
+        // client's per-read timeout, never done within the deadline.
+        let store = store_writing(1000, b"x", Duration::from_millis(100)).await;
+        let start = std::time::Instant::now();
+        let err = store
+            .hash_object("apt/a.deb", 1000, Duration::from_millis(500))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reading apt/a.deb: not all of its 1000 bytes within 1 s"),
+            "{err}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_an_object_stops_at_the_first_chunk_past_its_size() {
+        // An endless body claiming 1 GiB, as fast as it goes: refused at
+        // once, not read to the deadline.
+        static CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+        let store = store_writing(1 << 30, &CHUNK, Duration::ZERO).await;
+        let start = std::time::Instant::now();
+        let hashed = store
+            .hash_object("apt/a.deb", 6, Duration::from_secs(600))
+            .await
+            .unwrap();
+        assert_eq!(hashed, Hashed::Long);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
     #[test]
-    fn upload_deadlines_scale_with_the_body() {
-        assert_eq!(upload_deadline(0), Duration::from_secs(120));
+    fn transfer_deadlines_scale_with_the_body() {
+        assert_eq!(transfer_deadline(0), Duration::from_secs(120));
         assert_eq!(
-            upload_deadline(MAX_FILE_BYTES),
+            transfer_deadline(MAX_FILE_BYTES),
             Duration::from_secs(120 + 4096)
         );
-        assert_eq!(upload_deadline(u64::MAX), crate::s3::MAX_PUT_TIMEOUT);
+        assert_eq!(transfer_deadline(u64::MAX), crate::s3::MAX_PUT_TIMEOUT);
     }
 
     #[test]

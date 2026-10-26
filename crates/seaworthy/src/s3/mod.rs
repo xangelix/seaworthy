@@ -13,7 +13,7 @@
 //! - **Verified reads**: [`S3Backend::head_object_detail`] (size, type,
 //!   cache rule, stored SHA-256, user metadata), [`S3Backend::get_object`]
 //!   (bounded, checksum-verified), [`S3Backend::get_stream`] (for objects
-//!   the caller hashes in flight).
+//!   the caller hashes in flight, under a total deadline).
 //! - [`S3Backend::list_objects_v2`] (one page under a prefix) and
 //!   [`S3Backend::delete_object`] (idempotent).
 //! - **Addressing**: path-style for custom endpoints (R2/RustFS),
@@ -168,7 +168,8 @@ pub struct S3Config {
     /// Total deadline per management call (`HeadObject`, `GetObject`
     /// including its bounded body read, `DeleteObject`, `ListObjectsV2`, a
     /// `PutObject` without its own deadline, the head of a
-    /// [`S3Backend::get_stream`]). Floored at 100 ms at the use site.
+    /// [`S3Backend::get_stream`], within that read's own deadline). Floored
+    /// at 100 ms at the use site.
     pub management_timeout: Duration,
 }
 
@@ -740,22 +741,48 @@ impl S3Backend {
     }
 
     /// `GetObject` as a stream, header-signed (for an object the caller
-    /// hashes in flight). The deadline bounds the request and the response
-    /// head; the body stream is deliberately unbounded in time (objects can
-    /// be large: stall detection there is the client's per-read timeout)
-    /// and in size (the CALLER bounds what it reads).
+    /// hashes in flight), under ONE total `deadline` from this call on: the
+    /// request and the response head (within the management deadline too)
+    /// and every chunk of the body. A body still arriving at the deadline
+    /// yields [`StorageError::Timeout`] and the stream ends there: the
+    /// client's per-read timeout alone would let a store trickle a byte
+    /// every few seconds for ever. Size the deadline with the object, as a
+    /// put's ([`PutOptions::timeout`]). The stream is unbounded in size: the
+    /// CALLER stops reading past what it expects.
     ///
     /// # Errors
-    /// Request failures (a missing key is [`StorageError::S3`] `NoSuchKey`
-    /// or [`StorageError::Http`] 404); [`StorageError::Timeout`].
-    pub async fn get_stream(&self, path: &StoragePath) -> Result<ObjectStream, StorageError> {
-        let response = self
-            .management_request("GET", path, Vec::new(), Vec::new(), Bytes::new())
-            .await?;
-        Ok(Box::pin(
+    /// [`StorageError::Validation`] for a zero deadline or one over
+    /// [`MAX_PUT_TIMEOUT`]; request failures (a missing key is
+    /// [`StorageError::S3`] `NoSuchKey` or [`StorageError::Http`] 404);
+    /// [`StorageError::Timeout`].
+    pub async fn get_stream(
+        &self,
+        path: &StoragePath,
+        deadline: Duration,
+    ) -> Result<ObjectStream, StorageError> {
+        let out_of_range = || {
+            StorageError::Validation(format!(
+                "a streamed read's deadline must be between 1 ns and {} s",
+                MAX_PUT_TIMEOUT.as_secs()
+            ))
+        };
+        if deadline.is_zero() || deadline > MAX_PUT_TIMEOUT {
+            return Err(out_of_range());
+        }
+        let ends = tokio::time::Instant::now()
+            .checked_add(deadline)
+            .ok_or_else(out_of_range)?;
+        let response = tokio::time::timeout_at(
+            ends,
+            self.management_request("GET", path, Vec::new(), Vec::new(), Bytes::new()),
+        )
+        .await
+        .map_err(|_| StorageError::Timeout)??;
+        Ok(until(
             response
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(StorageError::transport)),
+            ends,
         ))
     }
 
@@ -856,6 +883,27 @@ impl S3Backend {
     }
 }
 
+/// `body`'s chunks until `ends`: a chunk still awaited then yields
+/// [`StorageError::Timeout`], and nothing follows it (nor an error).
+fn until<S>(body: S, ends: tokio::time::Instant) -> ObjectStream
+where
+    S: futures_util::Stream<Item = Result<Bytes, StorageError>> + Send + 'static,
+{
+    let body = Box::pin(body);
+    Box::pin(futures_util::stream::unfold(
+        Some(body),
+        move |body| async move {
+            let mut body = body?;
+            match tokio::time::timeout_at(ends, body.next()).await {
+                Ok(Some(Ok(chunk))) => Some((Ok(chunk), Some(body))),
+                Ok(Some(Err(error))) => Some((Err(error), None)),
+                Ok(None) => None,
+                Err(_) => Some((Err(StorageError::Timeout), None)),
+            }
+        },
+    ))
+}
+
 /// Loopback hosts exempt from the https-only rule.
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_matches(|c| c == '[' || c == ']');
@@ -926,6 +974,57 @@ fn checksum_matches(reported: &str, expected: &[u8; 32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A body that trickles a byte every `every`, for ever.
+    fn trickle(every: Duration) -> impl futures_util::Stream<Item = Result<Bytes, StorageError>> {
+        futures_util::stream::unfold((), move |()| async move {
+            tokio::time::sleep(every).await;
+            Some((Ok(Bytes::from_static(b"x")), ()))
+        })
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_ends_with_a_timeout_at_its_deadline() {
+        let start = tokio::time::Instant::now();
+        let ends = start.checked_add(Duration::from_millis(200)).unwrap();
+        let mut body = until(trickle(Duration::from_millis(20)), ends);
+        let mut chunks = 0_usize;
+        let ended = loop {
+            match body.next().await {
+                Some(Ok(_)) => chunks = chunks.saturating_add(1),
+                Some(Err(error)) => break error,
+                None => panic!("a trickling body never ends by itself"),
+            }
+        };
+        assert!(matches!(ended, StorageError::Timeout), "{ended:?}");
+        assert!(chunks > 0, "the chunks before the deadline come through");
+        assert!(body.next().await.is_none(), "nothing after the timeout");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_body_within_its_deadline_passes_whole_and_errors_end_it() {
+        let chunks = [Ok(Bytes::from_static(b"ab")), Ok(Bytes::from_static(b"c"))];
+        let ends = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .unwrap();
+        let mut body = until(futures_util::stream::iter(chunks), ends);
+        let mut read = Vec::new();
+        while let Some(chunk) = body.next().await {
+            read.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(read, b"abc");
+        let failing = [
+            Err(StorageError::HashMismatch),
+            Ok(Bytes::from_static(b"never")),
+        ];
+        let mut body = until(futures_util::stream::iter(failing), ends);
+        assert!(matches!(
+            body.next().await,
+            Some(Err(StorageError::HashMismatch))
+        ));
+        assert!(body.next().await.is_none(), "an error ends the stream");
+    }
 
     #[test]
     fn loopback_hosts_are_exactly_the_loopback_addresses() {
