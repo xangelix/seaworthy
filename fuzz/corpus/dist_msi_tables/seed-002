@@ -1,0 +1,3 @@
+CREATE TABLE `Directory` (`Directory` CHAR(72) NOT NULL, `Directory_Parent` CHAR(72), `DefaultDir` CHAR(255) NOT NULL PRIMARY KEY `Directory`)
+INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('A', 'B', 'a')
+INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('B', 'A', 'b')

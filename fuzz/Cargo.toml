@@ -42,7 +42,8 @@ seaworthy-service = { path = "../crates/seaworthy-service", features = ["fuzzing
 seaworthy-updater = { path = "../crates/seaworthy-updater", features = ["fuzzing"] }
 # The CLI's parsers and writers: the release version, seaworthy.toml, the
 # ELF/PE readers verify runs, the archive writers and the version-resource
-# stamper (dist_inputs, dist_archive, dist_pe), and with `publish-s3` the S3
+# stamper (dist_inputs, dist_archive, dist_pe), adopt-msi's MSI table
+# readers (dist_msi_tables), and with `publish-s3` the S3
 # client's XML parsers, key rules and SigV4 encoding (s3_xml; public API,
 # so no seam).
 seaworthy = { path = "../crates/seaworthy", default-features = false, features = ["publish-s3"] }
@@ -67,6 +68,13 @@ bench = false
 [[bin]]
 name = "dist_inputs"
 path = "fuzz_targets/dist_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dist_msi_tables"
+path = "fuzz_targets/dist_msi_tables.rs"
 test = false
 doc = false
 bench = false

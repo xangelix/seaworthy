@@ -1,0 +1,23 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Acme" Manufacturer="Acme" Version="1.0.0" UpgradeCode="{6A1F0C2E-3B4D-4E5F-9A6B-7C8D9E0F1A2B}">
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[InstallDir]" After="CostFinalize" Sequence="execute" />
+    <StandardDirectory Id="System64Folder" />
+    <CustomAction Id="ServiceRecovery" Directory="System64Folder" ExeCommand="sc.exe failure AcmeAgent" Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence><Custom Action="ServiceRecovery" After="InstallServices" Condition="NOT Installed" /></InstallExecuteSequence>
+    <StandardDirectory Id="ProgramFiles64Folder"><Directory Id="VendorDir" Name="Acme"><Directory Id="InstallDir" Name="Agent" /></Directory></StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <Feature Id="Main">
+      <Component Id="c000" Directory="InstallDir">
+        <File Id="f000" Source="!(bindpath.tree)\Acme\Agent\AcmeTool.exe" KeyPath="yes" />
+        <ServiceInstall Id="Service" Name="AcmeAgent" DisplayName="Acme" Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes" Account="LocalSystem">
+          <PermissionEx Sddl="D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)" />
+        </ServiceInstall>
+        <ServiceControl Id="ServiceControl" Name="AcmeAgent" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+      <Component Id="Shortcut" Directory="ProgramMenuFolder">
+        <Shortcut Id="Shortcut" Name="Acme" Target="[#f000]" WorkingDirectory="InstallDir" />
+        <RegistryValue Root="HKCU" Key="SOFTWARE\Acme" Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

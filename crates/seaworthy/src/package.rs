@@ -748,6 +748,9 @@ impl Default for MsiTools {
     }
 }
 
+/// The most one table's `msiinfo export -s` may print.
+const MAX_TABLE_EXPORT: usize = 16 << 20;
+
 /// How long one msitools run may take (a large payload extracts in
 /// seconds; this is a hang's deadline).
 const MSI_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
@@ -766,17 +769,24 @@ const MSI_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600
 /// what's signed and listed. Returns the new artifacts.
 ///
 /// The checks catch an MSI that isn't this release's (another tree, a
-/// stale build, another version or product). They aren't a boundary
-/// against the Windows runner: it builds the Windows binaries [`package`]
-/// signs, so it's trusted for a Windows release, and the MSI's
-/// tables (its custom actions, services, registry values and ACLs) are
-/// taken as WiX built them from the `.wxs`.
+/// stale build, another version or product), and one whose tables do more
+/// than the `.wxs` declares ([`crate::msi_check`]): every custom action,
+/// service, service control, registry value, descriptor and shortcut must
+/// be the `.wxs`'s, no custom action may run that it doesn't schedule, no
+/// row may be in a table a seaworthy MSI never uses (a `Binary` stream,
+/// self-registration, an embedded chainer, COM registrations, environment
+/// variables, file removals, …), and the upgrade rows name the product
+/// alone. The Windows runner still builds the binaries [`package`] signs,
+/// so it's trusted for a Windows release; the table check keeps an MSI from
+/// doing more than the release declares.
 ///
 /// # Errors
 /// [`DistError::Config`] for an unknown product or one without an `msi`
 /// output; [`DistError::Layout`] for a listing without the `.wxs`, one that
 /// already lists an MSI, a tree that changed since packaging, or an MSI
-/// whose payload or properties differ; [`DistError::Sign`] for signers that
+/// whose payload, properties or security-relevant tables differ (or whose
+/// `.wxs` declares something the table check can't model);
+/// [`DistError::Sign`] for signers that
 /// don't match the release (manifests on one side only) or a failing
 /// signer; [`DistError::Tool`] when msitools can't run.
 pub fn adopt_msi(
@@ -976,7 +986,7 @@ pub fn adopt_msi(
     let upgrade = crate::wix::upgrade_code(config, id)?;
     for (name, wanted) in [
         ("ProductVersion", versions.msi.clone()),
-        ("UpgradeCode", upgrade),
+        ("UpgradeCode", upgrade.clone()),
     ] {
         let actual = property(name);
         if actual.as_deref() != Some(wanted.as_str()) {
@@ -986,6 +996,12 @@ pub fn adopt_msi(
             )));
         }
     }
+    // Everything else in it that runs code, changes the machine or
+    // decides access: the .wxs's, row for row.
+    check_tables(&listing, &base, &candidate, &work, &upgrade, tools).map_err(|e| match e {
+        DistError::Layout(why) => DistError::Layout(format!("{}: {why}", msi.display())),
+        other => other,
+    })?;
 
     // In place beside the release's other artifacts, signed, its
     // manifest and SBOM over the final bytes.
@@ -1060,6 +1076,104 @@ pub fn adopt_msi(
     )?;
     std::fs::remove_dir_all(&work).map_err(|e| DistError::io(&work, e))?;
     Ok(new)
+}
+
+/// The MSI's security-relevant tables against the `.wxs` the listing
+/// names ([`crate::msi_check`]): read with `msiinfo tables` and `msiinfo
+/// export -s` (which never writes a table's streams to disk), in a scratch
+/// directory under `work`.
+fn check_tables(
+    listing: &crate::repo::Listing,
+    base: &Path,
+    msi: &Path,
+    work: &Path,
+    upgrade_code: &str,
+    tools: &MsiTools,
+) -> Result<(), DistError> {
+    let wxs = listing
+        .artifacts
+        .iter()
+        .find(|a| a.kind == Kind::Wxs)
+        .ok_or_else(|| DistError::Layout("no .wxs listed".to_owned()))?;
+    let wxs_path = base.join(&wxs.file);
+    let text = std::fs::read(&wxs_path).map_err(|e| DistError::io(&wxs_path, e))?;
+    if seaworthy_crypto::digest::sha256_hex(&text) != wxs.sha256 {
+        return Err(DistError::Layout(format!(
+            "{}: changed since it was packaged (its SHA-256 isn't the listing's)",
+            wxs_path.display()
+        )));
+    }
+    let text = String::from_utf8(text)
+        .map_err(|_| DistError::Layout(format!("{}: not UTF-8", wxs_path.display())))?;
+    let expected = crate::msi_check::expected_from_wxs(&text)
+        .map_err(|e| DistError::Layout(format!("{}: {e}", wxs_path.display())))?;
+    let scratch = work.join("tables");
+    std::fs::create_dir_all(&scratch).map_err(|e| DistError::io(&scratch, e))?;
+    let listed = crate::process::run_ok(
+        msi_tool(&tools.msiinfo)
+            .current_dir(&scratch)
+            .arg("tables")
+            .arg(msi),
+        "msiinfo tables",
+        MSI_TOOL_TIMEOUT,
+    )?;
+    let mut tables = std::collections::BTreeMap::new();
+    for name in listed.lines().map(str::trim).filter(|n| !n.is_empty()) {
+        if !crate::msi_check::is_read(name) {
+            continue;
+        }
+        let export = crate::process::run(
+            msi_tool(&tools.msiinfo)
+                .current_dir(&scratch)
+                .args(["export", "-s"])
+                .arg(msi)
+                .arg(name),
+            "msiinfo export",
+            None,
+            MSI_TOOL_TIMEOUT,
+            MAX_TABLE_EXPORT,
+        )?;
+        if export.stdout_overflow {
+            return Err(DistError::Layout(format!(
+                "its {name} table is larger than {MAX_TABLE_EXPORT} bytes"
+            )));
+        }
+        let text = String::from_utf8(export.stdout.clone())
+            .map_err(|_| DistError::Layout(format!("its {name} table doesn't read: not UTF-8")))?;
+        let table = crate::msi_check::parse_sql_export(&text)
+            .map_err(|e| DistError::Layout(format!("its {name} table doesn't read: {e}")))?;
+        // `msiinfo export -s` exits 1 for a table without rows, having
+        // printed its CREATE TABLE alone; any other failure stops here.
+        if !export.status.success() && !table.rows.is_empty() {
+            return Err(DistError::Tool(format!(
+                "msiinfo export {name} failed ({}): {}",
+                export.status,
+                export.shown()
+            )));
+        }
+        if table.name != name {
+            return Err(DistError::Layout(format!(
+                "msiinfo exported {} for its {name} table",
+                table.name
+            )));
+        }
+        tables.insert(name.to_owned(), table);
+    }
+    let findings = crate::msi_check::findings(&expected, &tables, upgrade_code);
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let shown: Vec<&str> = findings.iter().take(20).map(String::as_str).collect();
+    Err(DistError::Layout(format!(
+        "its tables aren't the .wxs's ({} finding(s)): {}{}",
+        findings.len(),
+        shown.join("; "),
+        if findings.len() > shown.len() {
+            "; …"
+        } else {
+            ""
+        }
+    )))
 }
 
 /// An msitools command: a tool ([`crate::process::tool`]), so none of

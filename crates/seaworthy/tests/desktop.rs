@@ -984,17 +984,26 @@ fn msitools() -> bool {
     all
 }
 
-/// A change to the payload a fixture MSI carries.
+/// A change to the payload a fixture MSI carries, or to its tables.
 enum Payload<'a> {
     AsTree,
     Extra(&'a str),
     Without(&'a str),
     Changed(&'a str),
+    /// A registry value of its own: a program run at every logon.
+    RunKey,
+    /// The Start menu shortcut passes arguments.
+    ShortcutArguments,
+    /// The install location custom action sets another directory.
+    ActionTarget,
 }
 
 /// An MSI of the packaged Windows tree under `dist/viewer/` (built with
 /// wixl from the tree's layout.json, every file but the icon), at
-/// `version` with `upgrade_code`, `payload` changed as asked.
+/// `version` with `upgrade_code`, `payload` changed as asked. Its tables
+/// carry what the viewer's .wxs declares beside the payload, as WiX builds
+/// it (golden/wix/desktop.wxs): the install location custom action and
+/// the two shortcuts with their registry key paths.
 fn fixture_msi(
     dist: &Path,
     version: &str,
@@ -1023,8 +1032,11 @@ fn fixture_msi(
             )
         })
         .collect();
+    let run_key = matches!(payload, Payload::RunKey);
+    let shortcut_arguments = matches!(payload, Payload::ShortcutArguments);
+    let action_target = matches!(payload, Payload::ActionTarget);
     match payload {
-        Payload::AsTree => {}
+        Payload::AsTree | Payload::RunKey | Payload::ShortcutArguments | Payload::ActionTarget => {}
         Payload::Extra(relative) => {
             let path = scratch.join("extra");
             std::fs::write(&path, b"not in the tree").unwrap();
@@ -1077,6 +1089,53 @@ fn fixture_msi(
         }
     }
     emit(&root, &mut xml, &mut refs, &mut n);
+    // The launcher's file id, the shortcuts' target (the root's files come
+    // first, in order).
+    let launcher = root
+        .files
+        .iter()
+        .position(|(name, _)| name == "AcmeTool.exe")
+        .map(|i| format!("f{}", i + 1));
+    // What the .wxs declares beside the payload.
+    let location = if action_target {
+        "[SystemFolder]"
+    } else {
+        "[InstallDir]"
+    };
+    let mut declared = format!(
+        r#"<CustomAction Id="SetARPINSTALLLOCATION" Property="ARPINSTALLLOCATION" Value="{location}" />
+    <InstallExecuteSequence><Custom Action="SetARPINSTALLLOCATION" After="CostFinalize" /></InstallExecuteSequence>
+"#
+    );
+    if let Some(launcher) = &launcher {
+        let arguments = if shortcut_arguments {
+            " Arguments=\"--planted\""
+        } else {
+            ""
+        };
+        for (id, folder, guid) in [
+            ("StartMenuShortcut", "ProgramMenuFolder", 901),
+            ("DesktopShortcut", "DesktopFolder", 902),
+        ] {
+            let arguments = if id == "StartMenuShortcut" {
+                arguments
+            } else {
+                ""
+            };
+            declared.push_str(&format!(
+                r#"    <DirectoryRef Id="{folder}"><Component Id="{id}" Guid="{{11111111-2222-4333-8444-{guid:012}}}" Win64="yes"><Shortcut Id="{id}" Name="Acme Viewer" Description="Views Acme reports." Target="[#{launcher}]" WorkingDirectory="InstallDir"{arguments} /><RegistryValue Root="HKCU" Key="SOFTWARE\Acme\Viewer" Name="{id}" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>
+"#
+            ));
+            refs.push(id.to_owned());
+        }
+    }
+    if run_key {
+        declared.push_str(
+            r#"    <DirectoryRef Id="InstallDir"><Component Id="planted" Guid="{11111111-2222-4333-8444-000000000903}" Win64="yes"><RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run" Name="planted" Type="string" Value="[InstallDir]AcmeTool.exe" KeyPath="yes" /></Component></DirectoryRef>
+"#,
+        );
+        refs.push("planted".to_owned());
+    }
     let feature: String = refs
         .iter()
         .map(|r| format!("<ComponentRef Id=\"{r}\" />"))
@@ -1087,7 +1146,8 @@ fn fixture_msi(
   <Product Id="*" Name="Acme Viewer" Language="1033" Version="{version}" Manufacturer="Acme" UpgradeCode="{upgrade_code}">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
     <Media Id="1" Cabinet="payload.cab" EmbedCab="yes" />
-    <Directory Id="TARGETDIR" Name="SourceDir"><Directory Id="ProgramFiles64Folder" Name="PFiles64"><Directory Id="VendorDir" Name="Acme"><Directory Id="InstallDir" Name="Viewer">{xml}</Directory></Directory></Directory></Directory>
+    {declared}
+    <Directory Id="TARGETDIR" Name="SourceDir"><Directory Id="ProgramFiles64Folder" Name="PFiles64"><Directory Id="VendorDir" Name="Acme"><Directory Id="InstallDir" Name="Viewer">{xml}</Directory></Directory></Directory><Directory Id="ProgramMenuFolder" /><Directory Id="DesktopFolder" /></Directory>
     <Feature Id="Main" Level="1">{feature}</Feature>
   </Product>
 </Wix>
@@ -1267,6 +1327,19 @@ fn an_msi_that_isnt_the_signed_tree_is_refused() {
                 Payload::AsTree,
             ),
             "its UpgradeCode is",
+        ),
+        // Its tables doing more than the .wxs declares.
+        (
+            fixture_msi(&dist, &version, &upgrade, Payload::RunKey),
+            "registry value (\"2\", \"SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run\", \"planted\"",
+        ),
+        (
+            fixture_msi(&dist, &version, &upgrade, Payload::ShortcutArguments),
+            "a shortcut the .wxs doesn't declare: (\"ProgramMenuFolder\", \"Acme Viewer\", \"ProgramFiles64Folder/Acme/Viewer/AcmeTool.exe\", \"--planted\"",
+        ),
+        (
+            fixture_msi(&dist, &version, &upgrade, Payload::ActionTarget),
+            "custom action SetARPINSTALLLOCATION is (\"51\", \"ARPINSTALLLOCATION\", \"[SystemFolder]\")",
         ),
     ] {
         let err = adopt(&config, out.path(), &msi).unwrap_err().to_string();

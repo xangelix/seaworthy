@@ -45,6 +45,7 @@ macro_rules! targets {
 targets![
     dist_archive,
     dist_inputs,
+    dist_msi_tables,
     dist_pe,
     lab_request,
     levels_records,

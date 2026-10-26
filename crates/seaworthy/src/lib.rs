@@ -23,7 +23,9 @@
 //!    rpm and pacman through nFPM ([`nfpm`], from [`linux`]'s contents and
 //!    [`scripts`]' lifecycle), the tarball and zip ([`archive`]), the MSI's
 //!    WiX source ([`wix`]) and the Group Policy templates ([`admx`]), with
-//!    a listing of every artifact's SHA-256.
+//!    a listing of every artifact's SHA-256. An MSI WiX builds on Windows
+//!    from that source is adopted only when its payload is the signed tree
+//!    and its security-relevant tables are the source's ([`msi_check`]).
 //! 5. **Sign the packages** ([`codesign`]): Authenticode on the MSI,
 //!    OpenPGP on rpm (embedded) and pacman (`.sig`), each checked against
 //!    the pinned identities. Every signing program runs through
@@ -90,6 +92,7 @@ pub mod inputs;
 pub mod layout;
 pub mod linux;
 pub mod macos;
+pub mod msi_check;
 pub mod nfpm;
 pub mod package;
 pub mod pe_version;

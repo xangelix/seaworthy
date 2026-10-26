@@ -30,7 +30,6 @@ publish-s3 = [
     "dep:base64",
     "dep:bytes",
     "dep:futures-util",
-    "dep:quick-xml",
     "dep:reqwest",
     "dep:rustls-platform-verifier",
     "dep:tokio",
@@ -87,9 +86,10 @@ base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 # publish-s3: `StreamExt` over response bodies and the boxed object stream.
 futures-util = { workspace = true, optional = true, features = ["std"] }
-# publish-s3: the one XML parser: S3 keys and ETags carry XML entities, and
-# entity handling is exactly the part a hand parser gets wrong.
-quick-xml = { workspace = true, optional = true }
+# The one XML parser: S3 keys and ETags carry XML entities (publish-s3), and
+# adopt-msi reads the .wxs it compares an MSI with; entity handling is
+# exactly the part a hand parser gets wrong.
+quick-xml.workspace = true
 # publish-s3: rustls with NO provider of its own: every client is built with
 # `use_preconfigured_tls` on `seaworthy_crypto::tls::client_config_builder()`
 # (scripts/check-tls-construction.sh). `stream` for response bodies.
