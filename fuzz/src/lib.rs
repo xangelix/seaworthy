@@ -47,6 +47,7 @@ targets![
     dist_inputs,
     dist_pe,
     levels_records,
+    s3_xml,
     service_unit,
     updater_manifest,
 ];

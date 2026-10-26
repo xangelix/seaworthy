@@ -2,7 +2,7 @@
 
 cargo-fuzz (libFuzzer + AddressSanitizer) targets over seaworthy's parsers of untrusted input:
 release manifests and identifiers, CPU requirement records and CPU lists, CPUID dumps,
-configuration, URL templates and package metadata readers. Every such parser has a target
+configuration, URL templates, package metadata readers and the S3 store's XML responses. Every such parser has a target
 (the security baseline in [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ## Layout
