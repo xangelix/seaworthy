@@ -44,8 +44,8 @@ validated predecessor is AWS-LC 3, certificate #5314), pinned with `=` and asser
    every coefficient 512, ...). `mldsa::validate_public_key` runs seaworthy's intake test:
    fast shape pre-filters, then a measurement of `HighBits(−c·t1·2^d)` under 128 fixed
    challenges, which a forgery needs to be (nearly) zero and a genuine key leaves about 94%
-   non-zero (a genuine key is refused with probability below 2^-147; 10,000 generated keys
-   measured: none refused, every count 15 or more standard deviations clear of its
+   non-zero (a genuine key is refused with probability below 2^-147; 100,000 generated keys
+   measured: none refused, every count 14 or more standard deviations clear of its
    threshold). It refuses the known forgery classes and keys whose forgeability is
    measurable, but it is **defense in depth**: trust ML-DSA keys only from your own
    `seaworthy keygen` or HSM, or from their holder over an authenticated channel. Both

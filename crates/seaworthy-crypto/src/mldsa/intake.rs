@@ -61,11 +61,11 @@
 //! The bound treats coefficients as independent, which they are only
 //! approximately (they share `t1`), so it is checked by measurement: the
 //! ignored test `intake_false_reject_measurement` runs keys from AWS-LC's
-//! key generation through the test. Over 10,000 keys it refused none; the
-//! polynomial counts averaged 240.2 (standard deviation 3.85, lowest 218)
-//! and the totals 1921.9 (standard deviation 10.9, lowest 1868): the
-//! binomial model, with every count 15 or more standard deviations above
-//! its threshold.
+//! key generation through the test. Over 100,000 keys it refused none;
+//! the 102.4 million polynomial counts averaged 240.2 (standard deviation
+//! 3.85, lowest 215) and the 12.8 million totals 1921.9 (standard
+//! deviation 10.9, lowest 1860): the binomial model, with every count 14
+//! or more standard deviations above its threshold.
 //!
 //! # What it does and does not prove
 //!
