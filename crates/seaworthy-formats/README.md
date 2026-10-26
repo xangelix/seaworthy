@@ -117,6 +117,8 @@ signature=ed25519:<16 hex key id>:<hex signature>
   `deb`, `rpm`, `pacman`, `tar`, `pkg`; `size` is exact and non-zero.
 - The **signature block**: 1 to 8 lines, lowercase hex, a final newline, no key signing twice.
   Lines naming a key the helper doesn't trust are skipped; any trusted key verifying is enough
+  (`ReleaseTrust::AnyKey`), or under `ReleaseTrust::EveryAlgorithm` (`seaworthy.toml`'s
+  `release-trust`) one per algorithm among the trusted keys
   (key rotation).
 
 ## Release keys

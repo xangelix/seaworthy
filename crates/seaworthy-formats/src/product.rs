@@ -39,6 +39,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::manifest::ReleaseTrust;
 use crate::policy::UpdatePolicy;
 
 /// Why a product's names were refused.
@@ -67,6 +68,7 @@ pub struct Product {
     service: Option<ServiceNames>,
     default_policy: UpdatePolicy,
     macos_bundle_id: Option<String>,
+    release_trust: ReleaseTrust,
 }
 
 /// A reverse-DNS bundle identifier: at least two dot-separated labels of
@@ -159,6 +161,7 @@ impl Product {
             service: None,
             default_policy: UpdatePolicy::Auto,
             macos_bundle_id: None,
+            release_trust: ReleaseTrust::AnyKey,
         })
     }
 
@@ -194,12 +197,30 @@ impl Product {
         self
     }
 
+    /// Which signatures the product's helper requires of a release
+    /// manifest (`seaworthy.toml`'s `[defaults] release-trust`; default
+    /// [`ReleaseTrust::AnyKey`]). [`ManifestTrust::for_product`](crate::ManifestTrust::for_product)
+    /// applies it.
+    #[must_use]
+    pub fn with_release_trust(mut self, release_trust: ReleaseTrust) -> Self {
+        self.release_trust = release_trust;
+        self
+    }
+
+    /// Which signatures the product's helper requires of a release
+    /// manifest.
+    #[must_use]
+    pub fn release_trust(&self) -> ReleaseTrust {
+        self.release_trust
+    }
+
     /// Reads product `id`'s names from a `seaworthy.toml` (see the module
     /// docs). Only the settings that name things are read, and anything
     /// else in the file is ignored; the seaworthy CLI validates the whole
     /// file when it packages. The keys read:
     ///
-    /// - `[defaults]` `vendor` and `channel` (both required);
+    /// - `[defaults]` `vendor` and `channel` (both required), and
+    ///   `release-trust` (`any-key` or `every-algorithm`; else `any-key`);
     /// - `[product.<id>]` `display-name` and `executable` (required), and
     ///   `windows-directory` (else the display name's last word, else the
     ///   executable);
@@ -233,7 +254,8 @@ impl Product {
             &windows_directory,
             &file.defaults.channel,
         )?
-        .with_default_policy(entry.updates.default);
+        .with_default_policy(entry.updates.default)
+        .with_release_trust(file.defaults.release_trust);
         if let Some(service) = &entry.service {
             product = product.with_service(ServiceNames {
                 name: service.name.clone(),
@@ -473,9 +495,12 @@ struct ConfigFile {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct Defaults {
     vendor: String,
     channel: String,
+    #[serde(default)]
+    release_trust: ReleaseTrust,
 }
 
 #[derive(serde::Deserialize)]
@@ -632,6 +657,34 @@ windows-directory = "Desk"
         );
         assert!(Product::from_config(CONFIG, "other").is_err());
         assert!(Product::from_config("not toml [", "agent").is_err());
+    }
+
+    #[test]
+    fn the_release_trust_follows_the_config() {
+        let agent = Product::from_config(CONFIG, "agent").unwrap();
+        assert_eq!(agent.release_trust(), ReleaseTrust::AnyKey);
+        let every = CONFIG.replace(
+            "channel = \"stable\"\n",
+            "channel = \"stable\"\nrelease-trust = \"every-algorithm\"\n",
+        );
+        let agent = Product::from_config(&every, "agent").unwrap();
+        assert_eq!(agent.release_trust(), ReleaseTrust::EveryAlgorithm);
+        assert_eq!(agent.release_trust().as_str(), "every-algorithm");
+        let any = CONFIG.replace(
+            "channel = \"stable\"\n",
+            "channel = \"stable\"\nrelease-trust = \"any-key\"\n",
+        );
+        assert_eq!(
+            Product::from_config(&any, "agent").unwrap().release_trust(),
+            ReleaseTrust::AnyKey
+        );
+        for bad in ["\"all\"", "\"Every-Algorithm\"", "true", "\"\""] {
+            let text = CONFIG.replace(
+                "channel = \"stable\"\n",
+                &format!("channel = \"stable\"\nrelease-trust = {bad}\n"),
+            );
+            assert!(Product::from_config(&text, "agent").is_err(), "{bad}");
+        }
     }
 
     #[test]

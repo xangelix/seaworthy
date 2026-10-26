@@ -5,10 +5,11 @@
 //! them) must agree on, defined once:
 //!
 //! - **The signed release manifest** ([`ReleaseManifest`],
-//!   [`ManifestTrust`], [`ReleaseKey`]): what one artifact is (product,
-//!   channel, version and build, sequence, target, format, exact size,
-//!   digest), signed by one or more release keys under ML-DSA-87, ECDSA
-//!   P-256 or Ed25519, and verified before any artifact byte is fetched.
+//!   [`ManifestTrust`], [`ReleaseKey`], [`ReleaseTrust`]): what one
+//!   artifact is (product, channel, version and build, sequence, target,
+//!   format, exact size, digest), signed by one or more release keys under
+//!   ML-DSA-87, ECDSA P-256 or Ed25519 (any one trusted key, or one per
+//!   trusted algorithm), and verified before any artifact byte is fetched.
 //! - **Release versions** ([`release`]): the version grammar every package
 //!   manager orders alike, the sequence that orders two builds of one
 //!   version, each format's spelling, and the byte-exact read-back of an
@@ -78,7 +79,7 @@ pub mod release;
 
 pub use manifest::{
     ArtifactFormat, KEY_ID_LEN, ManifestSignature, ManifestTrust, RELEASE_MANIFEST_DOMAIN,
-    ReleaseKey, ReleaseManifest, release_key_id,
+    ReleaseKey, ReleaseManifest, ReleaseTrust, release_key_id,
 };
 pub use policy::UpdatePolicy;
 pub use product::{MSI_RELEASE_VALUE, Product, ProductError, ServiceNames, UPDATE_REQUEST_FILE};

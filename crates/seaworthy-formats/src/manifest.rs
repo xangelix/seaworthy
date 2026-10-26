@@ -50,8 +50,11 @@
 //!   the old AND the new key verifies on devices trusting either; the
 //!   runbook: ship the new key in the helper's key set, sign with both for
 //!   a release, then drop the old key). Lines naming a key the device does
-//!   not trust are skipped; the manifest verifies when ANY trusted key
-//!   verifies its line.
+//!   not trust are skipped; by default the manifest verifies when ANY
+//!   trusted key verifies its line ([`ReleaseTrust::AnyKey`]). Under
+//!   [`ReleaseTrust::EveryAlgorithm`] it needs a verifying line for every
+//!   algorithm among the trusted keys (ML-DSA-87 AND Ed25519, say), so one
+//!   weak, stolen or broken key is not enough.
 //!
 //! The updater then checks product, channel, version (byte-equal to the
 //! version the product's server named: the server keeps rollback
@@ -301,14 +304,49 @@ impl ReleaseKey {
     }
 }
 
+/// Which signatures a manifest needs: `seaworthy.toml`'s `[defaults]
+/// release-trust` (`"any-key"` or `"every-algorithm"`), compiled into the
+/// helper with the product ([`Product::release_trust`](crate::Product::release_trust),
+/// [`ManifestTrust::for_product`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseTrust {
+    /// One signature that verifies under any trusted key (the default).
+    /// Rotation needs no coordination, and a device is exactly as strong as
+    /// its weakest trusted key and algorithm.
+    #[default]
+    AnyKey,
+    /// A verifying signature by a trusted key of EVERY algorithm among the
+    /// trusted keys (any one key per algorithm, so keys still rotate within
+    /// an algorithm). With ML-DSA-87 and Ed25519 keys a release needs both:
+    /// one weak, stolen or broken key or algorithm is not enough. The
+    /// seaworthy CLI signs with every `release-signatures` algorithm, so its
+    /// manifests satisfy it; trust keys of at least two algorithms, or it is
+    /// [`AnyKey`](Self::AnyKey) by another name.
+    EveryAlgorithm,
+}
+
+impl ReleaseTrust {
+    /// The policy's spelling in `seaworthy.toml`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AnyKey => "any-key",
+            Self::EveryAlgorithm => "every-algorithm",
+        }
+    }
+}
+
 /// What a device trusts in signed-manifest mode: its product id, its
-/// release channel (optional), and the set of release keys any one of which
-/// may sign a release.
+/// release channel (optional), the set of release keys that may sign a
+/// release, and which of their signatures a release needs
+/// ([`ReleaseTrust`]).
 #[derive(Clone, Debug)]
 pub struct ManifestTrust {
     product: String,
     channel: Option<String>,
     keys: Vec<ReleaseKey>,
+    release_trust: ReleaseTrust,
 }
 
 impl ManifestTrust {
@@ -337,7 +375,21 @@ impl ManifestTrust {
             product,
             channel: None,
             keys,
+            release_trust: ReleaseTrust::AnyKey,
         })
+    }
+
+    /// Which signatures a release needs (default [`ReleaseTrust::AnyKey`]).
+    #[must_use]
+    pub fn with_release_trust(mut self, release_trust: ReleaseTrust) -> Self {
+        self.release_trust = release_trust;
+        self
+    }
+
+    /// Which signatures a release needs.
+    #[must_use]
+    pub fn release_trust(&self) -> ReleaseTrust {
+        self.release_trust
     }
 
     /// Only accept releases published on `channel` (`[A-Za-z0-9._-]{1,64}`;
@@ -356,7 +408,9 @@ impl ManifestTrust {
 
     /// Trust `keys` for `product`'s packages: its package name
     /// ([`Product::package`](crate::Product::package)) and channel, exactly
-    /// as the seaworthy CLI signs them. What an update helper uses.
+    /// as the seaworthy CLI signs them, under its
+    /// [`release_trust`](crate::Product::release_trust) (`seaworthy.toml`'s
+    /// `release-trust`). What an update helper uses.
     ///
     /// # Errors
     /// [`FormatError::InvalidConfig`] for an empty key set.
@@ -364,7 +418,9 @@ impl ManifestTrust {
         product: &crate::Product,
         keys: impl IntoIterator<Item = ReleaseKey>,
     ) -> Result<Self, FormatError> {
-        Self::new(product.package(), keys)?.channel(product.channel())
+        Ok(Self::new(product.package(), keys)?
+            .channel(product.channel())?
+            .with_release_trust(product.release_trust()))
     }
 
     /// The product id manifests must name.
@@ -795,6 +851,42 @@ impl SignatureAlgorithm {
     }
 }
 
+/// Whether `signatures` satisfy `release_trust` under `keys`: any one
+/// verifying line by one of `keys`, or one per algorithm among `keys`.
+fn signed_by(
+    keys: &[ReleaseKey],
+    release_trust: ReleaseTrust,
+    statement: &[u8],
+    signatures: &[ManifestSignature],
+) -> bool {
+    let verifies = |algorithm: Option<SignatureAlgorithm>| {
+        signatures.iter().any(|signature| {
+            algorithm.is_none_or(|a| a == signature.algorithm)
+                && keys.iter().any(|key| {
+                    key.key_id == signature.key_id
+                        && key.algorithm == signature.algorithm
+                        && key
+                            .algorithm
+                            .verify(&key.public_key, statement, &signature.signature)
+                })
+        })
+    };
+    match release_trust {
+        ReleaseTrust::AnyKey => verifies(None),
+        ReleaseTrust::EveryAlgorithm => {
+            let mut algorithms = [
+                SignatureAlgorithm::MlDsa87,
+                SignatureAlgorithm::EcdsaP256,
+                SignatureAlgorithm::Ed25519,
+            ]
+            .into_iter()
+            .filter(|algorithm| keys.iter().any(|key| key.algorithm == *algorithm))
+            .peekable();
+            algorithms.peek().is_some() && algorithms.all(|algorithm| verifies(Some(algorithm)))
+        }
+    }
+}
+
 /// Authenticates a fetched manifest and checks it names exactly the release
 /// this device asked for. Order matters: the signature is verified FIRST,
 /// so the field comparisons (and their error text) only ever run over
@@ -815,15 +907,7 @@ fn verify_manifest(
 ) -> Result<ReleaseManifest, FormatError> {
     let (manifest, signatures) = ReleaseManifest::decode_signed(bytes)?;
     let statement = manifest.statement()?;
-    let verified = signatures.iter().any(|signature| {
-        trust.keys.iter().any(|key| {
-            key.key_id == signature.key_id
-                && key.algorithm == signature.algorithm
-                && key
-                    .algorithm
-                    .verify(&key.public_key, &statement, &signature.signature)
-        })
-    });
+    let verified = signed_by(&trust.keys, trust.release_trust, &statement, &signatures);
     if !verified {
         return Err(FormatError::SignatureMismatch);
     }
@@ -1412,6 +1496,84 @@ mod tests {
             ),
             Err(FormatError::SignatureMismatch)
         ));
+    }
+
+    /// `every-algorithm`: a release needs a verifying line per algorithm
+    /// among the trusted keys; any one key per algorithm, so keys still
+    /// rotate within an algorithm.
+    #[test]
+    fn every_algorithm_needs_a_signature_per_trusted_algorithm() {
+        let mldsa = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        let mldsa_next = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        let ed25519 = SigningKey::generate(SignatureAlgorithm::Ed25519);
+        let stranger = SigningKey::generate(SignatureAlgorithm::Ed25519);
+        let manifest = manifest_for("acme-agent", "2.0.0", b"x");
+        let hybrid =
+            |keys: &[&SigningKey]| trust(keys).with_release_trust(ReleaseTrust::EveryAlgorithm);
+        let check = |trust: &ManifestTrust, keys: &[&SigningKey]| {
+            verify_manifest(
+                &signed(&manifest, keys),
+                trust,
+                "2.0.0",
+                ArtifactFormat::Deb,
+                u64::MAX,
+            )
+        };
+        let both = hybrid(&[&mldsa, &ed25519]);
+        assert_eq!(both.release_trust(), ReleaseTrust::EveryAlgorithm);
+        check(&both, &[&mldsa, &ed25519]).unwrap();
+        check(&both, &[&ed25519, &mldsa]).unwrap();
+        for keys in [
+            &[&mldsa][..],
+            &[&ed25519],
+            &[&mldsa, &stranger],
+            &[&mldsa, &mldsa_next],
+        ] {
+            assert!(
+                matches!(check(&both, keys), Err(FormatError::SignatureMismatch)),
+                "{} signature(s)",
+                keys.len()
+            );
+        }
+        // The default stays any one key.
+        check(&trust(&[&mldsa, &ed25519]), &[&mldsa]).unwrap();
+        check(&trust(&[&mldsa, &ed25519]), &[&ed25519]).unwrap();
+        // Rotation within an algorithm: either ML-DSA key, with Ed25519.
+        let rotating = hybrid(&[&mldsa, &mldsa_next, &ed25519]);
+        check(&rotating, &[&mldsa_next, &ed25519]).unwrap();
+        check(&rotating, &[&mldsa, &mldsa_next, &ed25519]).unwrap();
+        assert!(matches!(
+            check(&rotating, &[&mldsa, &mldsa_next]),
+            Err(FormatError::SignatureMismatch)
+        ));
+        // A line that names the trusted Ed25519 key but doesn't verify
+        // doesn't count.
+        let mut lines = ReleaseManifest::decode_signed(&signed(&manifest, &[&mldsa, &ed25519]))
+            .unwrap()
+            .1;
+        lines[1].signature[0] ^= 1;
+        let damaged = manifest.encode_signed(&lines).unwrap();
+        assert!(matches!(
+            verify_manifest(&damaged, &both, "2.0.0", ArtifactFormat::Deb, u64::MAX),
+            Err(FormatError::SignatureMismatch)
+        ));
+        // One trusted algorithm: the same as any key.
+        check(&hybrid(&[&mldsa, &mldsa_next]), &[&mldsa_next]).unwrap();
+        // The product's setting reaches the trust a helper builds.
+        let product = crate::Product::new("Acme", "agent", "Agent", "stable")
+            .unwrap()
+            .with_release_trust(ReleaseTrust::EveryAlgorithm);
+        let for_product =
+            ManifestTrust::for_product(&product, [mldsa.release_key(), ed25519.release_key()])
+                .unwrap();
+        assert_eq!(for_product.release_trust(), ReleaseTrust::EveryAlgorithm);
+        let default = crate::Product::new("Acme", "agent", "Agent", "stable").unwrap();
+        assert_eq!(
+            ManifestTrust::for_product(&default, [mldsa.release_key()])
+                .unwrap()
+                .release_trust(),
+            ReleaseTrust::AnyKey
+        );
     }
 
     #[test]

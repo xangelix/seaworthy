@@ -114,7 +114,7 @@ use crate::openpgp::{self, OpenPgpKeys};
 use crate::policy::{PolicyDecision, read_policy};
 use crate::release::Release;
 use crate::staging::{Expected, StagedFile, TargetLock};
-use crate::{ArtifactFormat, ManifestTrust, Product, UpdateError};
+use crate::{ArtifactFormat, ManifestTrust, Product, ReleaseTrust, UpdateError};
 
 /// How long the server probe may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -292,9 +292,11 @@ impl HelperConfig {
     ///
     /// # Errors
     /// [`HelperError::Config`] when `trust` names another product (it must
-    /// be the package name, `<vendor>-<id>`) or channel than `product`, or
-    /// `url_template` doesn't expand to an `https` URL (or `http` to
-    /// loopback).
+    /// be the package name, `<vendor>-<id>`) or channel than `product`,
+    /// accepts any one key while `product` requires every algorithm
+    /// (`seaworthy.toml`'s `release-trust`; [`ManifestTrust::for_product`]
+    /// carries it over), or `url_template` doesn't expand to an `https` URL
+    /// (or `http` to loopback).
     pub fn new<F, Fut, T, E>(
         product: Product,
         trust: ManifestTrust,
@@ -320,6 +322,14 @@ impl HelperConfig {
                 "the manifest trust names channel {:?}, but this product's channel is {:?}",
                 trust.channel_name().unwrap_or(""),
                 product.channel()
+            )));
+        }
+        if product.release_trust() == ReleaseTrust::EveryAlgorithm
+            && trust.release_trust() != ReleaseTrust::EveryAlgorithm
+        {
+            return Err(HelperError::Config(format!(
+                "seaworthy.toml's release-trust is {:?}, but the manifest trust accepts any one key: build it with ManifestTrust::for_product",
+                product.release_trust().as_str()
             )));
         }
         let url_template = url_template.into();

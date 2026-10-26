@@ -176,6 +176,21 @@ fn defaults_are_validated() {
         &edit("channel = \"stable\"", "channel = \"Stable!\""),
         "channel",
     );
+    // every-algorithm needs at least two algorithms to mean anything.
+    refused(
+        &edit(
+            "release-signatures = [\"ml-dsa-87\"]",
+            "release-signatures = [\"ml-dsa-87\"]\nrelease-trust = \"every-algorithm\"",
+        ),
+        "release-trust",
+    );
+    refused(
+        &edit(
+            "release-signatures = [\"ml-dsa-87\"]",
+            "release-signatures = [\"ml-dsa-87\", \"ed25519\"]\nrelease-trust = \"both\"",
+        ),
+        "release-trust",
+    );
     refused(
         &edit(
             "maintainer = \"Acme <packages@example.com>\"",
@@ -938,6 +953,11 @@ fn the_helper_reads_the_same_names_from_config() {
             "outputs = [\"deb\"]",
         ),
         edit("updates.default = \"auto\"", "updates.default = \"notify\""),
+        // The hybrid policy reaches the helper's names.
+        edit(
+            "release-signatures = [\"ml-dsa-87\"]",
+            "release-signatures = [\"ml-dsa-87\", \"ed25519\"]\nrelease-trust = \"every-algorithm\"",
+        ),
         // A macOS product: its bundle id is the package's identifier.
         EXAMPLE.to_owned()
             + "\n[product.viewer]\ndisplay-name = \"Acme Viewer\"\ndescription = \"Views.\"\n\
@@ -963,6 +983,7 @@ fn the_helper_reads_the_same_names_from_config() {
             );
             assert_eq!(packaged.windows_directory(), product.windows_directory());
             assert_eq!(packaged.default_policy(), product.updates.default);
+            assert_eq!(packaged.release_trust(), config.defaults.release_trust);
             // The Group Policy template writes the key the helper reads.
             let template = seaworthy::admx::template(
                 &config.defaults.vendor,

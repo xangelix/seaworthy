@@ -243,8 +243,10 @@ signature=ed25519:<16 hex key id>:<hex signature>
   statement and requires byte equality.
 - **The signature block** follows the blank line: 1 to 8 lines of
   `signature=<algorithm>:<16 lowercase hex key id>:<lowercase hex signature>`, a final newline,
-  no key signing twice, nothing else. Lines naming a key the verifier doesn't trust are skipped;
-  one trusted key verifying is enough.
+  no key signing twice, nothing else. Lines naming a key the verifier doesn't trust are skipped.
+  By default one trusted key verifying is enough; with `seaworthy.toml`'s
+  `release-trust = "every-algorithm"`, a line must verify for every algorithm among the
+  helper's trusted keys (`ReleaseTrust::EveryAlgorithm`, applied by `ManifestTrust::for_product`).
 - The helper downloads exactly `size` bytes: a disagreeing `content-length` is refused before the
   body, and the stream is cut past it.
 

@@ -93,8 +93,8 @@ pub use seaworthy_formats::{
     ArtifactFormat, DigestAlgorithm, FormatError, KEY_ID_LEN, MAX_ARTIFACT_BYTES,
     MAX_METADATA_BYTES, MAX_SERVER_BYTES, MAX_VERSION_LEN, MSI_RELEASE_VALUE, ManifestSignature,
     ManifestTrust, Product, ProductError, RELEASE_MANIFEST_DOMAIN, ReleaseKey, ReleaseManifest,
-    ServiceNames, SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE, UpdatePolicy,
-    format_check, release, release_key_id, validate_version,
+    ReleaseTrust, ServiceNames, SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE,
+    UpdatePolicy, format_check, release, release_key_id, validate_version,
 };
 
 // ------------------------------------------------------------------------------------------------

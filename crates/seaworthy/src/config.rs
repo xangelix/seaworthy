@@ -6,6 +6,7 @@
 //! targets = ["x86-64-v4", "x86-64-v3", "x86-64-v2"]   # preference order
 //! channel = "stable"
 //! release-signatures = ["ml-dsa-87"]
+//! # release-trust = "every-algorithm"   # with two or more release-signatures
 //! fips = true                     # the cores carry the AWS-LC FIPS module
 //! maintainer = "Acme <packages@example.com>"
 //! license = "LicenseRef-Acme-Proprietary"
@@ -95,6 +96,16 @@ pub struct Defaults {
     /// Required to sign.
     #[serde(default)]
     pub release_keys: Vec<ReleaseKeyFile>,
+    /// Which signatures the products' update helpers require of a release
+    /// manifest: `any-key` (the default: any one trusted key) or
+    /// `every-algorithm` (a verifying signature for every algorithm among
+    /// the helper's trusted keys, so one weak or stolen key is not
+    /// enough; needs at least two `release-signatures` algorithms). A
+    /// helper reads it with [`seaworthy_updater::Product::from_config`]
+    /// and applies it through `ManifestTrust::for_product`; `package`
+    /// already signs with every `release-signatures` algorithm.
+    #[serde(default)]
+    pub release_trust: seaworthy_updater::ReleaseTrust,
     /// The Authenticode signer Windows and its policies trust:
     /// every Authenticode signature is checked against it. Required to
     /// sign with Authenticode.
@@ -1551,6 +1562,13 @@ impl Config {
                 ));
             }
         }
+        if d.release_trust == seaworthy_updater::ReleaseTrust::EveryAlgorithm
+            && d.release_signatures.len() < 2
+        {
+            return Err(DistError::Config(
+                "defaults.release-trust = \"every-algorithm\" requires a signature per algorithm, but release-signatures lists fewer than two: list a second algorithm (and its release key), or use \"any-key\"".to_owned(),
+            ));
+        }
         if let Some(homepage) = &d.homepage {
             let url = homepage
                 .strip_prefix("https://")
@@ -2338,7 +2356,8 @@ impl Config {
             &self.defaults.channel,
         )
         .map_err(refused)?
-        .with_default_policy(product.updates.default);
+        .with_default_policy(product.updates.default)
+        .with_release_trust(self.defaults.release_trust);
         if let Some(service) = &product.service {
             names = names
                 .with_service(seaworthy_updater::ServiceNames {

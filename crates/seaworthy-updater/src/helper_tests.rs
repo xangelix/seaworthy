@@ -853,6 +853,34 @@ fn configurations_that_could_never_install_are_refused_up_front() {
         .channel("beta")
         .unwrap();
     let no_channel = ManifestTrust::new(PACKAGE, [key.release_key()]).unwrap();
+    // A product whose seaworthy.toml requires every algorithm refuses a
+    // trust that accepts any one key, and takes one built for it.
+    let hybrid_product =
+        product(UpdatePolicy::Auto).with_release_trust(ReleaseTrust::EveryAlgorithm);
+    let any_key = ManifestTrust::new(PACKAGE, [key.release_key()])
+        .unwrap()
+        .channel("stable")
+        .unwrap();
+    assert!(matches!(
+        HelperConfig::new(
+            hybrid_product.clone(),
+            any_key,
+            good,
+            probe,
+            PackageSignatures::ManifestOnly
+        ),
+        Err(HelperError::Config(message)) if message.contains("release-trust")
+    ));
+    assert!(
+        HelperConfig::new(
+            hybrid_product.clone(),
+            ManifestTrust::for_product(&hybrid_product, [key.release_key()]).unwrap(),
+            good,
+            probe,
+            PackageSignatures::ManifestOnly
+        )
+        .is_ok()
+    );
     for trust in [wrong_product, wrong_channel, no_channel] {
         assert!(matches!(
             HelperConfig::new(
