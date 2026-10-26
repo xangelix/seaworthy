@@ -184,8 +184,9 @@ jobs:
         run: |
           brew list bash >/dev/null 2>&1 || brew install bash
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      # --no-fail-fast: every failing test binary in one run, not the first.
       - name: cargo test
-        run: cargo test --workspace --locked --features "$FEATURES" 2>&1 | tee -a "$RUNNER_TEMP/step-output.log"
+        run: cargo test --workspace --locked --no-fail-fast --features "$FEATURES" 2>&1 | tee -a "$RUNNER_TEMP/step-output.log"
 
   # seaworthy-formats built with its CI test-key switch on: the trust paths
   # only such a build has (the marker, ci_test_keys!, test keys accepted).
