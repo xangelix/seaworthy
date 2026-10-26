@@ -25,7 +25,8 @@ const WXS: &str = r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
     <SetProperty Id="ARPINSTALLLOCATION" Value="[InstallDir]" After="CostFinalize" Sequence="execute" />
     <StandardDirectory Id="System64Folder" />
     <CustomAction Id="ServiceRecovery" Directory="System64Folder" ExeCommand="sc.exe failure AcmeAgent" Execute="deferred" Impersonate="no" Return="check" />
-    <InstallExecuteSequence><Custom Action="ServiceRecovery" After="InstallServices" Condition="NOT Installed" /></InstallExecuteSequence>
+    <CustomAction Id="ProgramDataFolders" FileRef="f000" ExeCommand="--seaworthy-install-programdata Acme Agent - state logs" Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence><Custom Action="ServiceRecovery" After="InstallServices" Condition="NOT Installed" /><Custom Action="ProgramDataFolders" After="InstallFiles" Condition="NOT Installed" /></InstallExecuteSequence>
     <StandardDirectory Id="ProgramFiles64Folder"><Directory Id="VendorDir" Name="Acme"><Directory Id="InstallDir" Name="Agent" /></Directory></StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Main">

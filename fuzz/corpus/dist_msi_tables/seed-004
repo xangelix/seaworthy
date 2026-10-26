@@ -1,0 +1,2 @@
+CREATE TABLE `CustomAction` (`Action` CHAR(72) NOT NULL, `Type` INT NOT NULL, `Source` CHAR(72), `Target` CHAR(255), `ExtendedType` LONG PRIMARY KEY `Action`)
+INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES ('ProgramDataFolders', 3090, 'f000', '--seaworthy-install-programdata Acme Agent - state logs')

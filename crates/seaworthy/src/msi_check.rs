@@ -422,8 +422,13 @@ pub fn parse_sql_export(text: &str) -> Result<Table, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Action {
     kind: String,
+    /// Its `Source`: a directory or property id, or, for an executable
+    /// in the `File` table ([`Self::source_file`]), that file's install
+    /// path.
     source: String,
     target: String,
+    /// The source is a file (type 18), compared by its install path.
+    source_file: bool,
     scheduled: BTreeSet<(String, String)>,
 }
 
@@ -488,9 +493,16 @@ fn join(parent: &str, name: &str) -> String {
     }
 }
 
-/// The `Type` of a `<CustomAction Directory= ExeCommand=>` (an executable
-/// in a directory, 34) with its `Execute`, `Impersonate` and `Return`.
-fn exe_action_type(execute: &str, impersonate: &str, ret: &str) -> Result<u32, String> {
+/// An executable in a directory (`<CustomAction Directory= ExeCommand=>`).
+const EXE_IN_DIRECTORY: u32 = 34;
+/// An executable in the `File` table (`<CustomAction FileRef=
+/// ExeCommand=>`).
+const EXE_IN_FILE: u32 = 18;
+
+/// The `Type` of an executable custom action of kind `base`
+/// ([`EXE_IN_DIRECTORY`], [`EXE_IN_FILE`]) with its `Execute`,
+/// `Impersonate` and `Return`.
+fn exe_action_type(base: u32, execute: &str, impersonate: &str, ret: &str) -> Result<u32, String> {
     let execute = match execute {
         "" | "immediate" => 0,
         "deferred" => 1024,
@@ -514,7 +526,7 @@ fn exe_action_type(execute: &str, impersonate: &str, ret: &str) -> Result<u32, S
         "asyncNoWait" => 192,
         other => return Err(format!("Return={other:?}")),
     };
-    Ok(34 | execute | impersonate | ret)
+    Ok(base | execute | impersonate | ret)
 }
 
 /// A `<RegistryValue>`'s `Root` as the `Registry` table's.
@@ -817,25 +829,34 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
             }
             "CustomAction" => {
                 let id = attr("Id");
-                let action = if attributes.contains_key("ExeCommand")
-                    && attributes.contains_key("Directory")
-                {
-                    Action {
+                let exe = |base: u32, source: &str, source_file: bool| -> Result<Action, String> {
+                    Ok(Action {
                         kind: exe_action_type(
+                            base,
                             &attr("Execute"),
                             &attr("Impersonate"),
                             &attr("Return"),
                         )?
                         .to_string(),
-                        source: attr("Directory"),
+                        source: attr(source),
                         target: attr("ExeCommand"),
+                        source_file,
                         scheduled: BTreeSet::new(),
-                    }
-                } else if attributes.contains_key("Property") && attributes.contains_key("Value") {
+                    })
+                };
+                let has = |key: &str| attributes.contains_key(key);
+                let action = if has("ExeCommand") && has("Directory") && !has("FileRef") {
+                    exe(EXE_IN_DIRECTORY, "Directory", false)?
+                } else if has("ExeCommand") && has("FileRef") && !has("Directory") {
+                    // The file's id for now: its install path once every
+                    // file is read (below).
+                    exe(EXE_IN_FILE, "FileRef", true)?
+                } else if has("Property") && has("Value") && !has("ExeCommand") {
                     Action {
                         kind: "51".to_owned(),
                         source: attr("Property"),
                         target: attr("Value"),
+                        source_file: false,
                         scheduled: BTreeSet::new(),
                     }
                 } else {
@@ -867,6 +888,7 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
                     kind: "51".to_owned(),
                     source: id,
                     target: attr("Value"),
+                    source_file: false,
                     scheduled: BTreeSet::new(),
                 };
                 if expected.actions.insert(action.clone(), declared).is_some() {
@@ -898,6 +920,16 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
             .get_mut(&action)
             .ok_or_else(|| format!("the .wxs schedules {action}, which it doesn't declare"))?;
         declared.scheduled.insert((table, condition));
+    }
+    for (id, action) in &mut expected.actions {
+        if action.source_file {
+            action.source = files.get(&action.source).cloned().ok_or_else(|| {
+                format!(
+                    "custom action {id} runs {}, a file the .wxs doesn't install",
+                    action.source
+                )
+            })?;
+        }
     }
     for (folder, name, target, arguments, working) in pending_shortcuts {
         // `[#<file id>]`: the file's install path.
@@ -1046,7 +1078,16 @@ pub fn findings(
                 "custom action {action}, which the .wxs doesn't declare"
             )),
             Some(declared) => {
-                let found = (get(row, "Type"), get(row, "Source"), get(row, "Target"));
+                // An executable in the File table: by the file's install
+                // path, never its key.
+                let source = if declared.source_file {
+                    resolver
+                        .file(get(row, "Source"))
+                        .unwrap_or_else(|| format!("<file {}>", get(row, "Source")))
+                } else {
+                    get(row, "Source").to_owned()
+                };
+                let found = (get(row, "Type"), source.as_str(), get(row, "Target"));
                 if found
                     != (
                         declared.kind.as_str(),
@@ -1335,7 +1376,9 @@ mod tests {
     <StandardDirectory Id="System64Folder" />
     <CustomAction Id="ServiceRecovery" Directory="System64Folder" ExeCommand="&quot;[System64Folder]sc.exe&quot; failure AcmeAgent reset= 86400 actions= restart/15000" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="ServiceRecoveryRollback" Directory="System64Folder" ExeCommand="&quot;[System64Folder]sc.exe&quot; failure AcmeAgent reset= 86400 actions= restart/15000" Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="ProgramDataFolders" FileRef="f000_AcmeTool.exe" ExeCommand="--seaworthy-install-programdata Acme Agent S-1-5-80-1 state:account logs:account updates update-logs" Execute="deferred" Impersonate="no" Return="check" />
     <InstallExecuteSequence>
+      <Custom Action="ProgramDataFolders" After="InstallFiles" Condition="NOT Installed AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="ServiceRecovery" After="InstallServices" Condition="NOT Installed AND NOT REMOVE=&quot;ALL&quot;" />
       <Custom Action="ServiceRecoveryRollback" Before="DeleteServices" Condition="Installed AND REMOVE=&quot;ALL&quot;" />
     </InstallExecuteSequence>
@@ -1382,6 +1425,9 @@ mod tests {
 </Wix>"#;
 
     const CODE: &str = "{B63268CD-0A50-87AF-AEB5-CE6EBFABEDF5}";
+
+    /// The ProgramData folders' command line.
+    const PROGRAMDATA: &str = "--seaworthy-install-programdata Acme Agent S-1-5-80-1 state:account logs:account updates update-logs";
 
     fn table(name: &str, columns: &[&str], rows: &[&[&str]]) -> (String, Table) {
         (
@@ -1503,6 +1549,15 @@ mod tests {
                     &["SetUpdatesDefault", "51", "UPDATES", "auto", ""],
                     &["ServiceRecovery", "3106", "System64Folder", sc, ""],
                     &["ServiceRecoveryRollback", "3426", "System64Folder", sc, ""],
+                    // An executable in the File table (18) + deferred (1024) + no
+                    // impersonation (2048).
+                    &[
+                        "ProgramDataFolders",
+                        "3090",
+                        "f000_AcmeTool.exe",
+                        PROGRAMDATA,
+                        "",
+                    ],
                 ],
             ),
             table(
@@ -1514,6 +1569,12 @@ mod tests {
                     &["SetUpdatesDefault", "NOT UPDATES", "51"],
                     &["CostFinalize", "", "1000"],
                     &["SetARPINSTALLLOCATION", "", "1001"],
+                    &["InstallFiles", "", "4000"],
+                    &[
+                        "ProgramDataFolders",
+                        "NOT Installed AND NOT REMOVE=\"ALL\"",
+                        "4001",
+                    ],
                     &["InstallServices", "VersionNT", "5800"],
                     &[
                         "ServiceRecovery",
@@ -1814,12 +1875,38 @@ mod tests {
             "ServiceRecovery, which the .wxs declares, is missing",
         );
         check(
-            &|t| set(t, "InstallExecuteSequence", 6, "Condition", "1"),
+            &|t| set(t, "InstallExecuteSequence", 8, "Condition", "1"),
             "runs ServiceRecovery on \"1\"",
         );
         check(
-            &|t| set(t, "InstallExecuteSequence", 6, "Action", "ForceReboot"),
+            &|t| set(t, "InstallExecuteSequence", 8, "Action", "ForceReboot"),
             "neither a standard action",
+        );
+        // The launcher's ProgramData action running another of the payload's
+        // files (by key or by path), another command line, or as the user.
+        check(
+            &|t| set(t, "CustomAction", 4, "Source", "f004_AcmeToolUpdate.exe"),
+            "custom action ProgramDataFolders is",
+        );
+        check(
+            &|t| set(t, "File", 0, "FileName", "x|AcmeToolUpdate.exe"),
+            "custom action ProgramDataFolders is",
+        );
+        check(
+            &|t| set(t, "CustomAction", 4, "Source", "nowhere"),
+            "custom action ProgramDataFolders is (\"3090\", \"<file nowhere>\"",
+        );
+        check(
+            &|t| set(t, "CustomAction", 4, "Target", "--evil"),
+            "custom action ProgramDataFolders is",
+        );
+        check(
+            &|t| set(t, "CustomAction", 4, "Type", "1042"),
+            "custom action ProgramDataFolders is",
+        );
+        check(
+            &|t| set(t, "InstallExecuteSequence", 6, "Condition", ""),
+            "runs ProgramDataFolders on \"\"",
         );
         // A service running another binary, as another account, or another start.
         check(
@@ -1963,11 +2050,53 @@ mod tests {
                 "Action=\"Undeclared\" After",
                 "schedules Undeclared",
             ),
+            (
+                "FileRef=\"f000_AcmeTool.exe\"",
+                "FileRef=\"f999\"",
+                "runs f999, a file the .wxs doesn't install",
+            ),
+            (
+                "FileRef=\"f000_AcmeTool.exe\"",
+                "FileRef=\"f000_AcmeTool.exe\" Directory=\"InstallDir\"",
+                "a kind this check doesn't model",
+            ),
         ] {
             assert!(WXS.contains(from), "{from}");
             let err = expected_from_wxs(&WXS.replacen(from, to, 1)).unwrap_err();
             assert!(err.contains(wanted), "{wanted}: {err}");
         }
+    }
+
+    /// Every `.wxs` the packaging tests keep as golden files (what
+    /// `wix.rs` writes for a service with the helper, a LocalSystem
+    /// service, a desktop product): every element modeled.
+    #[test]
+    fn every_golden_wxs_is_modeled() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/wix");
+        let mut read = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "wxs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                expected_from_wxs(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                read += 1;
+            }
+        }
+        assert!(read >= 3, "{read} golden .wxs files");
+        // The agent's: its ProgramData action runs the launcher.
+        let agent = std::fs::read_to_string(dir.join("agent.wxs")).unwrap();
+        let expected = expected_from_wxs(&agent).unwrap();
+        let action = &expected.actions["ProgramDataFolders"];
+        assert_eq!(action.kind, "3090");
+        assert_eq!(
+            action.source,
+            "ProgramFiles64Folder/Acme/Agent/AcmeTool.exe"
+        );
+        assert!(
+            action
+                .target
+                .starts_with("--seaworthy-install-programdata Acme Agent ")
+        );
     }
 
     #[test]
