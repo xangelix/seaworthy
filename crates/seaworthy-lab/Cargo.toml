@@ -22,6 +22,10 @@ ca = ["dep:base64", "dep:rcgen", "dep:time"]
 # asks for the version to install, over TLS with the operating system's
 # trust store, as the update helper downloads.
 client = ["dep:reqwest", "dep:rustls", "dep:rustls-platform-verifier", "dep:tokio"]
+# The Linux upgrade-from-previous suite (`tests/upgrade_linux.rs`): run by
+# scripts/upgrade-linux.sh with the previous and the candidate build, never
+# by the generic test jobs (scripts/ci/plan.sh leaves it out).
+upgrade = ["ca"]
 
 [dependencies]
 # Release-manifest decoding and re-encoding (the foreign-key manifest) and
@@ -51,13 +55,22 @@ rustls-platform-verifier = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "time"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+# The upgrade suite boots systemd hosts (unix only).
+[target.'cfg(unix)'.dev-dependencies]
+seaworthy-test-support.workspace = true
 
 [[bin]]
 name = "seaworthy-lab"
 path = "src/bin/seaworthy-lab.rs"
 required-features = ["server", "ca", "client"]
+
+[[test]]
+name = "upgrade_linux"
+required-features = ["upgrade"]
 
 [lints]
 workspace = true

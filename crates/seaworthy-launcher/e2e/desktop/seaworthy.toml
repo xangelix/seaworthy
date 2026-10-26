@@ -6,6 +6,21 @@
 # Apple Silicon an ad hoc-signed app in a disk image. Paths are relative to
 # this file; the crate paths to the e2e workspace. (`demo/build.rs` links
 # `icons/viewer.ico` into the Windows launcher.)
+#
+# Beside it, the lab's upgrade-from-previous fixture (scripts/
+# upgrade-candidate.sh, docs/testing.md): the same launcher and cores as a
+# service with the update helper (`demo_helper`), for Linux (`agent`) and
+# for macOS (`daemon`; launchd has no per-service accounts, so its service
+# runs as root and has its own product). Each lab build writes its version
+# token into `lab/build.txt` (a copy of this directory), so an upgrade
+# shows in the installed files. Its builds are non-release builds signed
+# with the CI test key (`--ci-test-signing`), which the lab's helper is
+# built to trust: `keys/ci-test.key` is a PUBLIC test key, committed on
+# purpose so that every run, and the next run's previous build, signs
+# with it. Anyone can sign with it, so nothing but this fixture may ever
+# trust it (docs/threat-model.md, the CI test-key mechanism).
+# `keys/release.pub` is the fixture's release key, whose secret was
+# discarded when it was made: nothing is ever released from here.
 
 [defaults]
 vendor = "Acme"
@@ -15,6 +30,11 @@ channel = "stable"
 maintainer = "Acme Packaging <packages@example.com>"
 license = "MIT OR Apache-2.0"
 homepage = "https://example.com/acme/viewer"
+release-signatures = ["ml-dsa-87"]
+release-keys = [{ algorithm = "ml-dsa-87", public-key = "keys/release.pub" }]
+
+[defaults.ci-test-keys]
+release-keys = [{ algorithm = "ml-dsa-87", public-key = "keys/ci-test.pub" }]
 
 [product.viewer]
 display-name = "Acme Viewer"
@@ -43,3 +63,57 @@ category = "public.app-category.utilities"
 [[product.viewer.files]]
 source = "data"
 destination = "share"
+
+# The lab's service fixture on Linux: deb, rpm and pacman packages, the
+# service under its own account, and the update helper, which takes its
+# version from the lab's required-version endpoint.
+[product.agent]
+display-name = "Acme Agent"
+description = "The lab's service fixture: the launcher and its cores as a service, with the update helper."
+executable = "demo"
+core = "demo_core"
+helper = "demo_helper"
+outputs = ["deb", "rpm", "pacman"]
+updates.default = "auto"
+linux.depends.deb = ["libc6 (>= 2.34)"]
+linux.depends.rpm = ["glibc >= 2.34"]
+linux.depends.pacman = ["glibc"]
+
+[product.agent.service]
+name = "AcmeAgent"
+account = "virtual"
+arguments = ["serve"]
+restart-delays = ["15s", "60s"]
+state-directory = "acme/agent"
+
+[product.agent.service.sandbox]
+user = "acme-agent"
+
+[[product.agent.files]]
+source = "lab"
+destination = "lab"
+
+# The lab's service fixture on macOS: a pkg whose LaunchDaemon runs the
+# service as root, and the helper's daemon.
+[product.daemon]
+display-name = "Acme Daemon"
+description = "The lab's service fixture on macOS: the launcher and its cores as a LaunchDaemon, with the update helper."
+executable = "demo"
+core = "demo_core"
+helper = "demo_helper"
+outputs = ["pkg"]
+updates.default = "auto"
+
+[product.daemon.service]
+name = "AcmeDaemon"
+account = "local-system"
+arguments = ["serve"]
+restart-delays = ["15s"]
+state-directory = "acme/daemon"
+
+[product.daemon.macos]
+bundle-id = "com.example.acme.daemon"
+
+[[product.daemon.files]]
+source = "lab"
+destination = "lab"

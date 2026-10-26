@@ -2000,6 +2000,8 @@ dependencies = [
  "rustls-platform-verifier",
  "seaworthy-crypto",
  "seaworthy-formats",
+ "seaworthy-test-support",
+ "serde_json",
  "tempfile",
  "thiserror",
  "time",
