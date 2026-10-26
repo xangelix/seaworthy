@@ -27,6 +27,7 @@ homepage = "https://github.com/xangelix/seaworthy"
 [workspace.dependencies]
 seaworthy-crypto = { version = "0.1.0", path = "crates/seaworthy-crypto" }
 seaworthy-formats = { version = "0.1.0", path = "crates/seaworthy-formats" }
+seaworthy-fsguard = { version = "0.1.0", path = "crates/seaworthy-fsguard" }
 seaworthy-launcher = { version = "0.1.0", path = "crates/seaworthy-launcher" }
 seaworthy-levels = { version = "0.1.0", path = "crates/seaworthy-levels" }
 seaworthy-service = { version = "0.1.0", path = "crates/seaworthy-service" }

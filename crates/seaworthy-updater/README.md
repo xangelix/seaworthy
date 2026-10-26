@@ -187,7 +187,8 @@ SYSTEM, Administrators or TrustedInstaller own and can write.
 2. **Never older, never twice.** The version floor installs only a newer release (version, then
    sequence); the same release is nothing to do; an older one only with `allow_downgrades()`.
 3. **The administrator decides.** The policy is read on both sides; a source a
-   non-administrator could have written is `off`; holds count.
+   non-administrator could have written is `off`; holds count. The ownership checks of the
+   policy sources, the staging directory and the helper's log are `seaworthy-fsguard`'s.
 4. **The bytes are checked before the package manager sees them.** Exact size, digest, format
    magic and, with `Pinned` keys, the package's own OpenPGP signature; the file sits in a
    root-only directory from download to install.

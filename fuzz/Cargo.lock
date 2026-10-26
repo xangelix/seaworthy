@@ -930,6 +930,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seaworthy-fsguard"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "seaworthy-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -986,6 +995,7 @@ dependencies = [
  "rustls-platform-verifier",
  "seaworthy-crypto",
  "seaworthy-formats",
+ "seaworthy-fsguard",
  "thiserror",
  "tokio",
  "tracing",

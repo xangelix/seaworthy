@@ -20,6 +20,7 @@ body:
         - seaworthy-crypto
         - seaworthy-formats
         - seaworthy-service
+        - seaworthy-fsguard
         - seaworthy-updater
         - CI workflows or templates
         - Documentation

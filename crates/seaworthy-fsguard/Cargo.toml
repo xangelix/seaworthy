@@ -1,0 +1,43 @@
+[package]
+name = "seaworthy-fsguard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Ownership and permission audits of administrator-owned folders for the seaworthy crates: the Windows owner/DACL rule and the handle-based reads behind it (no reparse point followed), and the Unix owner/mode rule"
+readme = "README.md"
+keywords = ["acl", "permissions", "security", "windows", "filesystem"]
+categories = ["filesystem", "os::windows-apis", "os::unix-apis"]
+
+# Native only: the rules are pure and compile everywhere; the audits read
+# the host's file system.
+[dependencies]
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# The effective uid (geteuid): who besides root a Unix policy may name.
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Process tokens and privileges, known folders, handles opened without
+# following reparse points, final paths, link counts, security descriptors
+# (read, made from SDDL, replaced, propagated), directory listings.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[package.metadata.docs.rs]
+# The Windows audits are most of the API: document them first.
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+[lints]
+workspace = true

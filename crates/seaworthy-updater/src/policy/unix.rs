@@ -5,6 +5,8 @@
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
+use seaworthy_fsguard::mode::{Owners, untrusted};
+
 use super::{
     AdminServer, PolicyDecision, PolicyFile, PolicySource, UpdatePolicy, dpkg_holds,
     parse_policy_settings, versionlock_holds,
@@ -89,25 +91,22 @@ fn system_link(path: &Path) -> std::borrow::Cow<'_, Path> {
 pub(crate) fn trusted(path: &Path, top: &Path, require_root_owner: bool) -> Result<(), String> {
     let (path, top) = (system_link(path), system_link(top));
     let (path, top) = (path.as_ref(), top.as_ref());
+    let owners = if require_root_owner {
+        Owners::Root
+    } else {
+        Owners::Anyone
+    };
     let mut current = Some(path);
     while let Some(p) = current {
         let metadata = std::fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!("{} is a symlink", p.display()));
-        }
-        if require_root_owner && metadata.uid() != 0 {
-            return Err(format!(
-                "{} is owned by uid {}, not root",
-                p.display(),
-                metadata.uid()
-            ));
-        }
-        if metadata.mode() & 0o022 != 0 {
-            return Err(format!(
-                "{} is writable by group or others (mode {:o})",
-                p.display(),
-                metadata.mode() & 0o7777
-            ));
+        if let Some(why) = untrusted(
+            &p.display().to_string(),
+            metadata.uid(),
+            metadata.mode(),
+            metadata.file_type().is_symlink(),
+            owners,
+        ) {
+            return Err(why);
         }
         if p == top {
             return Ok(());

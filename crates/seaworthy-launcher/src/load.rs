@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use seaworthy_fsguard::mode::Owners;
+
 /// The core's entry point: `seaworthy_core_main(abi) -> exit code`.
 pub(crate) type CoreMain = unsafe extern "C" fn(u32) -> i32;
 
@@ -95,15 +97,10 @@ mod platform {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-    };
     use windows_sys::Win32::System::LibraryLoader::{
         GetProcAddress, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
         LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW, SetDefaultDllDirectories,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use super::{CoreMain, LoadError};
 
@@ -117,44 +114,6 @@ mod platform {
         } else {
             Ok(())
         }
-    }
-
-    /// Whether this process's token is elevated (`TokenIsElevated`).
-    pub(super) fn token_elevated() -> Result<bool, std::io::Error> {
-        let mut token: HANDLE = std::ptr::null_mut();
-        // SAFETY: GetCurrentProcess takes nothing and can't fail; its
-        // pseudo handle needs no closing.
-        #[allow(unsafe_code, reason = "FFI: GetCurrentProcess")]
-        let process = unsafe { GetCurrentProcess() };
-        // SAFETY: this process's pseudo handle, a query right and a valid
-        // out pointer; the token is closed below.
-        #[allow(unsafe_code, reason = "FFI: OpenProcessToken")]
-        let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
-        if opened == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut size = 0u32;
-        // SAFETY: TokenElevation fills a TOKEN_ELEVATION; the buffer is one,
-        // its size passed, `size` a valid out pointer.
-        #[allow(unsafe_code, reason = "FFI: GetTokenInformation")]
-        let read = unsafe {
-            GetTokenInformation(
-                token,
-                TokenElevation,
-                (&raw mut elevation).cast(),
-                u32::try_from(size_of::<TOKEN_ELEVATION>()).unwrap_or(0),
-                &mut size,
-            )
-        };
-        let error = std::io::Error::last_os_error();
-        // SAFETY: the handle OpenProcessToken returned, closed once.
-        #[allow(unsafe_code, reason = "FFI: CloseHandle")]
-        let _ = unsafe { CloseHandle(token) };
-        if read == 0 {
-            return Err(error);
-        }
-        Ok(elevation.TokenIsElevated != 0)
     }
 
     pub(super) fn load(path: &Path) -> Result<CoreMain, LoadError> {
@@ -291,21 +250,11 @@ fn check_chain(real: &Path, stat: impl Fn(&Path) -> Result<Owner, String>) -> Re
 /// One step of [`check_chain`]: owned by root, not group/other-writable.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn root_controlled(step: &Path, owner: &Owner) -> Result<(), String> {
-    if owner.uid != 0 {
-        return Err(format!(
-            "{} is owned by uid {}, not root",
-            step.display(),
-            owner.uid
-        ));
+    let what = step.display().to_string();
+    match seaworthy_fsguard::mode::untrusted(&what, owner.uid, owner.mode, false, Owners::Root) {
+        Some(why) => Err(why),
+        None => Ok(()),
     }
-    if owner.mode & 0o022 != 0 {
-        return Err(format!(
-            "{} is writable by group or others (mode {:o})",
-            step.display(),
-            owner.mode & 0o7777
-        ));
-    }
-    Ok(())
 }
 
 /// Secure-execution mode — Linux's `AT_SECURE` (set-user-ID, set-group-ID
@@ -351,7 +300,7 @@ pub(crate) fn elevated() -> bool {
     }
     #[cfg(windows)]
     {
-        platform::token_elevated().unwrap_or(true)
+        seaworthy_fsguard::windows::process_elevated().unwrap_or(true)
     }
     #[cfg(not(any(unix, windows)))]
     {

@@ -16,6 +16,11 @@ exclude = ["e2e"]
 # Native only (Linux and Windows on x86-64, macOS on Apple Silicon): no
 # wasm build.
 [dependencies]
+# The trust rules: the Unix owner/mode rule for a core's path in
+# secure-execution mode; on Windows the token's elevation and the MSI's
+# %ProgramData% guard (handles opened without following reparse points,
+# security descriptors, the audit).
+seaworthy-fsguard.workspace = true
 # The feature table, host detection and the record formats.
 seaworthy-levels.workspace = true
 
@@ -31,21 +36,13 @@ seaworthy-levels.workspace = true
 libc.workspace = true
 
 # LoadLibraryExW with restricted search flags, GetProcAddress,
-# SetDefaultDllDirectories; the token's elevation (the overrides are
-# ignored in an elevated process); the MSI's %ProgramData% guard (the
-# known folder, directory handles, security descriptors, privileges, the
-# event log).
+# SetDefaultDllDirectories; the %ProgramData% guard's error codes and its
+# report to the event log.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Com",
     "Win32_System_EventLog",
     "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_UI_Shell",
 ] }
 
 [lints]

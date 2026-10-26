@@ -1,19 +1,17 @@
 //! Who may write a Windows registry key or directory, as a pure decision
-//! over its owner and DACL (the FFI that reads them is in `windows.rs`).
-//! Pure so the rule is unit-tested on every platform, not only on the
-//! Windows runner.
+//! over its owner and DACL (the FFI that reads them is in `windows.rs` and
+//! seaworthy-fsguard). The rule is seaworthy-fsguard's, pure so it is
+//! unit-tested on every platform, not only on the Windows runner; this
+//! module holds the updater's policy: SYSTEM, Administrators and
+//! TrustedInstaller alone may own or write (an OWNER RIGHTS entry holding a
+//! write right is refused too).
 
-/// The principals that may own or write a policy key: LocalSystem,
-/// BUILTIN\Administrators and TrustedInstaller.
-pub(crate) const TRUSTED_WRITERS: [&str; 3] = [
-    "S-1-5-18",
-    "S-1-5-32-544",
-    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-];
-
-/// CREATOR OWNER: in an effective ACE it matches no token (it only means
-/// something when inherited), so it grants nothing.
-const CREATOR_OWNER: &str = "S-1-3-0";
+pub(crate) use seaworthy_fsguard::acl::Ace;
+/// Access rights that change a directory or a file (the update helper's
+/// staging directory and those above it, its log): seaworthy-fsguard's.
+#[cfg(any(feature = "helper", test))]
+pub(crate) use seaworthy_fsguard::acl::DIRECTORY_WRITE_RIGHTS;
+use seaworthy_fsguard::acl::{WriterPolicy, untrusted};
 
 /// Access rights that change a key or what's under it: set value, create
 /// subkey, create link, delete, write DAC, write owner, generic write,
@@ -28,42 +26,6 @@ pub(crate) const WRITE_RIGHTS: u32 = 0x0000_0002
     | 0x1000_0000
     | 0x0200_0000;
 
-/// Access rights that change a directory or what's in it (the update
-/// helper's staging directory and those above it): add file, add
-/// subdirectory, write extended attributes, delete child, write
-/// attributes, delete, write DAC, write owner, generic write, generic all,
-/// maximum allowed. Traverse and the read rights change nothing.
-#[cfg_attr(
-    not(feature = "helper"),
-    allow(dead_code, reason = "only the helper audits directories")
-)]
-pub(crate) const DIRECTORY_WRITE_RIGHTS: u32 = 0x0000_0002
-    | 0x0000_0004
-    | 0x0000_0010
-    | 0x0000_0040
-    | 0x0000_0100
-    | 0x0001_0000
-    | 0x0004_0000
-    | 0x0008_0000
-    | 0x4000_0000
-    | 0x1000_0000
-    | 0x0200_0000;
-
-/// One ACE, reduced to what the rule needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Ace {
-    /// An allow ACE of any kind (plain, object, callback). Deny ACEs are
-    /// ignored: the rule asks whether anything grants a write.
-    pub(crate) allow: bool,
-    /// `INHERIT_ONLY_ACE`: applies to children only, not to this key.
-    pub(crate) inherit_only: bool,
-    /// The access mask.
-    pub(crate) mask: u32,
-    /// The trustee as a string SID; `None` when it couldn't be read (an
-    /// object ACE's trustee follows optional GUIDs): treated as untrusted.
-    pub(crate) sid: Option<String>,
-}
-
 /// Why `key` could be written by someone other than SYSTEM, Administrators
 /// or TrustedInstaller, or `None` when it can't. `dacl` is `None` for a
 /// NULL DACL (full access for everyone).
@@ -77,39 +39,14 @@ pub(crate) fn untrusted_writer(
 
 /// [`untrusted_writer`] for anything named `what` whose `rights` mean a
 /// write ([`WRITE_RIGHTS`] for a key, [`DIRECTORY_WRITE_RIGHTS`] for a
-/// directory).
+/// directory or a file).
 pub(crate) fn untrusted_writer_of(
     what: &str,
     owner: Option<&str>,
     dacl: Option<&[Ace]>,
     rights: u32,
 ) -> Option<String> {
-    match owner {
-        Some(owner) if TRUSTED_WRITERS.contains(&owner) => {}
-        other => {
-            return Some(format!(
-                "{what} is owned by {}, not SYSTEM, Administrators or TrustedInstaller",
-                other.unwrap_or("an unreadable SID")
-            ));
-        }
-    }
-    let Some(dacl) = dacl else {
-        return Some(format!("{what} has no DACL (everyone has full access)"));
-    };
-    dacl.iter()
-        .filter(|ace| ace.allow && !ace.inherit_only && ace.mask & rights != 0)
-        .find(|ace| {
-            !ace.sid
-                .as_deref()
-                .is_some_and(|sid| TRUSTED_WRITERS.contains(&sid) || sid == CREATOR_OWNER)
-        })
-        .map(|ace| {
-            format!(
-                "{what} grants {} write access (mask {:#010x})",
-                ace.sid.as_deref().unwrap_or("an unreadable trustee"),
-                ace.mask
-            )
-        })
+    untrusted(what, owner, dacl, &WriterPolicy::administrators(rights))
 }
 
 #[cfg(test)]

@@ -945,6 +945,8 @@ fn check_privileges(config: &HelperConfig) -> Result<(), HelperError> {
 #[cfg(unix)]
 fn prepare_staging(dir: &Path, require_root: bool) -> Result<(), HelperError> {
     use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+
+    use seaworthy_fsguard::mode::{Owners, untrusted};
     let staging = |why: String| HelperError::Staging(why);
     if !dir.is_absolute() {
         return Err(staging(format!("{} is not absolute", dir.display())));
@@ -972,28 +974,27 @@ fn prepare_staging(dir: &Path, require_root: bool) -> Result<(), HelperError> {
             metadata.mode() & 0o7777
         )));
     }
+    // Root's alone, unless a test run (which can't create root's files);
+    // symlinks and group or world write fail either way (the sticky bit
+    // doesn't help here: anyone could replace a directory in a
+    // world-writable parent they created).
+    let owners = if require_root {
+        Owners::Root
+    } else {
+        Owners::Anyone
+    };
     let mut current = Some(dir);
     while let Some(path) = current {
         let metadata = std::fs::symlink_metadata(path)
             .map_err(|e| staging(format!("{}: {e}", path.display())))?;
-        if metadata.file_type().is_symlink() {
-            return Err(staging(format!("{} is a symlink", path.display())));
-        }
-        if require_root && metadata.uid() != 0 {
-            return Err(staging(format!(
-                "{} is owned by uid {}, not root",
-                path.display(),
-                metadata.uid()
-            )));
-        }
-        // The sticky bit doesn't help here: anyone could replace a
-        // directory in a world-writable parent they created.
-        if metadata.mode() & 0o022 != 0 {
-            return Err(staging(format!(
-                "{} is writable by group or others (mode {:o})",
-                path.display(),
-                metadata.mode() & 0o7777
-            )));
+        if let Some(why) = untrusted(
+            &path.display().to_string(),
+            metadata.uid(),
+            metadata.mode(),
+            metadata.file_type().is_symlink(),
+            owners,
+        ) {
+            return Err(staging(why));
         }
         if !require_root && path.parent().is_some_and(|p| p == std::env::temp_dir()) {
             // Tests stage under the temporary directory, which is

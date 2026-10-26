@@ -38,52 +38,32 @@
 //! dispatcher answers 1063 (`ERROR_FAILED_SERVICE_CONTROLLER_CONNECT`) and
 //! the run happens in the foreground.
 
-// FFI: token, known-folder and directory-security calls through
-// windows-sys. Each `unsafe` block is allowed on its own, with the
-// invariant it relies on.
+// No FFI of its own: the token, the known folder, handles, security
+// descriptors and the audits are seaworthy-fsguard's.
 
-use std::ffi::{OsString, c_void};
-use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::fs::MetadataExt as _;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+use std::os::windows::io::AsHandle as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use seaworthy_fsguard::windows::{
+    FileAccess, KnownFolder, SecurityDescriptor, attributes, create_directory, final_path,
+    known_folder, link_count, named_security, open_file, process_elevated, process_user, security,
+};
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
-};
-use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-};
-use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
-    TOKEN_USER, TokenElevation, TokenUser,
-};
-use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_APPEND_DATA,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_READ, FileAttributeTagInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, OPEN_ALWAYS, OPEN_EXISTING,
-    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS,
-};
-use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+use windows_sys::Win32::Foundation::ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
 
 use super::{HelperConfig, HelperError};
 use crate::policy::acl::{DIRECTORY_WRITE_RIGHTS, untrusted_writer_of};
-use crate::policy::windows::{handle_owner_and_dacl, path_owner_and_dacl, sid_string, wide_units};
 
 /// LocalSystem's SID.
-const LOCAL_SYSTEM: &str = "S-1-5-18";
+const LOCAL_SYSTEM: &str = seaworthy_fsguard::acl::LOCAL_SYSTEM;
 
 /// `FILE_ATTRIBUTE_REPARSE_POINT`: a junction, a symlink or another
 /// reparse point.
@@ -97,113 +77,20 @@ const CREATED_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 /// `%ProgramData%`, from the system's known folder rather than the
 /// environment.
 pub(super) fn program_data() -> Result<PathBuf, String> {
-    let mut path: *mut u16 = std::ptr::null_mut();
-    #[allow(unsafe_code, reason = "looks the ProgramData known folder up")]
-    // SAFETY: a known folder id, no flags, the default user (NULL), and a
-    // valid out pointer; the string is freed with CoTaskMemFree below,
-    // whatever the result.
-    let status =
-        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut path) };
-    let result = if status < 0 || path.is_null() {
-        Err(format!("can't find %ProgramData% (HRESULT {status:#010x})"))
-    } else {
-        #[allow(unsafe_code, reason = "reads the known folder's path")]
-        // SAFETY: a NUL-terminated wide string from the call, alive until
-        // the CoTaskMemFree below (after the copy).
-        let units = unsafe { wide_units(path) };
-        Ok(PathBuf::from(OsString::from_wide(units)))
-    };
-    #[allow(unsafe_code, reason = "frees the known folder's path")]
-    // SAFETY: allocated by SHGetKnownFolderPath (NULL is allowed), freed
-    // once.
-    unsafe {
-        CoTaskMemFree(path.cast_const().cast());
-    }
-    result
-}
-
-/// The current process's token, closed on drop.
-struct Token(HANDLE);
-
-impl Drop for Token {
-    fn drop(&mut self) {
-        #[allow(unsafe_code, reason = "closes the token")]
-        // SAFETY: a handle from OpenProcessToken, closed once, here.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// `GetTokenInformation` into a pointer-aligned buffer.
-fn token_information(token: &Token, class: i32) -> Result<Vec<u64>, String> {
-    let mut size = 0u32;
-    #[allow(unsafe_code, reason = "sizes a token information class")]
-    // SAFETY: a size query with a NULL buffer and a valid size pointer.
-    let _ = unsafe { GetTokenInformation(token.0, class, std::ptr::null_mut(), 0, &mut size) };
-    if size == 0 {
-        return Err(format!(
-            "can't read the process token ({})",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
-    #[allow(unsafe_code, reason = "reads a token information class")]
-    // SAFETY: `buffer` holds at least `size` bytes; `size` is a valid
-    // in/out pointer.
-    let read = unsafe {
-        GetTokenInformation(
-            token.0,
-            class,
-            buffer.as_mut_ptr().cast::<c_void>(),
-            size,
-            &mut size,
-        )
-    };
-    if read == 0 {
-        return Err(format!(
-            "can't read the process token ({})",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(buffer)
+    Ok(known_folder(KnownFolder::ProgramData)?)
 }
 
 /// Refuses a process that is neither LocalSystem nor elevated.
 pub(super) fn check_privileges() -> Result<(), HelperError> {
-    let refuse = HelperError::NotElevated;
-    let mut handle: HANDLE = std::ptr::null_mut();
-    #[allow(unsafe_code, reason = "this process's pseudo handle")]
-    // SAFETY: GetCurrentProcess takes nothing and can't fail; its pseudo
-    // handle needs no closing.
-    let process = unsafe { GetCurrentProcess() };
-    #[allow(unsafe_code, reason = "opens this process's token")]
-    // SAFETY: this process's pseudo handle, a query right and a valid out
-    // pointer; the token is closed by `Token`'s drop.
-    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut handle) };
-    if opened == 0 {
-        return Err(refuse(format!(
-            "can't open the process token ({})",
-            std::io::Error::last_os_error()
-        )));
-    }
-    let token = Token(handle);
-    let user = token_information(&token, TokenUser).map_err(refuse)?;
-    #[allow(unsafe_code, reason = "reads the token's user")]
-    // SAFETY: TokenUser filled the 8-byte-aligned buffer with a TOKEN_USER
-    // (its SID follows it in the buffer, which outlives every use below).
-    let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    let sid = sid_string(sid);
+    let refuse = |e: seaworthy_fsguard::Error| HelperError::NotElevated(e.into());
+    let sid = process_user().map_err(refuse)?;
     if sid.as_deref() == Some(LOCAL_SYSTEM) {
         return Ok(());
     }
-    let elevation = token_information(&token, TokenElevation).map_err(refuse)?;
-    #[allow(unsafe_code, reason = "reads the token's elevation")]
-    // SAFETY: TokenElevation filled the 8-byte-aligned buffer with a
-    // TOKEN_ELEVATION.
-    let elevated = unsafe { (*elevation.as_ptr().cast::<TOKEN_ELEVATION>()).TokenIsElevated };
-    if elevated != 0 {
+    if process_elevated().map_err(refuse)? {
         return Ok(());
     }
-    Err(refuse(format!(
+    Err(HelperError::NotElevated(format!(
         "started as {}, not elevated",
         sid.as_deref().unwrap_or("an unreadable SID")
     )))
@@ -211,51 +98,9 @@ pub(super) fn check_privileges() -> Result<(), HelperError> {
 
 /// Creates `dir` with [`CREATED_DIR_SDDL`] (its parent must exist).
 fn create_private_dir(dir: &Path) -> Result<(), String> {
-    let sddl: Vec<u16> = CREATED_DIR_SDDL
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    #[allow(unsafe_code, reason = "builds the staging directory's DACL")]
-    // SAFETY: a NUL-terminated SDDL string and a valid out pointer; the
-    // descriptor is freed with LocalFree below.
-    let converted = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    };
-    if converted == 0 {
-        return Err(format!(
-            "can't build the staging directory's DACL ({})",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let attributes = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor,
-        bInheritHandle: 0,
-    };
-    let name: Vec<u16> = dir
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    #[allow(unsafe_code, reason = "creates the staging directory")]
-    // SAFETY: a NUL-terminated path and attributes holding the descriptor,
-    // both alive for the call.
-    let created = unsafe { CreateDirectoryW(name.as_ptr(), &attributes) } != 0;
-    let error = std::io::Error::last_os_error();
-    #[allow(unsafe_code, reason = "frees the DACL")]
-    // SAFETY: allocated by the conversion above, freed once.
-    let _ = unsafe { LocalFree(descriptor) };
-    if created {
-        Ok(())
-    } else {
-        Err(format!("can't create {}: {error}", dir.display()))
-    }
+    let descriptor = SecurityDescriptor::from_sddl(CREATED_DIR_SDDL)
+        .map_err(|e| format!("can't build the staging directory's DACL ({e})"))?;
+    create_directory(dir, &descriptor).map_err(|e| format!("can't create {}: {e}", dir.display()))
 }
 
 /// See the module docs. `require_root` off (a test run) skips the audit.
@@ -309,11 +154,11 @@ pub(super) fn prepare_staging(dir: &Path, require_root: bool) -> Result<(), Help
 /// TrustedInstaller and writable by no one else (the directory rights,
 /// whose bits are the matching file rights on a file).
 fn audit_trusted(path: &Path) -> Result<(), String> {
-    let (owner, dacl) = path_owner_and_dacl(path)?;
+    let found = named_security(path)?;
     match untrusted_writer_of(
         &path.display().to_string(),
-        owner.as_deref(),
-        dacl.as_deref(),
+        found.owner.as_deref(),
+        found.dacl.as_deref(),
         DIRECTORY_WRITE_RIGHTS,
     ) {
         Some(why) => Err(why),
@@ -334,69 +179,6 @@ fn is_log_stem(stem: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// An open object's final path (`\\?\C:\…`).
-fn final_path(handle: HANDLE, what: &Path) -> Result<String, String> {
-    let mut buffer = vec![0u16; 1024];
-    loop {
-        let capacity = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
-        #[allow(unsafe_code, reason = "reads an object's final path")]
-        // SAFETY: an open handle and a buffer of `capacity` units.
-        let length = unsafe {
-            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), capacity, VOLUME_NAME_DOS)
-        } as usize;
-        if length == 0 {
-            return Err(format!(
-                "can't read {}'s final path ({})",
-                what.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        if length < buffer.len() {
-            return String::from_utf16(buffer.get(..length).unwrap_or_default())
-                .map_err(|_| format!("{}'s final path isn't UTF-16", what.display()));
-        }
-        if length > 32_768 {
-            return Err(format!("{}'s final path is too long", what.display()));
-        }
-        buffer.resize(length.saturating_add(1), 0);
-    }
-}
-
-/// Opens `path` with `access`, never through a reparse point, creating a
-/// file when `create` (its parent's inheritable DACL then applies).
-fn open_no_follow(path: &Path, access: u32, create: bool) -> Result<std::fs::File, String> {
-    let name: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let disposition = if create { OPEN_ALWAYS } else { OPEN_EXISTING };
-    #[allow(unsafe_code, reason = "opens a file without following a reparse point")]
-    // SAFETY: a NUL-terminated path, no security attributes, no template.
-    let handle = unsafe {
-        CreateFileW(
-            name.as_ptr(),
-            access,
-            FILE_SHARE_READ,
-            std::ptr::null(),
-            disposition,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-        return Err(format!(
-            "can't open {} ({})",
-            path.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
-    #[allow(unsafe_code, reason = "takes ownership of the handle")]
-    // SAFETY: a valid handle CreateFileW just returned, owned by nothing
-    // else: the File closes it.
-    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
-}
-
 /// [`super::log_file`]: the log directory made or audited as the staging
 /// directory is, then `<stem>.log` opened to append without following a
 /// reparse point and kept only if the open handle is a regular file with
@@ -408,68 +190,29 @@ pub(super) fn open_log(dir: &Path, stem: &str) -> Result<std::fs::File, String> 
     }
     prepare_staging(dir, true).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{stem}.log"));
-    let file = open_no_follow(
-        &path,
-        FILE_APPEND_DATA | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        true,
-    )?;
-    let handle = file.as_raw_handle();
-    let mut tag = FILE_ATTRIBUTE_TAG_INFO {
-        FileAttributes: 0,
-        ReparseTag: 0,
-    };
-    #[allow(unsafe_code, reason = "reads the open file's attributes")]
-    // SAFETY: the open handle and a buffer of the class's own type and
-    // size.
-    let read = unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileAttributeTagInfo,
-            (&raw mut tag).cast(),
-            u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>()).unwrap_or(0),
-        )
-    };
-    if read == 0 {
-        return Err(format!(
-            "can't read {}'s attributes ({})",
-            path.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
-    if tag.FileAttributes & REPARSE_POINT != 0 {
+    let file = open_file(&path, FileAccess::Append, true)?;
+    let handle = file.as_handle();
+    let found = attributes(handle, &path)?;
+    if found.is_reparse_point() {
         return Err(format!(
             "{} is a reparse point (a junction or a link)",
             path.display()
         ));
     }
-    if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+    if found.is_directory() {
         return Err(format!("{} is not a file", path.display()));
     }
-    #[allow(unsafe_code, reason = "a zeroed information buffer")]
-    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data; all zeroes is a
-    // valid value, overwritten by the call below.
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    #[allow(unsafe_code, reason = "reads the open file's link count")]
-    // SAFETY: the open handle and a buffer of the call's type.
-    let read = unsafe { GetFileInformationByHandle(handle, &mut info) };
-    if read == 0 {
+    let links = link_count(handle, &path)?;
+    if links != 1 {
         return Err(format!(
-            "can't read {}'s links ({})",
-            path.display(),
-            std::io::Error::last_os_error()
+            "{} has {links} names (a hard link to another file)",
+            path.display()
         ));
     }
-    if info.nNumberOfLinks != 1 {
-        return Err(format!(
-            "{} has {} names (a hard link to another file)",
-            path.display(),
-            info.nNumberOfLinks
-        ));
-    }
-    let directory = open_no_follow(dir, FILE_READ_ATTRIBUTES | SYNCHRONIZE, false)?;
+    let directory = open_file(dir, FileAccess::ReadAttributes, false)?;
     let wanted = format!(
         "{}\\{stem}.log",
-        final_path(directory.as_raw_handle(), dir)?.trim_end_matches('\\')
+        final_path(directory.as_handle(), dir)?.trim_end_matches('\\')
     );
     let found = final_path(handle, &path)?;
     if !found.eq_ignore_ascii_case(&wanted) {
@@ -479,11 +222,11 @@ pub(super) fn open_log(dir: &Path, stem: &str) -> Result<std::fs::File, String> 
         ));
     }
     let what = path.display().to_string();
-    let (owner, dacl) = handle_owner_and_dacl(handle, &what)?;
+    let object = security(handle, &what)?;
     if let Some(why) = untrusted_writer_of(
         &what,
-        owner.as_deref(),
-        dacl.as_deref(),
+        object.owner.as_deref(),
+        object.dacl.as_deref(),
         DIRECTORY_WRITE_RIGHTS,
     ) {
         return Err(why);

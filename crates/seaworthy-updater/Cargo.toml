@@ -48,6 +48,11 @@ fuzzing = ["helper"]
 seaworthy-crypto.workspace = true
 # The signed contract: manifests, release versions, product names.
 seaworthy-formats.workspace = true
+# The ownership rules (Windows owner/DACL, Unix owner/mode) of the policy
+# sources, the staging directory and the helper's log, and the Windows
+# reads behind them (tokens, known folders, handles opened without following
+# reparse points, security descriptors).
+seaworthy-fsguard.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -70,20 +75,16 @@ tokio = { workspace = true, optional = true, features = ["fs", "io-util", "net",
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The policy's registry reader and ACL rule, the request's StartServiceW;
-# the helper's %ProgramData% lookup, token check, staging DACL audit and
-# directory fsync; msiexec's and PowerShell's paths.
+# The policy's registry reader (the key's descriptor goes to
+# seaworthy-fsguard), the request's StartServiceW; the staged files' share
+# modes and the directory fsync; msiexec's and PowerShell's paths.
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
-    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
-    "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_System_Services",
     "Win32_System_SystemInformation",
-    "Win32_System_Threading",
-    "Win32_UI_Shell",
 ] }
 # helper: the helper's service under the Service Control Manager.
 windows-service = { workspace = true, optional = true }

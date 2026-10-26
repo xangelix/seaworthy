@@ -1990,6 +1990,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seaworthy-fsguard"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "seaworthy-lab"
 version = "0.1.0"
 dependencies = [
@@ -2014,6 +2023,7 @@ name = "seaworthy-launcher"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "seaworthy-fsguard",
  "seaworthy-levels",
  "windows-sys 0.61.2",
 ]
@@ -2030,8 +2040,8 @@ dependencies = [
 name = "seaworthy-service"
 version = "0.1.0"
 dependencies = [
- "libc",
  "seaworthy-crypto",
+ "seaworthy-fsguard",
  "thiserror",
  "tokio",
  "tracing",
@@ -2062,6 +2072,7 @@ dependencies = [
  "rustls-platform-verifier",
  "seaworthy-crypto",
  "seaworthy-formats",
+ "seaworthy-fsguard",
  "tempfile",
  "thiserror",
  "tokio",

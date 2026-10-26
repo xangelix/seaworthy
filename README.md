@@ -32,6 +32,7 @@ configuration file, with every piece optional.
 | `seaworthy-crypto` | Signatures, digests, randomness and TLS on AWS-LC (optional FIPS module) |
 | `seaworthy-formats` | Release identifiers, the signed release manifest, the product model |
 | `seaworthy-service` | Service description, renderers (systemd, Windows, launchd) and runtime |
+| `seaworthy-fsguard` | Ownership and permission audits of administrator-owned folders (Windows owner/DACL and reparse points, Unix owner/mode) |
 | `seaworthy-updater` | Update requests, policy, the update helper and installers |
 | `seaworthy` | The command-line tool: plan, build, package, sign, verify, publish |
 

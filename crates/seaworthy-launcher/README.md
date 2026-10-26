@@ -407,9 +407,11 @@ No cryptographic surface.
 
 ## Where it sits
 
-Depends on `seaworthy-levels` (the tables, detection and records), `libc`
-(Unix), `windows-sys` (Windows) and, on macOS, the CoreFoundation framework
-(the failure alert). Products depend on it from their launcher and core
+Depends on `seaworthy-levels` (the tables, detection and records),
+`seaworthy-fsguard` (the path trust rule in secure-execution mode, the
+token's elevation, and the `%ProgramData%` guard's handle-based reads and
+audit), `libc` (Unix), `windows-sys` (Windows) and, on macOS, the
+CoreFoundation framework (the failure alert). Products depend on it from their launcher and core
 crates; a packaging tool lays out and verifies what it produces. Its
 unsafe code is the loader FFI (`dlopen`/`dlsym`, `LoadLibraryExW`/
 `GetProcAddress`), the secure-execution and AMX queries, the record's link
