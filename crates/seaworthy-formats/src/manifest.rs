@@ -347,6 +347,9 @@ pub struct ManifestTrust {
     channel: Option<String>,
     keys: Vec<ReleaseKey>,
     release_trust: ReleaseTrust,
+    /// The product's public CI test keys: only ever non-empty in a build
+    /// made with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` ([`crate::ci_test`]).
+    ci_test_keys: Vec<ReleaseKey>,
 }
 
 impl ManifestTrust {
@@ -376,7 +379,85 @@ impl ManifestTrust {
             channel: None,
             keys,
             release_trust: ReleaseTrust::AnyKey,
+            ci_test_keys: Vec::new(),
         })
+    }
+
+    /// Also trust `keys`, the product's public CI test keys
+    /// (`seaworthy.toml`'s `[defaults.ci-test-keys]`), as a SEPARATE set: a
+    /// manifest verifies under the release keys or under the test keys,
+    /// each by [`release_trust`](Self::release_trust), never by a mix.
+    /// Anyone can sign with a test key, so this works only in a build
+    /// made with [`CI_TEST_KEYS_VAR`](crate::ci_test::CI_TEST_KEYS_VAR)`=1`,
+    /// which then carries the CI test-key marker
+    /// ([`crate::ci_test`]); load the keys with [`ci_test_keys!`](crate::ci_test_keys)
+    /// so a release build holds none. An empty `keys` changes nothing in
+    /// any build.
+    ///
+    /// # Errors
+    /// [`FormatError::InvalidConfig`] for a non-empty `keys` in a build
+    /// without the switch, or a test key that is also a release key.
+    pub fn with_ci_test_keys(
+        self,
+        keys: impl IntoIterator<Item = ReleaseKey>,
+    ) -> Result<Self, FormatError> {
+        self.add_ci_test_keys(
+            keys.into_iter().collect(),
+            crate::ci_test::CI_TEST_KEYS_ALLOWED,
+        )
+    }
+
+    /// [`with_ci_test_keys`](Self::with_ci_test_keys), with the switch as
+    /// a parameter (the tests take both paths in one build).
+    fn add_ci_test_keys(
+        mut self,
+        keys: Vec<ReleaseKey>,
+        allowed: bool,
+    ) -> Result<Self, FormatError> {
+        if keys.is_empty() {
+            return Ok(self);
+        }
+        if !allowed {
+            return Err(FormatError::InvalidConfig(format!(
+                "this build cannot trust CI test keys: anyone can sign with them; only a \
+                 non-release build made with {}=1 may",
+                crate::ci_test::CI_TEST_KEYS_VAR
+            )));
+        }
+        if let Some(both) = keys.iter().find(|key| {
+            self.keys
+                .iter()
+                .any(|r| r.algorithm == key.algorithm && r.public_key == key.public_key)
+        }) {
+            return Err(FormatError::InvalidConfig(format!(
+                "CI test key {} is also a release key: a test key must never be a release key",
+                hex::encode(both.key_id)
+            )));
+        }
+        // Pin the marker into every binary that trusts test keys.
+        #[cfg(seaworthy_ci_test_keys)]
+        std::hint::black_box(crate::ci_test::CI_TEST_KEYS_NOTICE);
+        self.ci_test_keys.extend(keys);
+        Ok(self)
+    }
+
+    /// The CI test keys this trust holds besides the release keys (none
+    /// in a build without the switch).
+    #[must_use]
+    pub fn ci_test_keys(&self) -> &[ReleaseKey] {
+        &self.ci_test_keys
+    }
+
+    /// The warning to log at every run of a helper that trusts CI test
+    /// keys, opening with the CI test-key marker ([`crate::ci_test`]);
+    /// `None` when it trusts none.
+    #[must_use]
+    pub fn ci_test_keys_notice(&self) -> Option<&'static str> {
+        #[cfg(seaworthy_ci_test_keys)]
+        if !self.ci_test_keys.is_empty() {
+            return Some(crate::ci_test::CI_TEST_KEYS_NOTICE);
+        }
+        None
     }
 
     /// Which signatures a release needs (default [`ReleaseTrust::AnyKey`]).
@@ -907,7 +988,13 @@ fn verify_manifest(
 ) -> Result<ReleaseManifest, FormatError> {
     let (manifest, signatures) = ReleaseManifest::decode_signed(bytes)?;
     let statement = manifest.statement()?;
-    let verified = signed_by(&trust.keys, trust.release_trust, &statement, &signatures);
+    let verified = signed_by(&trust.keys, trust.release_trust, &statement, &signatures)
+        || signed_by(
+            &trust.ci_test_keys,
+            trust.release_trust,
+            &statement,
+            &signatures,
+        );
     if !verified {
         return Err(FormatError::SignatureMismatch);
     }
@@ -1574,6 +1661,91 @@ mod tests {
                 .release_trust(),
             ReleaseTrust::AnyKey
         );
+    }
+
+    /// CI test keys: refused by a build without the switch, a separate
+    /// set (never mixed with the release keys under `every-algorithm`),
+    /// and never a release key.
+    #[test]
+    fn ci_test_keys_need_the_switch_and_stay_a_separate_set() {
+        let release = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        let release_ed = SigningKey::generate(SignatureAlgorithm::Ed25519);
+        let test = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        let test_ed = SigningKey::generate(SignatureAlgorithm::Ed25519);
+        let manifest = manifest_for("acme-agent", "2.0.0", b"x");
+        let check = |trust: &ManifestTrust, keys: &[&SigningKey]| {
+            verify_manifest(
+                &signed(&manifest, keys),
+                trust,
+                "2.0.0",
+                ArtifactFormat::Deb,
+                u64::MAX,
+            )
+        };
+        // Without the switch: refused, and an empty set changes nothing.
+        assert!(matches!(
+            trust(&[&release]).add_ci_test_keys(vec![test.release_key()], false),
+            Err(FormatError::InvalidConfig(message)) if message.contains("SEAWORTHY_ALLOW_CI_TEST_KEYS=1")
+        ));
+        let unchanged = trust(&[&release])
+            .add_ci_test_keys(Vec::new(), false)
+            .unwrap();
+        assert!(unchanged.ci_test_keys().is_empty());
+        assert_eq!(unchanged.ci_test_keys_notice(), None);
+        assert!(matches!(
+            check(&unchanged, &[&test]),
+            Err(FormatError::SignatureMismatch)
+        ));
+        // The public entry point follows this build's switch.
+        assert_eq!(
+            trust(&[&release])
+                .with_ci_test_keys([test.release_key()])
+                .is_ok(),
+            crate::ci_test::CI_TEST_KEYS_ALLOWED
+        );
+        // With it: test-signed releases verify, release-signed ones too.
+        let both = trust(&[&release])
+            .add_ci_test_keys(vec![test.release_key()], true)
+            .unwrap();
+        assert_eq!(both.ci_test_keys().len(), 1);
+        check(&both, &[&test]).unwrap();
+        check(&both, &[&release]).unwrap();
+        // A test key that is a release key is refused.
+        assert!(matches!(
+            trust(&[&release]).add_ci_test_keys(vec![release.release_key()], true),
+            Err(FormatError::InvalidConfig(message)) if message.contains("also a release key")
+        ));
+        // every-algorithm holds within each set: a release ML-DSA-87 and a
+        // test Ed25519 signature are not a release's two.
+        let hybrid = trust(&[&release, &release_ed])
+            .with_release_trust(ReleaseTrust::EveryAlgorithm)
+            .add_ci_test_keys(vec![test.release_key(), test_ed.release_key()], true)
+            .unwrap();
+        check(&hybrid, &[&release, &release_ed]).unwrap();
+        check(&hybrid, &[&test, &test_ed]).unwrap();
+        for keys in [&[&release, &test_ed][..], &[&test, &release_ed], &[&test]] {
+            assert!(matches!(
+                check(&hybrid, keys),
+                Err(FormatError::SignatureMismatch)
+            ));
+        }
+    }
+
+    /// In a build made with SEAWORTHY_ALLOW_CI_TEST_KEYS=1, a trust holding
+    /// test keys names itself with the marker.
+    #[cfg(seaworthy_ci_test_keys)]
+    #[test]
+    fn a_trust_with_test_keys_carries_the_marker_notice() {
+        let release = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        let test = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        let trust = trust(&[&release])
+            .with_ci_test_keys([test.release_key()])
+            .unwrap();
+        let notice = trust.ci_test_keys_notice().unwrap();
+        assert!(crate::ci_test::carries_ci_test_keys_marker(
+            notice.as_bytes()
+        ));
+        assert!(notice.contains("never distribute"));
     }
 
     #[test]

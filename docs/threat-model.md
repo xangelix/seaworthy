@@ -197,12 +197,28 @@ that never ship:
 3. **Marked outputs.** Test-signed packages are recorded as `ci_test: true` and unsigned in the
    build's listing. Repository building and publishing refuse such listings, so test-signed
    packages never reach a published repository.
-4. **Trust switch (build time).** A client trusts test keys only when it was compiled with the
-   explicit test-key switch, which is off by default. Release builds are checked to refuse it:
-   the release pipeline fails when the switch is enabled, and verification of a release binary
-   fails when it embeds a key from the test-key set. **Required before 1.0:** the build-time
-   switch and both release-side checks are part of the updater and CLI port; until they land,
-   no binary that trusts test keys may be distributed.
+4. **Trust switch (build time).** A client can trust test keys only when it was compiled with
+   `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` in the build environment; any other value but `0` or empty
+   fails the build. `seaworthy-formats`' build script then sets `cfg(seaworthy_ci_test_keys)`.
+   Without it, `ManifestTrust::with_ci_test_keys` refuses every key, and the
+   `ci_test_keys!(include_str!(…))` macro a helper loads its test keys with drops its argument
+   unexpanded, so a release binary holds no test-key bytes at all. Test keys form a separate
+   set: a manifest verifies under the release keys or under the test keys (each under the
+   product's `release-trust`), never by a mix, and a test key equal to a release key is refused.
+5. **Marked binaries.** When a build trusts test keys, its binary carries the ASCII marker
+   `seaworthy-ci-test-keys:trusted:1`: it opens the warning the update helper logs at every run,
+   and `with_ci_test_keys` pins it into the binary. Code that only scans for the marker builds it
+   at run time from a masked copy, so it never carries it itself.
+6. **Release-side checks.** `seaworthy verify` refuses any binary that carries the marker, or a
+   key of `[defaults.ci-test-keys]` (a release key's last 32 bytes, raw or as hex; an OpenPGP
+   key's first armored line), unless the build is a CI test build (`package --ci-test-signing`,
+   which verifies with the test keys trusted). A release job must fail when
+   `SEAWORTHY_ALLOW_CI_TEST_KEYS` is set to anything but empty or `0`, and can scan its outputs
+   for the marker (`grep -qaF`).
+
+The build-time switch, the marker and the `verify` refusal, formerly **required before 1.0**, are
+in place (`seaworthy-formats` `ci_test`, `seaworthy` verify). The release jobs' guard (item 6)
+belongs to the CI templates (`.github/workflows/dist.yml`, `ci/gitlab/`).
 
 ## Non-goals
 

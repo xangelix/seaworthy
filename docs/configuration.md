@@ -133,7 +133,10 @@ builds a deb or an rpm), and no product may take the id `repository`.
 `[defaults.ci-test-keys]` (optional) holds the public halves of the CI test keys a product's
 non-release builds also trust (`seaworthy package --ci-test-signing`): `release-keys` and
 `openpgp-keys`, as in `[defaults]`. None of them may be one of the real keys, and a release never
-trusts or signs with them.
+trusts or signs with them: a helper trusts them only when built with
+`SEAWORTHY_ALLOW_CI_TEST_KEYS=1` (`seaworthy_updater::ci_test_keys!` and
+`ManifestTrust::with_ci_test_keys`), and `verify` refuses a binary carrying them, or the marker
+such a build embeds, outside a `--ci-test-signing` build.
 
 ### `[product.<id>]`
 

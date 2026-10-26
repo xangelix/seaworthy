@@ -19,6 +19,10 @@
 //!   request paths, the policy file and registry keys.
 //! - **Artifact formats** ([`ArtifactFormat`]) and the format check of a
 //!   verified package ([`format_check`]).
+//! - **The CI test-key switch** ([`ci_test`], [`ci_test_keys!`]): only a
+//!   build made with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` can trust a
+//!   product's public CI test keys, and such a build carries a marker that
+//!   `seaworthy verify` and release pipelines refuse.
 //! - **The update-policy values** ([`UpdatePolicy`]; reading the machine's
 //!   policy is `seaworthy-updater`'s), the digest and signature algorithms
 //!   ([`DigestAlgorithm`], [`SignatureAlgorithm`]), the version-token gate
@@ -70,6 +74,7 @@
     clippy::unreachable
 )]
 
+pub mod ci_test;
 pub mod format_check;
 mod log;
 mod manifest;

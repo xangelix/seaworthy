@@ -36,6 +36,12 @@
 //! loopback, redirect-refusing unless allowlisted, and bounded in size and
 //! time. The machine's administrator decides whether it runs at all.
 //!
+//! **CI test keys** (a product's public test keys, which anyone can sign
+//! with) are trusted only by a build made with
+//! `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` ([`ci_test`],
+//! [`ManifestTrust::with_ci_test_keys`]); such a build logs a warning at
+//! every run and carries a marker `seaworthy verify` refuses in a release.
+//!
 //! ## Order at boot
 //!
 //! `seaworthy-crypto`'s TLS policy and algorithm policy are install-once
@@ -94,7 +100,7 @@ pub use seaworthy_formats::{
     MAX_METADATA_BYTES, MAX_SERVER_BYTES, MAX_VERSION_LEN, MSI_RELEASE_VALUE, ManifestSignature,
     ManifestTrust, Product, ProductError, RELEASE_MANIFEST_DOMAIN, ReleaseKey, ReleaseManifest,
     ReleaseTrust, ServiceNames, SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE,
-    UpdatePolicy, format_check, release, release_key_id, validate_version,
+    UpdatePolicy, ci_test, ci_test_keys, format_check, release, release_key_id, validate_version,
 };
 
 // ------------------------------------------------------------------------------------------------

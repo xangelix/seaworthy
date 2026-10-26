@@ -37,6 +37,12 @@ network-facing parsers are fuzzed (`fuzz/`, target `updater_manifest`).
    built.
 4. **Verify first, compare second.** `ManifestTrust::verify` checks the signature before it
    looks at any field, so mismatch errors only ever describe authenticated content.
+5. **CI test keys need a build-time switch.** Only a build made with
+   `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` can trust a product's public CI test keys
+   (`ManifestTrust::with_ci_test_keys`, loaded through `ci_test_keys!`, which drops its
+   argument unexpanded in any other build). Such a binary carries the marker
+   `seaworthy-ci-test-keys:trusted:1`, which `seaworthy verify` refuses outside a CI test
+   build (module `ci_test`).
 
 ## Example
 

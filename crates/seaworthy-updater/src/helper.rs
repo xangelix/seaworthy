@@ -81,7 +81,11 @@
 //!     # let config = "[defaults]\nvendor = \"Acme\"\nchannel = \"stable\"\n[product.agent]\ndisplay-name = \"Acme Agent\"\nexecutable = \"AcmeAgent\"\n";
 //!     let product = seaworthy_updater::Product::from_config(config, "agent")
 //!         .expect("the compiled-in seaworthy.toml names the product");
-//!     // The release keys `seaworthy.toml`'s `release-keys` lists, compiled in.
+//!     // The release keys `seaworthy.toml`'s `release-keys` lists, compiled
+//!     // in, as ManifestTrust::for_product(&product, keys) (it applies
+//!     // `release-trust`). CI test keys join only through
+//!     // `seaworthy_updater::ci_test_keys!` and `with_ci_test_keys`, which
+//!     // only a build made with SEAWORTHY_ALLOW_CI_TEST_KEYS=1 accepts.
 //!     let trust = trust(&product);
 //!     let config = HelperConfig::new(
 //!         product,
@@ -617,6 +621,10 @@ impl HelperError {
 /// # Errors
 /// [`HelperError`] naming why nothing (more) was installed.
 pub async fn run(config: &HelperConfig) -> Result<HelperOutcome, HelperError> {
+    // A build that trusts the public CI test keys says so at every run.
+    if let Some(notice) = config.trust.ci_test_keys_notice() {
+        tracing::warn!("{notice}");
+    }
     check_privileges(config)?;
     let product = config.product.clone();
     let decision = blocking(move || read_policy(&product)).await?;

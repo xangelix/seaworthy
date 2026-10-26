@@ -210,7 +210,10 @@ its first download.
 - **When:** the helper runs only when asked and at most every 30 seconds; it can be stopped
   (`systemctl stop`, the service's STOP), and an install already handed to its unit runs on.
 - **What the product trusts** is fixed at build time: the release keys and OpenPGP keys compiled
-  into the helper, its package URL template, its redirect allowlist and size cap.
+  into the helper, its package URL template, its redirect allowlist and size cap. A helper
+  trusts the product's public CI test keys only when built with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1`
+  (`ci_test_keys!`, `ManifestTrust::with_ci_test_keys`); it then logs a warning at every run and
+  carries a marker that `seaworthy verify` refuses in a release.
 
 ## The signed manifest
 
