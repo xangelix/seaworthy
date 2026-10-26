@@ -96,7 +96,8 @@
 #   SEAWORTHY_SEQUENCE        the release sequence, a counter that only grows
 #                             (default CI_PIPELINE_IID)
 #   SEAWORTHY_COMMIT          the commit's short SHA, the default build
-#                             metadata (default CI_COMMIT_SHORT_SHA)
+#                             metadata (default CI_COMMIT_SHORT_SHA, or on
+#                             GitHub Actions GITHUB_SHA's first 8 characters)
 #   SEAWORTHY_PRODUCTS        prepare, package, package-macos: the products
 #                             to build and package, comma-separated
 #                             (default every product); the repository
@@ -331,7 +332,7 @@ version() {
 # product composes its own), else the commit's short SHA.
 build_metadata() {
     if [ -z "${SEAWORTHY_BUILD_COMMAND:-}" ]; then
-        echo "${SEAWORTHY_COMMIT:-${CI_COMMIT_SHORT_SHA:-}}"
+        echo "${SEAWORTHY_COMMIT:-${CI_COMMIT_SHORT_SHA:-${GITHUB_SHA:+${GITHUB_SHA:0:8}}}}"
         return
     fi
     local built
