@@ -1084,6 +1084,7 @@ dependencies = [
 name = "seaworthy-service"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "seaworthy-crypto",
  "thiserror",
  "tokio",
