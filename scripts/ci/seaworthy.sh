@@ -106,6 +106,11 @@
 #                             already built from the checkout (the GitHub
 #                             workflow's setup-seaworthy action), installed
 #                             instead of building one
+#   SEAWORTHY_UNSIGNED        1: no signer was given (the GitHub workflow
+#                             without signing secrets): package and
+#                             adopt-msi sign nothing, on a release (still
+#                             versioned from its tag; repo refuses it) or a
+#                             dev build
 #   SEAWORTHY_MACOS_SIGN      1: on a release, package-macos signs with
 #                             SEAWORTHY_SIGNING (its [apple] Developer ID,
 #                             then notarization), and its listing is the
@@ -232,6 +237,9 @@ selected_products() {
         products+=("$id")
     done
 }
+
+# No signer at all, on a release too (SEAWORTHY_UNSIGNED=1).
+unsigned() { [ "${SEAWORTHY_UNSIGNED:-0}" = 1 ]; }
 
 # A dev build: not a release, but its Windows binaries and MSIs
 # carry the release's Authenticode signature (nothing else is signed, and
@@ -666,7 +674,9 @@ package() {
     export NFPM
     source_date_epoch
     local signing=()
-    if release; then
+    if unsigned && { release || dev_sign; }; then
+        say "no signer was given: unsigned packages, version $release_version (the repositories refuse them)"
+    elif release; then
         local file="${SEAWORTHY_SIGNING:-signing.toml}"
         signing_tools "$file"
         signing=(--signing "$file")
@@ -789,7 +799,9 @@ adopt_msi() {
     need_tools msiextract:msitools msiinfo:msitools
     source_date_epoch
     local signing=()
-    if release; then
+    if unsigned && { release || dev_sign; }; then
+        say "no signer was given: the MSIs stay unsigned"
+    elif release; then
         local file="${SEAWORTHY_SIGNING:-signing.toml}"
         signing_tools "$file"
         signing=(--signing "$file")
