@@ -4,8 +4,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
-use std::process::Command;
-
 use seaworthy::build_plan::{Step, plan, plan_for, render};
 use seaworthy::config::Config;
 
@@ -512,7 +510,7 @@ fn the_command_prints_the_plan() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("seaworthy.toml"), CONFIG).unwrap();
     let run = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_seaworthy"))
             .arg("build-plan")
             .arg("--config")
             .arg(dir.path().join("seaworthy.toml"))
