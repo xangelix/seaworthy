@@ -330,7 +330,11 @@ secret unless you sign with a local key file. The full schema is in
   osslsigncode, the repository and macOS tools) start with an allowlisted environment (the
   system's variables: the path, home and temporary directories, locale, proxies, Windows' folders;
   never a `SEAWORTHY_*`, `ACTIONS_*`, `AZURE_*` or `AWS_*` variable or a CI token).
-  `SEAWORTHY_TOOL_ENV` names more variables a site's tools need (never one of those). Signing
+  `SEAWORTHY_TOOL_ENV` names more variables a site's tools need (never one of those). The
+  signature checks `seaworthy` shares with the update helper (gpg and rpmkeys verifying against
+  the pinned keys in a throwaway home) get an even smaller one: `PATH`, `TZ`, `LC_ALL=C`, the
+  names `SEAWORTHY_TOOL_ENV` adds, and `HOME` and `GNUPGHOME` pointing at the throwaway
+  directory, so no `~/.rpmmacros` or `~/.gnupg` changes how they check. Signing
   commands (`[[manifest]]` and `[authenticode]` `command`s) inherit the environment, less the keys
   `key-env` and `secret-key-env` hand over, and are the only programs given the runner's OIDC
   request token and cloud credentials. An OpenPGP key behind a gpg-agent that needs cloud

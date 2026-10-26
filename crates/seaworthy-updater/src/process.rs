@@ -14,12 +14,21 @@
 //! callers parse what programs print (`rpmkeys`' `signatures OK`, rpm's
 //! and dpkg's "not installed"), and a service inherits `LANG` from
 //! `/etc/locale.conf`, under which those messages are translated.
+//!
+//! A program made with [`command`] (the OpenPGP checks' gpg and rpmkeys,
+//! `pacman-conf`) starts with an empty environment and gets back only
+//! [`PROGRAM_ENV`] (on Windows also [`WINDOWS_PROGRAM_ENV`]) and the names
+//! its caller adds: whatever else the caller's environment holds (a
+//! release machine's credentials under any name) never reaches it. A
+//! caller sets what a program needs explicitly (a throwaway `HOME` and
+//! `GNUPGHOME`).
 //! What a failure repeats ([`Finished::shown`]) has its control characters
 //! removed, so a program's output can't forge log lines.
 //!
 //! Everything here blocks: call it from a blocking task, never on an async
 //! executor's worker.
 
+use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -31,6 +40,82 @@ pub const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// How much of a failing program's output an error message repeats.
 pub const MAX_OUTPUT_SHOWN: usize = 400;
+
+/// The variables a [`command`] keeps from this process's environment, when
+/// set: where programs are found and the time zone. [`run`] adds
+/// `LC_ALL=C`; a caller adds anything else explicitly.
+pub const PROGRAM_ENV: &[&str] = &["PATH", "TZ"];
+
+/// On Windows, also the system's own folders and settings, without which
+/// Windows programs fail to start (none of them a credential). Names
+/// compare without case, as Windows compares them.
+pub const WINDOWS_PROGRAM_ENV: &[&str] = &[
+    "SystemRoot",
+    "windir",
+    "SystemDrive",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+    "ALLUSERSPROFILE",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+];
+
+/// Whether `a` names the variable `b` (without case on Windows).
+fn same_name(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// The environment a [`command`] keeps out of `vars`: the variables
+/// [`PROGRAM_ENV`] names (on Windows also [`WINDOWS_PROGRAM_ENV`]) and
+/// those `extra` names, nothing else. A name that isn't text is left out.
+#[must_use]
+pub fn program_environment(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    extra: &[&str],
+) -> Vec<(OsString, OsString)> {
+    let windows: &[&str] = if cfg!(windows) {
+        WINDOWS_PROGRAM_ENV
+    } else {
+        &[]
+    };
+    vars.into_iter()
+        .filter(|(name, _)| {
+            name.to_str().is_some_and(|name| {
+                PROGRAM_ENV
+                    .iter()
+                    .chain(windows)
+                    .chain(extra)
+                    .any(|allowed| same_name(name, allowed))
+            })
+        })
+        .collect()
+}
+
+/// A program's command with an allowlisted environment: empty, then what
+/// [`program_environment`] keeps of this process's, with the `extra` names
+/// (a site's own settings, never a credential). [`run`] adds `LC_ALL=C`;
+/// set what the program needs on the command (`.env("HOME", …)`).
+pub fn command(program: impl AsRef<OsStr>, extra: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.env_clear();
+    // allow-std-env: filtered by the allowlist, nothing else passes
+    command.envs(program_environment(std::env::vars_os(), extra));
+    command
+}
 
 /// Why a program didn't run to an exit status in time.
 #[derive(Debug, thiserror::Error)]
@@ -431,6 +516,84 @@ mod tests {
             run(&mut missing, "test", None, Duration::from_secs(1), 10),
             Err(ProcessError::Spawn { .. })
         ));
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect()
+    }
+
+    #[test]
+    fn a_program_s_environment_is_the_allowlist_and_the_caller_s_names() {
+        let all = vars(&[
+            ("PATH", "/usr/bin"),
+            ("TZ", "UTC"),
+            ("HOME", "/home/ci"),
+            ("GNUPGHOME", "/home/ci/.gnupg"),
+            ("LANG", "de_DE.UTF-8"),
+            ("LD_PRELOAD", "/tmp/evil.so"),
+            ("ACME_RELEASE_TOKEN", "planted"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("ACME_SITE_SETTING", "kept"),
+        ]);
+        let names = |env: Vec<(OsString, OsString)>| -> Vec<String> {
+            env.into_iter()
+                .map(|(k, _)| k.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(program_environment(all.clone(), &[])), ["PATH", "TZ"]);
+        assert_eq!(
+            names(program_environment(all, &["ACME_SITE_SETTING"])),
+            ["PATH", "TZ", "ACME_SITE_SETTING"]
+        );
+    }
+
+    /// The variable a re-run of this test binary carries in its own
+    /// environment, as a release machine's credential would be.
+    const PLANTED: &str = "ACME_PLANTED_SECRET";
+
+    #[test]
+    fn a_planted_secret_never_reaches_a_program() {
+        if std::env::var_os(PLANTED).is_some() {
+            // The re-run: the secret is in this process's environment.
+            let mut command = command("sh", &["ACME_SITE_SETTING"]);
+            command.args(["-c", "env"]).env("HOME", "/nonexistent");
+            let finished =
+                run(&mut command, "test", None, Duration::from_secs(20), 1 << 16).unwrap();
+            let env = String::from_utf8_lossy(&finished.stdout);
+            assert!(!env.contains(PLANTED), "{env}");
+            assert!(!env.contains("hunter2"), "{env}");
+            let mut names: Vec<&str> = env
+                .lines()
+                .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+                .filter(|name| !matches!(*name, "PWD" | "SHLVL" | "_" | "OLDPWD"))
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                ["ACME_SITE_SETTING", "HOME", "LC_ALL", "PATH", "TZ"],
+                "{env}"
+            );
+            assert!(env.lines().any(|line| line == "LC_ALL=C"), "{env}");
+            return;
+        }
+        // Re-run exactly this test with the secret planted in the child's
+        // own environment (std::env::set_var would race the other tests).
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::tests::a_planted_secret_never_reaches_a_program",
+                "--test-threads=1",
+                "--quiet",
+            ])
+            .env(PLANTED, "hunter2")
+            .env("ACME_SITE_SETTING", "kept")
+            .env("TZ", "UTC")
+            .status()
+            .unwrap();
+        assert!(status.success(), "the re-run failed: {status}");
     }
 
     #[test]

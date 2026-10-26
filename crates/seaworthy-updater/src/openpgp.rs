@@ -14,6 +14,13 @@
 //! Neither check consults the machine's own trust (the rpm database's
 //! imported keys, pacman's keyring): those are the package manager's
 //! layer, which still applies when it installs.
+//!
+//! Nor the caller's environment: gpg, gpgconf and rpmkeys start with an
+//! allowlisted one ([`process::command`]: `PATH`, `TZ`, `LC_ALL=C`, plus
+//! [`Tools::env`]), with `HOME` (and for gpg `GNUPGHOME`) set to the
+//! throwaway directory, so no credential the caller holds reaches them and
+//! no configuration in the caller's home (`~/.rpmmacros`, `~/.gnupg`)
+//! changes how they check.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -131,6 +138,10 @@ pub struct Tools {
     pub gpgconf: PathBuf,
     /// `rpmkeys`.
     pub rpmkeys: PathBuf,
+    /// More variables the programs keep from the environment beside
+    /// [`process::PROGRAM_ENV`]: a site's own settings, never a credential
+    /// (the seaworthy CLI passes the names `SEAWORTHY_TOOL_ENV` lists).
+    pub env: Vec<String>,
 }
 
 impl Tools {
@@ -141,6 +152,7 @@ impl Tools {
             gpg: PathBuf::from("gpg"),
             gpgconf: PathBuf::from("gpgconf"),
             rpmkeys: PathBuf::from("rpmkeys"),
+            env: Vec::new(),
         }
     }
 
@@ -152,7 +164,27 @@ impl Tools {
             gpg: PathBuf::from("/usr/bin/gpg"),
             gpgconf: PathBuf::from("/usr/bin/gpgconf"),
             rpmkeys: PathBuf::from("/usr/bin/rpmkeys"),
+            env: Vec::new(),
         }
+    }
+
+    /// `program`'s command with the allowlisted environment
+    /// ([`process::command`] with [`env`](Self::env)) and `HOME` set to
+    /// `home`, a throwaway directory: nothing the caller's environment or
+    /// home holds reaches the check.
+    fn command(&self, program: &Path, home: &Path) -> Command {
+        let extra: Vec<&str> = self.env.iter().map(String::as_str).collect();
+        let mut command = process::command(program, &extra);
+        command.env("HOME", home);
+        command
+    }
+
+    /// [`command`](Self::command) for gpg or gpgconf, `GNUPGHOME` set to
+    /// the throwaway home too.
+    fn gpg_command(&self, program: &Path, home: &Path) -> Command {
+        let mut command = self.command(program, home);
+        command.env("GNUPGHOME", home);
+        command
     }
 }
 
@@ -176,11 +208,11 @@ pub fn check_rpm(
     let db = dir.path().join("db");
     std::fs::create_dir(&db).map_err(|e| SignatureError::Tool(format!("{}: {e}", db.display())))?;
     for key in keys.write_into(dir.path())? {
-        let mut import = Command::new(&tools.rpmkeys);
+        let mut import = tools.command(&tools.rpmkeys, dir.path());
         import.arg("--dbpath").arg(&db).arg("--import").arg(key);
         process::run_ok(&mut import, "rpm key import", CHECK_TIMEOUT)?;
     }
-    let mut check = Command::new(&tools.rpmkeys);
+    let mut check = tools.command(&tools.rpmkeys, dir.path());
     check.arg("--dbpath").arg(&db).arg("--checksig").arg(rpm);
     let finished = process::run(
         &mut check,
@@ -217,7 +249,7 @@ pub fn check_detached(
     tools: &Tools,
 ) -> Result<(), SignatureError> {
     with_pinned_home(keys, scratch, tools, |home| {
-        let mut verify = Command::new(&tools.gpg);
+        let mut verify = tools.gpg_command(&tools.gpg, home);
         verify
             .arg("--homedir")
             .arg(home)
@@ -277,7 +309,7 @@ pub fn check_clearsigned(
     }
     with_pinned_home(keys, scratch, tools, |home| {
         let text = home.join("text");
-        let mut verify = Command::new(&tools.gpg);
+        let mut verify = tools.gpg_command(&tools.gpg, home);
         verify
             .arg("--homedir")
             .arg(home)
@@ -345,7 +377,7 @@ fn with_pinned_home<T>(
     let home = TempDir::new_in(scratch, "gpg").map_err(|e| SignatureError::Tool(e.to_string()))?;
     let key_files = keys.write_into(home.path())?;
     let result = (|| {
-        let mut import = Command::new(&tools.gpg);
+        let mut import = tools.gpg_command(&tools.gpg, home.path());
         import
             .arg("--homedir")
             .arg(home.path())
@@ -354,7 +386,7 @@ fn with_pinned_home<T>(
         process::run_ok(&mut import, "OpenPGP key import", CHECK_TIMEOUT)?;
         check(home.path())
     })();
-    let mut kill = Command::new(&tools.gpgconf);
+    let mut kill = tools.gpg_command(&tools.gpgconf, home.path());
     kill.arg("--homedir")
         .arg(home.path())
         .args(["--kill", "all"]);
@@ -417,6 +449,7 @@ mod tests {
             gpg,
             gpgconf: fake(dir.path(), "gpgconf", "", 0),
             rpmkeys,
+            env: Vec::new(),
         };
         // rpm 4 on an unsigned package: digests only, exit 0.
         let rpm_digests = tools(
@@ -472,6 +505,84 @@ mod tests {
         assert!(left.is_empty(), "{left:?}");
     }
 
+    /// The variable a re-run of this test binary carries in its own
+    /// environment, as a release machine's credential would be.
+    #[cfg(unix)]
+    const PLANTED: &str = "ACME_PLANTED_SECRET";
+
+    #[cfg(unix)]
+    #[test]
+    fn the_checks_programs_never_see_the_caller_s_environment_or_home() {
+        if std::env::var_os(PLANTED).is_none() {
+            // Re-run exactly this test with a secret, a home and a gpg home
+            // in the child's own environment (std::env::set_var would race
+            // the other tests).
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "openpgp::tests::the_checks_programs_never_see_the_caller_s_environment_or_home",
+                    "--test-threads=1",
+                    "--quiet",
+                ])
+                .env(PLANTED, "hunter2")
+                .env("HOME", "/home/acme")
+                .env("GNUPGHOME", "/home/acme/.gnupg")
+                .env("ACME_SITE_SETTING", "kept")
+                .status()
+                .unwrap();
+            assert!(status.success(), "the re-run failed: {status}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let keys = OpenPgpKeys::new([
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQ\n-----END PGP PUBLIC KEY BLOCK-----\n",
+        ])
+        .unwrap();
+        let file = dir.path().join("x");
+        std::fs::write(&file, b"x").unwrap();
+        // Each fake records the environment it was given next to itself.
+        let dumping = |name: &str, stdout: &str| {
+            let path = dir.path().join(name);
+            crate::tests_support::write_script(
+                &path,
+                &format!("#!/bin/sh\nenv > \"$0.env\"\nprintf '%s\\n' '{stdout}'\nexit 0\n"),
+            );
+            path
+        };
+        let tools = Tools {
+            gpg: dumping("gpg", "[GNUPG:] GOODSIG 0123 Acme"),
+            gpgconf: dumping("gpgconf", ""),
+            rpmkeys: dumping("rpmkeys", "x: digests signatures OK"),
+            env: vec!["ACME_SITE_SETTING".to_owned()],
+        };
+        check_detached(&keys, &file, &file, dir.path(), &tools).unwrap();
+        check_rpm(&keys, &file, dir.path(), &tools).unwrap();
+        let scratch = dir.path().to_str().unwrap();
+        for name in ["gpg", "gpgconf", "rpmkeys"] {
+            let env = std::fs::read_to_string(dir.path().join(format!("{name}.env"))).unwrap();
+            assert!(!env.contains(PLANTED), "{name}: {env}");
+            assert!(!env.contains("hunter2"), "{name}: {env}");
+            assert!(!env.contains("/home/acme"), "{name}: {env}");
+            let value = |key: &str| {
+                env.lines()
+                    .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                    .map(str::to_owned)
+            };
+            let home = value("HOME").unwrap();
+            assert!(home.starts_with(&format!("{scratch}/sw-")), "{name}: {env}");
+            if name != "rpmkeys" {
+                assert_eq!(value("GNUPGHOME").as_deref(), Some(home.as_str()), "{name}");
+            }
+            assert_eq!(value("LC_ALL").as_deref(), Some("C"), "{name}");
+            assert_eq!(
+                value("ACME_SITE_SETTING").as_deref(),
+                Some("kept"),
+                "{name}"
+            );
+            assert!(value("PATH").is_some(), "{name}: {env}");
+        }
+    }
+
     /// A fake gpg for [`check_clearsigned`]: a key import succeeds
     /// silently; the check prints `status`, writes `text` to the
     /// `--output` file and exits with `code`.
@@ -504,6 +615,7 @@ mod tests {
             gpg,
             gpgconf: fake(dir.path(), "gpgconf", "", 0),
             rpmkeys: PathBuf::new(),
+            env: Vec::new(),
         };
         let one = "[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG 0123 Acme\n[GNUPG:] PLAINTEXT 74 0";
         let good = tools(fake_decrypt(

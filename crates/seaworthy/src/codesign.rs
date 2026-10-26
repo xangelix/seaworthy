@@ -841,6 +841,7 @@ impl Pins {
             gpg: self.gpg.clone(),
             gpgconf: PathBuf::from("gpgconf"),
             rpmkeys: self.rpmkeys.clone(),
+            env: crate::process::site_tool_names(),
         }
     }
 

@@ -7,7 +7,6 @@
 //! `pacman-conf`, which ships with pacman, for the resolved values.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use crate::process;
@@ -82,13 +81,14 @@ impl PacmanConf {
     }
 }
 
-/// Runs `tool` (`pacman-conf`) on `config` (`/etc/pacman.conf`).
+/// Runs `tool` (`pacman-conf`) on `config` (`/etc/pacman.conf`), with the
+/// allowlisted environment ([`process::command`]).
 ///
 /// # Errors
 /// What went wrong: `pacman-conf` missing, failing (a configuration pacman
 /// itself refuses), or not finishing.
 pub(crate) fn read(tool: &Path, config: &Path) -> Result<PacmanConf, String> {
-    let mut command = Command::new(tool);
+    let mut command = process::command(tool, &[]);
     command.arg("--config").arg(config).args([
         "--verbose",
         "SigLevel",

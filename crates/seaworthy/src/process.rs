@@ -167,6 +167,22 @@ pub fn tool_environment(
         .collect()
 }
 
+/// The names [`TOOL_ENV_VARIABLE`] lists in this process's environment,
+/// less every [denied](is_denied) one: the site's additions, which the
+/// update helper library's own checks (its OpenPGP verification, run with
+/// an even smaller allowlist) are given too.
+#[must_use]
+pub fn site_tool_names() -> Vec<String> {
+    // allow-std-env: the site's additions to the tools' allowlist
+    let extra = std::env::var_os(TOOL_ENV_VARIABLE).unwrap_or_default();
+    extra
+        .to_string_lossy()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|name| !name.is_empty() && !is_denied(name))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// A packaging or checking program's command: an empty environment, then
 /// what [`tool_environment`] allows of this process's.
 pub fn tool(program: impl AsRef<OsStr>) -> Command {
