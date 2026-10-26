@@ -65,7 +65,8 @@ mod tests {
             version: "1.0.0".to_owned(),
             build: "g0123456789ab".to_owned(),
             sequence: 7,
-            target: "x86_64-unknown-linux-gnu".to_owned(),
+            // verify holds a manifest to this build's target.
+            target: seaworthy_formats::TARGET_TRIPLE.to_owned(),
             format: ArtifactFormat::Deb,
             size: 4,
             digest_algorithm: DigestAlgorithm::Sha256,

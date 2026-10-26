@@ -690,11 +690,14 @@ fn remove_calls() -> Vec<String> {
     ])
 }
 
+/// Whether the simulated [`Host`] runs `shell`: a Unix host (it links the
+/// tools in by path and marks its stand-ins executable) that has it.
+fn runs(shell: &str) -> bool {
+    cfg!(unix) && have(shell, &["-c", "true"])
+}
+
 fn shells() -> Vec<&'static str> {
-    ["sh", "dash"]
-        .into_iter()
-        .filter(|s| have(s, &["-c", "true"]))
-        .collect()
+    ["sh", "dash"].into_iter().filter(|s| runs(s)).collect()
 }
 
 #[test]
@@ -1081,7 +1084,7 @@ fn rpm_scripts_install_upgrade_and_erase() {
 
 #[test]
 fn pacman_install_functions_install_upgrade_and_remove() {
-    if !have("bash", &["-c", "true"]) {
+    if !runs("bash") {
         return;
     }
     let s = scripts(Output::Pacman, "acme-agent", &agent_units()).unwrap();
@@ -1162,7 +1165,7 @@ fn a_desktop_apps_helper_unit_is_never_started_by_its_scripts() {
             assert_eq!(host.take(), Vec::<String>::new(), "{shell}");
         }
     }
-    if have("bash", &["-c", "true"]) {
+    if runs("bash") {
         let pacman = scripts(Output::Pacman, "acme-console", &desktop_units()).unwrap();
         let host = Host::new("bash", true);
         host.pacman("pre_install", &pacman.pre_install, &["1.4.0rc.2-812"]);
@@ -1182,8 +1185,18 @@ fn a_desktop_apps_helper_unit_is_never_started_by_its_scripts() {
 // nFPM configurations
 
 /// A generated file with the temporary directory replaced by `<tmp>`.
+/// `text` with the temporary directory as `<tmp>`; on Windows, where JSON
+/// spells it with escaped backslashes, its paths' separators as `/` too
+/// (the golden files are the Unix form).
 fn portable(text: &str, tmp: &Path) -> String {
-    text.replace(&tmp.display().to_string(), "<tmp>")
+    let tmp = tmp.display().to_string();
+    let text = text.replace(&tmp, "<tmp>");
+    if cfg!(windows) {
+        text.replace(&tmp.replace('\\', "\\\\"), "<tmp>")
+            .replace("\\\\", "/")
+    } else {
+        text
+    }
 }
 
 #[test]

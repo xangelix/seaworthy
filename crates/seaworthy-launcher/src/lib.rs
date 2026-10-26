@@ -1122,17 +1122,24 @@ mod tests {
 
     #[test]
     fn argfiles_expand_as_rustc_reads_them() {
+        // An absolute directory: a drive's on Windows.
+        let root = if cfg!(windows) { "C:/flags" } else { "/flags" };
+        let (apx, cpu) = (format!("{root}/apx"), format!("{root}/cpu"));
         let flags = |s: &[&str]| s.iter().map(|f| (*f).to_owned()).collect::<Vec<_>>();
         let read = |path: &Path| -> Result<String, String> {
-            match path.to_str() {
-                Some("/flags/apx") => Ok("-C\r\ntarget_feature=+egpr\n@/flags/nested\n".to_owned()),
-                Some("/flags/cpu") => Ok("-Ctarget-cpu=x86-64-v3".to_owned()),
-                other => Err(format!("no file {other:?}")),
+            if path == Path::new(&apx) {
+                Ok("-C\r\ntarget_feature=+egpr\n@/flags/nested\n".to_owned())
+            } else if path == Path::new(&cpu) {
+                Ok("-Ctarget-cpu=x86-64-v3".to_owned())
+            } else {
+                Err(format!("no file {path:?}"))
             }
         };
-        let (expanded, files) =
-            rustflags::expand_argfiles(flags(&["--cfg", "x", "@/flags/apx", "@/flags/cpu"]), read)
-                .expect("expands");
+        let (expanded, files) = rustflags::expand_argfiles(
+            flags(&["--cfg", "x", &format!("@{apx}"), &format!("@{cpu}")]),
+            read,
+        )
+        .expect("expands");
         // One argument per line, `\r\n` too, and no nesting: an `@` line is
         // an argument, as rustc reads it.
         assert_eq!(
@@ -1146,10 +1153,7 @@ mod tests {
                 "-Ctarget-cpu=x86-64-v3"
             ]
         );
-        assert_eq!(
-            files,
-            [PathBuf::from("/flags/apx"), PathBuf::from("/flags/cpu")]
-        );
+        assert_eq!(files, [PathBuf::from(&apx), PathBuf::from(&cpu)]);
         let known = |name: &str| seaworthy_levels::known("x86_64-unknown-linux-gnu", name);
         assert_eq!(
             rustflags::enabled_unknown_features(&expanded, known),
@@ -1161,9 +1165,13 @@ mod tests {
         );
         // Refused: a relative path (rustc's working directory is unknown
         // here), the unstable shell syntax, and a file that can't be read.
-        for bad in ["@flags/apx", "@shell:/flags/apx", "@/flags/missing"] {
+        for bad in [
+            "@flags/apx".to_owned(),
+            format!("@shell:{apx}"),
+            format!("@{root}/missing"),
+        ] {
             assert!(
-                rustflags::expand_argfiles(flags(&[bad]), read).is_err(),
+                rustflags::expand_argfiles(flags(&[&bad]), read).is_err(),
                 "{bad}"
             );
         }

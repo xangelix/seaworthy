@@ -70,11 +70,13 @@ fn config(dir: &Path, signatures: &[&str], trusted: &[(&str, &Path)], outputs: &
         .map(|s| format!("\"{s}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    // Paths as TOML literal strings: a Windows path's backslashes would be
+    // escapes in a basic one.
     let keys = trusted
         .iter()
         .map(|(alg, path)| {
             format!(
-                "{{ algorithm = \"{alg}\", public-key = \"{}\" }}",
+                "{{ algorithm = \"{alg}\", public-key = '{}' }}",
                 path.display()
             )
         })
@@ -383,7 +385,7 @@ fn a_trusted_key_that_release_signatures_doesnt_list_is_refused_at_load() {
         base.replace(
             "release-keys = []",
             &format!(
-                "release-keys = [{{ algorithm = \"ed25519\", public-key = \"{}\" }}]",
+                "release-keys = [{{ algorithm = \"ed25519\", public-key = '{}' }}]",
                 ed.public.display()
             ),
         ),
@@ -396,7 +398,7 @@ fn a_trusted_key_that_release_signatures_doesnt_list_is_refused_at_load() {
     let text = base.replace(
         "release-keys = []",
         &format!(
-            "release-keys = [{{ algorithm = \"ml-dsa-87\", public-key = \"{}\" }}]",
+            "release-keys = [{{ algorithm = \"ml-dsa-87\", public-key = '{}' }}]",
             ed.public.display()
         ),
     );
@@ -917,17 +919,20 @@ fn signing_toml_takes_exactly_a_key_or_a_command_and_resolves_paths_beside_it() 
             .unwrap()
         })
         .unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
-    let previous = std::env::current_dir().unwrap();
-    std::env::set_current_dir(elsewhere.path()).unwrap();
-    let signed = signers[1].sign(&statement);
-    std::env::set_current_dir(previous).unwrap();
-    assert!(verify(
-        SignatureAlgorithm::MlDsa87,
-        &p.public_key,
-        &statement,
-        &signed.unwrap()
-    ));
+    // Run from another directory (a script runs as a program on Unix alone).
+    if cfg!(unix) {
+        let elsewhere = tempfile::tempdir().unwrap();
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(elsewhere.path()).unwrap();
+        let signed = signers[1].sign(&statement);
+        std::env::set_current_dir(previous).unwrap();
+        assert!(verify(
+            SignatureAlgorithm::MlDsa87,
+            &p.public_key,
+            &statement,
+            &signed.unwrap()
+        ));
+    }
     for bad in [
         "[[manifest]]\nalgorithm = \"ml-dsa-87\"\n",
         "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey = \"k\"\ncommand = [\"x\"]\npublic-key = \"mldsa.pub\"\n",
@@ -1459,7 +1464,9 @@ fn an_openpgp_key_from_the_environment_signs_from_a_private_home_that_goes_with_
 
 /// Through the CLI: a manifest key handed over in the environment signs,
 /// and no tool `seaworthy` starts sees it (the strip tool records its
-/// environment here).
+/// environment here). Unix alone: that tool is a shell script, and it reads
+/// its parent's environment through `/proc`.
+#[cfg(unix)]
 #[test]
 fn a_key_from_the_environment_signs_and_never_reaches_a_tool() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1697,12 +1704,12 @@ vendor = "Acme"
 targets = ["x86-64-v3", "x86-64-v2"]
 channel = "stable"
 release-signatures = ["ml-dsa-87"]
-release-keys = [{{ algorithm = "ml-dsa-87", public-key = "{}" }}]
+release-keys = [{{ algorithm = "ml-dsa-87", public-key = '{}' }}]
 maintainer = "Acme <pkg@acme.test>"
 license = "MIT"
 
 [defaults.ci-test-keys]
-release-keys = [{{ algorithm = "ml-dsa-87", public-key = "{}" }}]
+release-keys = [{{ algorithm = "ml-dsa-87", public-key = '{}' }}]
 
 [product.console]
 display-name = "Acme Console"
@@ -1829,7 +1836,7 @@ fn ci_test_signing_refuses_a_release_and_environment_keys() {
     std::fs::write(
         &release_signing,
         format!(
-            "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey = \"{}\"\n",
+            "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey = '{}'\n",
             real.secret.display()
         ),
     )
@@ -1858,7 +1865,7 @@ fn ci_test_signing_refuses_a_release_and_environment_keys() {
         )
     };
     let test_key_file = format!(
-        "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey = \"{}\"\n",
+        "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey = '{}'\n",
         test.secret.display()
     );
     std::fs::write(&ci_signing, &test_key_file).unwrap();
@@ -1892,7 +1899,7 @@ fn ci_test_signing_refuses_a_release_and_environment_keys() {
         &ci_signing,
         format!(
             "{test_key_file}\n[openpgp]\nkey = \"4996512A5F43B01A5CE106D88FEA21780AA09CA1\"\n\
-             secret-key-file = \"{}\"\n",
+             secret-key-file = '{}'\n",
             tmp.path().join("no-such-key.asc").display()
         ),
     )

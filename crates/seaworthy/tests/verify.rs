@@ -988,7 +988,10 @@ fn a_sidecar_matched_by_two_globs_or_named_like_a_device_is_refused() {
             .any(|f| f.contains("matched by two sidecar globs")),
         "{found:#?}"
     );
-    // A device name.
+    // A device name: written on Unix alone (Windows makes it the device).
+    if !cfg!(unix) {
+        return;
+    }
     let mut device = base;
     device
         .products
