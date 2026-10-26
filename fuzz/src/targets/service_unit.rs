@@ -42,7 +42,8 @@ use std::time::Duration;
 
 use arbitrary::{Arbitrary, Unstructured};
 use seaworthy_service::{
-    FailurePolicy, ServiceSpec, SystemdHardening, SystemdSandbox, WindowsServiceAccount,
+    FailurePolicy, ServiceSpec, SystemdHardening, SystemdSandbox, UnixIdentity,
+    WindowsServiceAccount,
 };
 
 #[derive(Arbitrary, Debug)]
@@ -164,15 +165,19 @@ fn build(input: &Input) -> ServiceSpec {
                 .map(|s| Duration::from_secs(u64::from(*s)))
                 .collect(),
         },
-        sandbox: input
-            .sandbox
-            .as_ref()
-            .map(|(user, group, capabilities, allow_root)| SystemdSandbox {
+        // A sandbox is a dedicated user; without one, bit 23 chooses root
+        // and its absence leaves the identity unspecified (which a system
+        // unit refuses).
+        unix_identity: match &input.sandbox {
+            Some((user, group, capabilities, allow_root)) => UnixIdentity::User(SystemdSandbox {
                 user: user.clone(),
                 group: group.clone(),
                 capabilities: capabilities.clone(),
                 allow_root: *allow_root,
             }),
+            None if bit(23) => UnixIdentity::Root,
+            None => UnixIdentity::Unspecified,
+        },
         systemd_hardening: hardening,
         windows_account: WindowsServiceAccount::default(),
         state_directory: input.state_directory.clone(),
@@ -345,7 +350,10 @@ fn check_unit(unit: &str, spec: &ServiceSpec, user_unit: bool) -> Result<(), Str
             return Err("EnvironmentFile value differs".into());
         }
     }
-    if let (Some(sandbox), false) = (&spec.sandbox, user_unit) {
+    if !user_unit && spec.unix_identity == UnixIdentity::Unspecified {
+        return Err("a system unit rendered without an identity".into());
+    }
+    if let (UnixIdentity::User(sandbox), false) = (&spec.unix_identity, user_unit) {
         if values.get("User").map(|v| v[0]) != Some(sandbox.user.as_str())
             || values.get("Group").map(|v| v[0]) != Some(sandbox.group.as_str())
         {
@@ -497,10 +505,9 @@ fn check_helper_unit(
 }
 
 fn check_sysusers(text: &str, spec: &ServiceSpec) -> Result<(), String> {
-    let sandbox = spec
-        .sandbox
-        .as_ref()
-        .ok_or("sysusers text without a sandbox")?;
+    let UnixIdentity::User(sandbox) = &spec.unix_identity else {
+        return Err("sysusers text without a sandbox user".into());
+    };
     let lines: Vec<&str> = text.lines().collect();
     if lines.first().is_none_or(|l| !l.starts_with("# ")) || lines.len() < 2 || lines.len() > 3 {
         return Err(format!("{} lines", lines.len()));

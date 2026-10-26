@@ -8,7 +8,8 @@
 //! ## Two halves
 //!
 //! - **Always present, pure:** the spec ([`ServiceSpec`], [`FailurePolicy`],
-//!   [`SystemdSandbox`], [`SystemdHardening`], [`WindowsServiceAccount`])
+//!   [`UnixIdentity`], [`SystemdSandbox`], [`SystemdHardening`],
+//!   [`WindowsServiceAccount`])
 //!   and [`render`]: the systemd units and `sysusers.d` entry, the update
 //!   helper's units, a Windows service's MSI record and SDDLs, and a macOS
 //!   package's LaunchDaemons. No OS-specific dependency and no tokio, so a
@@ -114,7 +115,7 @@ pub use run::run_windows_service;
 pub use run::{EXIT_CODE_FATAL, ServiceExit, ShutdownRx, run_service};
 pub use spec::{
     DEFAULT_OPEN_FILES_LIMIT, FailurePolicy, MIN_OPEN_FILES_LIMIT, ServiceSpec, SystemdHardening,
-    SystemdSandbox, WindowsServiceAccount,
+    SystemdSandbox, UnixIdentity, WindowsServiceAccount,
 };
 pub use state::ServiceState;
 

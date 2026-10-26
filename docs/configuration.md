@@ -174,12 +174,13 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | Key | Default | Meaning |
 |---|---|---|
 | `name` | required | The service name: the SCM name, the systemd unit's basename, the LaunchDaemon's label. |
-| `account` | `virtual` | `virtual` (`NT SERVICE\<name>` on Windows; under systemd a sandbox user, or root without one), `local-service`, `network-service` or `local-system` (root under systemd). An MSI refuses `local-service` and `network-service`: every service running as them would share the MSI's grants. |
+| `account` | `virtual` | The Windows account, which decides the Linux identity too: `virtual` (`NT SERVICE\<name>` on Windows; under systemd the `sandbox` user, which it requires), `local-service`, `network-service` (each requiring a `sandbox` too), or `local-system` (LocalSystem on Windows, root under systemd, by this explicit choice). An MSI refuses `local-service` and `network-service`: every service running as them would share the MSI's grants. |
 | `arguments` | `[]` | The launch arguments. |
 | `restart-delays` | `["15s", "60s", "300s", "900s"]` | Restart delays (`15s`, `5m`, `1h`), the last repeating forever. |
 | `reset-period` | `"24h"` | Windows: the stable uptime after which the escalation resets. |
 | `state-directory` | — | systemd `StateDirectory=`, relative to `/var/lib`. Required when the helper ships: the update request file lives there. |
-| `sandbox` | — | The systemd identity: `user`, optional `group` (default the user) and ambient `capabilities`. Any account but `local-system` needs one, or the Linux unit would run as root; `local-system` refuses one. A macOS service runs as root for now, so a `pkg` output refuses a sandbox. |
+| `sandbox` | — | The systemd identity: `user`, optional `group` (default the user) and ambient `capabilities`. Any account but `local-system` needs one (no unit runs as root by omission); `local-system` refuses one. |
+| `macos` | — | The LaunchDaemon's identity, `{ account = "root" }`: required with a `pkg` output, refused without one. Root is the only choice for now (a pkg creates no daemon account), so a product says it explicitly; its Linux `sandbox` user and Windows `account` stay as they are. |
 | `hardening` | `"default"` | systemd hardening: `"default"` (every directive on), `"none"`, or a table (below). |
 
 `[product.<id>.service.hardening]` starts from a preset and changes single directives:

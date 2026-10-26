@@ -288,6 +288,7 @@ esac
             description: "The Acme agent".into(),
             program: PathBuf::from("/Applications/Acme Agent.app/Contents/MacOS/AcmeAgent"),
             arguments: vec!["service".into()],
+            unix_identity: crate::UnixIdentity::Root,
             ..ServiceSpec::default()
         };
         fs::write(&f.plist, render::plist(&spec).unwrap()).unwrap();

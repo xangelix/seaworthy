@@ -35,7 +35,7 @@ every platform's files.
 | `environment_files` | systemd `EnvironmentFile=` lines, where credentials belong | Absolute paths over `[A-Za-z0-9._/@+-]`. systemd reads them as root before the `User=` switch, so `root:root 0600` under root-owned directories is the custody shape. Refused for launchd (a plist is world-readable); ignored on Windows |
 | `open_files_limit` | systemd `LimitNOFILE=` (soft = hard); launchd `NumberOfFiles` | `None` renders 65536 on systemd (systemd's soft default of 1024 caps a connection server near a thousand sockets); at least 64. Values above the kernel's `fs.nr_open` keep the unit from starting |
 | `failure_policy` | Restart delays and the Windows reset period | See [Failure and restart policy](#failure-and-restart-policy) |
-| `sandbox` | `SystemdSandbox`: `User=`/`Group=` and the capability pair; launchd's `UserName`/`GroupName` | See [systemd](#systemd) |
+| `unix_identity` | `UnixIdentity`: `User(SystemdSandbox)` (`User=`/`Group=` and the capability pair; launchd's `UserName`/`GroupName`), `Root` (every capability, by explicit choice), or `Unspecified`, the default | `Unspecified` is refused by the systemd (system scope) and launchd renderers: nothing runs as root by omission. See [systemd](#systemd) |
 | `systemd_hardening` | `SystemdHardening`: the directive set, every knob on by default | See [systemd](#systemd) |
 | `windows_account` | `WindowsServiceAccount`, default the virtual account | See [Windows](#windows) |
 | `state_directory` | systemd `StateDirectory=` (`/var/lib/<dir>`, mode 0700); the update request file lives there | Relative segments over `[A-Za-z0-9._@+-]`; no empty, `.` or `..` segment; not under systemd's reserved `private/` |
@@ -119,7 +119,10 @@ The hardening set (`SystemdHardening`, on by default) renders: `NoNewPrivileges=
 `SystemdHardening::none()` is the explicit all-off shape. User units need unprivileged user
 namespaces for the mount-namespace settings.
 
-The sandbox (`SystemdSandbox`) renders `User=`, `Group=`, `CapabilityBoundingSet=` (the
+The identity must be named (`unix_identity`): a system unit with `UnixIdentity::Unspecified`
+is refused, `UnixIdentity::Root` renders neither `User=` nor a bounding set (every capability,
+the explicit escape hatch for a daemon that needs the host), and `UnixIdentity::User` takes a
+sandbox (`SystemdSandbox`), which renders `User=`, `Group=`, `CapabilityBoundingSet=` (the
 ceiling) and `AmbientCapabilities=` (the grant: after `User=` drops root, only ambient
 capabilities survive `execve`). An empty list renders an empty `CapabilityBoundingSet=`: no
 capabilities, never the full set. User and group names follow the portable rule
@@ -170,8 +173,10 @@ the host), or `Named` (a domain or local account; a password is zeroized on drop
 - `render::launchd::plist(spec)`: `/Library/LaunchDaemons/<name>.plist`: `Label`,
   `ProgramArguments` (no shell, nothing re-split), `RunAtLoad`, `KeepAlive` and
   `ThrottleInterval` from the failure policy, `ProcessType` `Standard`, `ExitTimeOut` 20 s
-  (the run loop's stop hint plus its shutdown grace), `UserName`/`GroupName` from the sandbox
-  (root without one: macOS has no per-service accounts), `NumberOfFiles` limits, `Umask` 0077.
+  (the run loop's stop hint plus its shutdown grace), `UserName`/`GroupName` from a
+  `UnixIdentity::User` (none for `UnixIdentity::Root`; `Unspecified` is refused: macOS has no
+  per-service accounts, so root is a choice the spec states), `NumberOfFiles` limits, `Umask`
+  0077.
 - `render::launchd::daemon_plist(spec, log_file)`: the same, with standard output and error
   appended to a log file (launchd otherwise discards a daemon's output).
 - `render::launchd::update_helper_plist(spec, helper, request_file, log_file)`: the update

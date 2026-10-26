@@ -263,6 +263,11 @@ arguments = ["serve"]
 restart-delays = ["15s"]
 state-directory = "acme/agent"
 
+# A macOS service runs as root, said explicitly (its package creates no
+# daemon account yet).
+[product.agent.service.macos]
+account = "root"
+
 [product.agent.macos]
 bundle-id = "com.example.acme.agent"
 TOML

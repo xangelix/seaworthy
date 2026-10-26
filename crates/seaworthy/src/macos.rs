@@ -299,7 +299,7 @@ pub fn launch_daemons(
     let names = pkg_names(config, id, product)?;
     let refused = |e: seaworthy_service::ServiceError| DistError::Config(e.to_string());
     let program = format!("{}/Contents/MacOS/{}", names.bundle, product.executable);
-    let spec = config.service_spec(id, product, Path::new(&program))?;
+    let spec = config.macos_service_spec(id, product, Path::new(&program))?;
     let log = |label: &str| names.logs.join(format!("{label}.log"));
     let mut daemons = vec![(
         names.service.clone(),

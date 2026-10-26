@@ -5,7 +5,7 @@ least-privilege defaults, plus the runtime glue a service binary needs.*
 
 `seaworthy-service` has two halves:
 
-- **Always present, pure.** `ServiceSpec` (and `FailurePolicy`, `SystemdSandbox`,
+- **Always present, pure.** `ServiceSpec` (and `FailurePolicy`, `UnixIdentity`, `SystemdSandbox`,
   `SystemdHardening`, `WindowsServiceAccount`), validated and rendered by `render` into the
   files an installer needs: systemd units and a `sysusers.d` entry, the update helper's units
   and polkit rule, a Windows service's MSI record and SDDLs, and macOS LaunchDaemon plists. No
@@ -33,7 +33,7 @@ seaworthy-service = { version = "0.1", features = ["runtime"] }
 use std::path::PathBuf;
 
 use seaworthy_service::{
-    ServiceSpec, SystemdSandbox,
+    ServiceSpec, SystemdSandbox, UnixIdentity,
     render::{self, systemd::Scope},
 };
 
@@ -44,7 +44,10 @@ let spec = ServiceSpec {
     program: PathBuf::from("/opt/acme/agent/bin/acme-agent"),
     arguments: vec!["service".into()],
     state_directory: Some("acme/agent".into()),
-    sandbox: Some(SystemdSandbox {
+    // The Unix account: named, never root by omission (the default,
+    // UnixIdentity::Unspecified, is refused by the systemd and launchd
+    // renderers).
+    unix_identity: UnixIdentity::User(SystemdSandbox {
         user: "acme-agent".into(),
         group: "acme-agent".into(),
         capabilities: vec![],
@@ -151,18 +154,20 @@ fn main() {
   directive, so a service opts out of exactly what it needs (a JIT turns off
   `memory_deny_write_execute`). The sandboxed unit scores at the "OK" end of
   `systemd-analyze security` (the crate's tests assert at most 2.0).
-- **A sandbox identity.** `SystemdSandbox` renders `User=`/`Group=` and the
-  `CapabilityBoundingSet=` + `AmbientCapabilities=` pair. An empty capability list means no
-  capabilities. `root`, bare numeric IDs and `%` specifiers are refused unless `allow_root`
-  opts in; `render::systemd::sysusers` creates the user. Without a sandbox a system unit runs
-  as root.
+- **An explicit identity.** `unix_identity` must name the account:
+  `UnixIdentity::User(SystemdSandbox)` renders `User=`/`Group=` and the
+  `CapabilityBoundingSet=` + `AmbientCapabilities=` pair (an empty capability list means no
+  capabilities; `root`, bare numeric IDs and `%` specifiers are refused unless `allow_root`
+  opts in; `render::systemd::sysusers` creates the user), `UnixIdentity::Root` runs as root
+  with every capability by choice, and the default, `UnixIdentity::Unspecified`, is refused
+  by the systemd (system scope) and launchd renderers: nothing runs as root by omission.
 - **Windows: the virtual account.** The default account is `NT SERVICE\<name>`
   (passwordless, a per-service SID that `render::windows::virtual_account_sid` computes at
   packaging time). `LocalSystem` is an explicit opt-in. The state directory grants the account
   Modify, never `WRITE_DAC` or `WRITE_OWNER`; the `%ProgramData%` parents are owned by SYSTEM
   and strip a squatting owner's implicit rights.
-- **launchd.** A sandbox maps to `UserName`/`GroupName`; environment files are refused (a
-  plist is world-readable).
+- **launchd.** A `UnixIdentity::User` maps to `UserName`/`GroupName`, `UnixIdentity::Root`
+  to no `UserName`; environment files are refused (a plist is world-readable).
 
 See [docs/services.md](../../docs/services.md) for every field, the failure policy, what each
 renderer produces, the runtime and the Windows dispatcher contract.

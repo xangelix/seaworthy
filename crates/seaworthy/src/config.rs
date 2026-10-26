@@ -30,7 +30,7 @@
 //!
 //! [product.collector.service]
 //! name = "AcmeLiveResponseService"
-//! account = "local-system"
+//! account = "local-system"                 # LocalSystem on Windows, root under systemd
 //! arguments = ["service"]
 //! restart-delays = ["15s", "60s", "300s", "900s"]
 //! state-directory = "acme/collector"
@@ -47,7 +47,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use seaworthy_service::{
-    FailurePolicy, ServiceSpec, SystemdHardening, SystemdSandbox, WindowsServiceAccount,
+    FailurePolicy, ServiceSpec, SystemdHardening, SystemdSandbox, UnixIdentity,
+    WindowsServiceAccount,
 };
 use serde::Deserialize;
 
@@ -774,12 +775,16 @@ impl ExtraFiles {
     }
 }
 
-/// A service's account.
+/// A service's Windows account, which also decides its Linux identity:
+/// every account but LocalSystem needs a systemd sandbox user, and
+/// LocalSystem runs as root under systemd (both explicit, never a default:
+/// a service named neither way is refused). macOS has its own key
+/// (`[product.<id>.service.macos]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Account {
-    /// The per-service virtual account `NT SERVICE\<name>` on Windows; a
-    /// sandbox user (or root without one) under systemd.
+    /// The per-service virtual account `NT SERVICE\<name>` on Windows; the
+    /// sandbox user under systemd.
     #[default]
     Virtual,
     /// `NT AUTHORITY\LocalService`.
@@ -788,6 +793,24 @@ pub enum Account {
     NetworkService,
     /// LocalSystem on Windows, root under systemd (the collector).
     LocalSystem,
+}
+
+/// `[product.<id>.service.macos]`: the LaunchDaemon's identity, required
+/// with a `pkg` output.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacosService {
+    /// The account the LaunchDaemon runs as.
+    pub account: MacosAccount,
+}
+
+/// A LaunchDaemon's account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MacosAccount {
+    /// Root, by explicit choice: the package creates no daemon account
+    /// (yet), so a macOS service runs as root or not at all.
+    Root,
 }
 
 /// `[product.<id>.service.sandbox]`: the systemd identity.
@@ -826,9 +849,14 @@ pub struct Service {
     /// the helper is shipped: the update request file lives there.
     #[serde(default)]
     pub state_directory: Option<String>,
-    /// The systemd sandbox identity. Without one the unit runs as root.
+    /// The systemd sandbox identity: required unless `account` is
+    /// `local-system`, which runs as root under systemd (and then refused).
     #[serde(default)]
     pub sandbox: Option<Sandbox>,
+    /// The macOS LaunchDaemon's identity: required with a `pkg` output,
+    /// refused without one.
+    #[serde(default)]
+    pub macos: Option<MacosService>,
     /// systemd hardening: `"default"` (all on), `"none"`, or a table
     /// changing one ([`HardeningTable`]).
     #[serde(default)]
@@ -1905,13 +1933,24 @@ impl Config {
                 "pkg holds a macOS service (kind = \"service\"): its LaunchDaemon; a desktop app ships as a dmg",
             ));
         }
-        if p.outputs.contains(&Output::Pkg)
-            && p.service.as_ref().is_some_and(|s| s.sandbox.is_some())
-        {
-            return Err(at(
-                "service.sandbox",
-                "a macOS service runs as root for now (its package doesn't create daemon accounts yet): leave out the sandbox user, or the pkg output",
-            ));
+        // macOS's identity is its own: a pkg's LaunchDaemon runs as root
+        // (the package creates no daemon account yet), which a product says
+        // explicitly; the Linux sandbox user and the Windows account are
+        // unaffected.
+        match (
+            p.outputs.contains(&Output::Pkg),
+            p.service.as_ref().and_then(|s| s.macos.as_ref()),
+        ) {
+            (true, None) if p.service.is_some() => {
+                return Err(at(
+                    "service.macos",
+                    "required with a pkg output: the LaunchDaemon runs as root (the package creates no daemon account yet), so say so: [product.<id>.service.macos] account = \"root\"",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(at("service.macos", "set, but no output is a pkg"));
+            }
+            _ => {}
         }
         if p.outputs.contains(&Output::Msi) && p.windows_directory.is_none() {
             return Err(at(
@@ -2299,12 +2338,19 @@ impl Config {
             .iter()
             .map(|d| parse_duration(d))
             .collect::<Result<Vec<_>, _>>()?;
-        let sandbox = service.sandbox.as_ref().map(|s| SystemdSandbox {
-            user: s.user.clone(),
-            group: s.group.clone().unwrap_or_else(|| s.user.clone()),
-            capabilities: s.capabilities.clone(),
-            allow_root: false,
-        });
+        // Linux: the sandbox user, else root by LocalSystem's explicit
+        // choice, else nothing chosen (validation refuses that before any
+        // renderer sees it).
+        let unix_identity = match (&service.sandbox, service.account) {
+            (Some(s), _) => UnixIdentity::User(SystemdSandbox {
+                user: s.user.clone(),
+                group: s.group.clone().unwrap_or_else(|| s.user.clone()),
+                capabilities: s.capabilities.clone(),
+                allow_root: false,
+            }),
+            (None, Account::LocalSystem) => UnixIdentity::Root,
+            (None, _) => UnixIdentity::Unspecified,
+        };
         Ok(ServiceSpec {
             name: service.name.clone(),
             display_name: product.display_name.clone(),
@@ -2317,7 +2363,7 @@ impl Config {
                 reset_period: parse_duration(&service.reset_period)?,
                 restart_delays,
             },
-            sandbox,
+            unix_identity,
             systemd_hardening: service.hardening.systemd(),
             windows_account: match service.account {
                 Account::Virtual => WindowsServiceAccount::Virtual,
@@ -2327,6 +2373,36 @@ impl Config {
             },
             state_directory: service.state_directory.clone(),
         })
+    }
+
+    /// The product's service as its macOS LaunchDaemon runs it:
+    /// [`service_spec`](Self::service_spec) with the identity
+    /// `[product.<id>.service.macos]` names (root), whatever the Linux
+    /// sandbox and the Windows account say.
+    ///
+    /// # Errors
+    /// As [`service_spec`](Self::service_spec); [`DistError::Config`] when
+    /// the service names no macOS identity.
+    pub fn macos_service_spec(
+        &self,
+        id: &str,
+        product: &Product,
+        program: &Path,
+    ) -> Result<ServiceSpec, DistError> {
+        let mut spec = self.service_spec(id, product, program)?;
+        let macos = product
+            .service
+            .as_ref()
+            .and_then(|service| service.macos.as_ref())
+            .ok_or_else(|| {
+                DistError::Config(format!(
+                    "product.{id}.service.macos: required for a LaunchDaemon (account = \"root\")"
+                ))
+            })?;
+        spec.unix_identity = match macos.account {
+            MacosAccount::Root => UnixIdentity::Root,
+        };
+        Ok(spec)
     }
 
     /// Product `id`'s names as the app side and the update helper derive

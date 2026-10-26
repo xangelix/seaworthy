@@ -125,11 +125,13 @@ pub struct ServiceSpec {
     pub open_files_limit: Option<u64>,
     /// What the supervisor should do when the process fails.
     pub failure_policy: FailurePolicy,
-    /// systemd identity + capability sandbox, opt-in (`None` = the unit
-    /// runs as root with every capability — the "raw host access" escape
-    /// hatch; [`ServiceSpec::systemd_hardening`] still applies). Honored by
-    /// the systemd backend only.
-    pub sandbox: Option<SystemdSandbox>,
+    /// The Unix account the service runs as under systemd and launchd: a
+    /// dedicated user ([`UnixIdentity::User`]), or root by explicit choice
+    /// ([`UnixIdentity::Root`]). The default, [`UnixIdentity::Unspecified`],
+    /// is refused by the systemd (system scope) and launchd renderers: no
+    /// service ends up root because a field was left out. The Windows
+    /// record ignores it ([`ServiceSpec::windows_account`]).
+    pub unix_identity: UnixIdentity,
     /// The systemd hardening directive set, ON by default with a per-knob
     /// opt-out. Honored by the systemd backend only.
     pub systemd_hardening: SystemdHardening,
@@ -157,10 +159,12 @@ impl Default for ServiceSpec {
     /// A base for struct-update syntax, so a caller's literal survives new
     /// fields: `ServiceSpec { name, program, ..ServiceSpec::default() }`.
     /// `name`, `display_name`, `description` and `program` are empty and
-    /// must be set (every renderer refuses them empty). Everything else is
+    /// must be set (every renderer refuses them empty), and so must
+    /// `unix_identity` for a systemd or launchd rendering (left
+    /// [`UnixIdentity::Unspecified`], they refuse it). Everything else is
     /// the documented default: no arguments or environment files, the
-    /// default open-files limit and failure policy, no sandbox, full
-    /// hardening, the virtual account, no state directory.
+    /// default open-files limit and failure policy, full hardening, the
+    /// virtual account, no state directory.
     fn default() -> Self {
         Self {
             name: String::new(),
@@ -171,7 +175,7 @@ impl Default for ServiceSpec {
             environment_files: Vec::new(),
             open_files_limit: None,
             failure_policy: FailurePolicy::default(),
-            sandbox: None,
+            unix_identity: UnixIdentity::Unspecified,
             systemd_hardening: SystemdHardening::default(),
             windows_account: WindowsServiceAccount::default(),
             state_directory: None,
@@ -180,6 +184,32 @@ impl Default for ServiceSpec {
 }
 
 // ---------------------------------------------------------------------------
+
+/// The Unix account a service runs as ([`ServiceSpec::unix_identity`]):
+/// systemd's `User=`/`Group=` and capability pair, launchd's
+/// `UserName`/`GroupName`.
+///
+/// There is no implicit root: a spec must name its identity, and the
+/// systemd (system scope) and launchd renderers refuse
+/// [`UnixIdentity::Unspecified`]. A user manager's unit (systemd
+/// `--user`) already runs as that user and renders no `User=`, so it takes
+/// any identity.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UnixIdentity {
+    /// No choice made (the default): refused wherever it would decide the
+    /// account.
+    #[default]
+    Unspecified,
+    /// A dedicated user and group with a capability allowlist (see
+    /// [`SystemdSandbox`]): the least-privilege identity a package creates
+    /// (`sysusers.d` on Linux).
+    User(SystemdSandbox),
+    /// Root with every capability — systemd renders no `User=` and no
+    /// bounding set, launchd no `UserName` — for a daemon that genuinely
+    /// needs the whole host. [`ServiceSpec::systemd_hardening`] still
+    /// applies.
+    Root,
+}
 
 /// systemd identity and capability sandbox for one service: `User=` /
 /// `Group=` plus the `CapabilityBoundingSet=` / `AmbientCapabilities=`

@@ -23,8 +23,11 @@
 //!   and SCM backends render (first delay up to the last) isn't available.
 //! - `ProcessType` `Standard`: without it launchd throttles the daemon's
 //!   CPU and I/O as a background job.
-//! - `UserName`/`GroupName`: the sandbox's account; root without one (macOS
-//!   has no per-service accounts like Windows' virtual accounts).
+//! - `UserName`/`GroupName`: the account of a [`UnixIdentity::User`];
+//!   nothing for [`UnixIdentity::Root`], which runs as root by explicit
+//!   choice (macOS has no per-service accounts like Windows' virtual
+//!   accounts). [`UnixIdentity::Unspecified`] is refused: no daemon runs as
+//!   root because a field was left out.
 //! - `SoftResourceLimits`/`HardResourceLimits` `NumberOfFiles`: the
 //!   open-files limit.
 //! - `Umask` 63 (0o077) with the hardening's `umask_0077`.
@@ -60,7 +63,7 @@ use crate::render::systemd::{
     validate_description, validate_failure_policy, validate_open_files_limit,
     validate_program_path, validate_state_directory,
 };
-use crate::spec::{ServiceSpec, SystemdSandbox};
+use crate::spec::{ServiceSpec, SystemdSandbox, UnixIdentity};
 use crate::state::ServiceState;
 
 /// Where system daemons' property lists live.
@@ -122,8 +125,14 @@ pub fn validate(spec: &ServiceSpec) -> Result<(), ServiceError> {
             "environment_files has no launchd counterpart (launchd has no EnvironmentFile=, and a plist is world-readable): read credentials from a root-only file in the service instead".into(),
         ));
     }
-    if let Some(sandbox) = &spec.sandbox {
-        validate_account(sandbox)?;
+    match &spec.unix_identity {
+        UnixIdentity::Unspecified => {
+            return Err(ServiceError::InvalidSpec(
+                "unix_identity is unspecified: name the account the daemon runs as, UnixIdentity::User (UserName/GroupName) or UnixIdentity::Root (by explicit choice)".into(),
+            ));
+        }
+        UnixIdentity::User(sandbox) => validate_account(sandbox)?,
+        UnixIdentity::Root => {}
     }
     validate_state_directory(spec.state_directory.as_deref())?;
     validate_open_files_limit(spec.open_files_limit)?;
@@ -303,7 +312,7 @@ fn render(spec: &ServiceSpec, log_file: Option<&Path>) -> Result<String, Service
         "\t<integer>{}</integer>\n",
         EXIT_TIMEOUT.as_secs()
     ));
-    if let Some(sandbox) = &spec.sandbox {
+    if let UnixIdentity::User(sandbox) = &spec.unix_identity {
         key(&mut out, "UserName");
         out.push_str(&format!("\t<string>{}</string>\n", xml_text(&sandbox.user)));
         key(&mut out, "GroupName");
@@ -396,6 +405,7 @@ mod tests {
                 restart_delays: vec![Duration::from_secs(15), Duration::from_secs(900)],
             },
             open_files_limit: Some(4096),
+            unix_identity: UnixIdentity::Root,
             ..ServiceSpec::default()
         };
         spec.systemd_hardening.umask_0077 = true;
@@ -456,7 +466,7 @@ mod tests {
     #[test]
     fn a_sandbox_runs_as_its_account_and_no_delays_means_no_restarts() {
         let mut spec = spec();
-        spec.sandbox = Some(SystemdSandbox {
+        spec.unix_identity = UnixIdentity::User(SystemdSandbox {
             user: "_acme".into(),
             group: "_acme".into(),
             capabilities: Vec::new(),
@@ -499,7 +509,7 @@ mod tests {
         let err = plist(&credentials).unwrap_err().to_string();
         assert!(err.contains("environment_files"), "{err}");
         let mut root = spec();
-        root.sandbox = Some(SystemdSandbox {
+        root.unix_identity = UnixIdentity::User(SystemdSandbox {
             user: "root".into(),
             group: "wheel".into(),
             capabilities: Vec::new(),
@@ -513,7 +523,7 @@ mod tests {
             ("a b", "acme"),
         ] {
             let mut bad = spec();
-            bad.sandbox = Some(SystemdSandbox {
+            bad.unix_identity = UnixIdentity::User(SystemdSandbox {
                 user: user.into(),
                 group: group.into(),
                 capabilities: Vec::new(),
@@ -525,7 +535,7 @@ mod tests {
             );
         }
         let mut capabilities = spec();
-        capabilities.sandbox = Some(SystemdSandbox {
+        capabilities.unix_identity = UnixIdentity::User(SystemdSandbox {
             user: "_acme".into(),
             group: "_acme".into(),
             capabilities: vec!["CAP_NET_BIND_SERVICE".into()],
@@ -536,7 +546,7 @@ mod tests {
             Err(ServiceError::InvalidSpec(_))
         ));
         let mut opted_in = spec();
-        opted_in.sandbox = Some(SystemdSandbox {
+        opted_in.unix_identity = UnixIdentity::User(SystemdSandbox {
             user: "root".into(),
             group: "wheel".into(),
             capabilities: Vec::new(),
@@ -546,6 +556,11 @@ mod tests {
         let mut hot = spec();
         hot.failure_policy.restart_delays = vec![Duration::from_millis(500)];
         assert!(matches!(plist(&hot), Err(ServiceError::InvalidSpec(_))));
+        // No identity named: never root by omission.
+        let mut unspecified = spec();
+        unspecified.unix_identity = UnixIdentity::Unspecified;
+        let err = plist(&unspecified).unwrap_err().to_string();
+        assert!(err.contains("unix_identity is unspecified"), "{err}");
     }
 
     #[test]

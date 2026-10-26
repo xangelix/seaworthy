@@ -554,8 +554,9 @@ fn platforms_split_the_mac_s_outputs_from_the_rest() {
     }
 }
 
-/// A macOS service product: the collector's shape — root, the update
-/// helper, a pkg beside a deb.
+/// A macOS service product: the collector's shape — root (LocalSystem on
+/// Windows, root under systemd, and root on macOS, each said explicitly),
+/// the update helper, a pkg beside a deb.
 const SERVICE: &str = r#"
 [defaults]
 vendor = "Acme"
@@ -583,6 +584,9 @@ arguments = ["service"]
 restart-delays = ["15s", "60s"]
 state-directory = "acme/agent"
 
+[product.agent.service.macos]
+account = "root"
+
 [product.agent.macos]
 bundle-id = "com.acme.agent"
 "#;
@@ -605,12 +609,68 @@ fn a_macos_service_ships_as_a_pkg() {
         &SERVICE.replace("outputs = [\"deb\", \"pkg\"]", "outputs = [\"dmg\"]"),
         "dmg holds a desktop app",
     );
-    // A sandbox user: not on macOS yet.
+    // macOS's identity is said explicitly: never root by omission.
     refused(
-        &(SERVICE.replace("account = \"local-system\"", "account = \"virtual\"")
-            + "\n[product.agent.service.sandbox]\nuser = \"_acmeagent\"\n"),
-        "a macOS service runs as root for now",
+        &SERVICE.replace("[product.agent.service.macos]\naccount = \"root\"\n", ""),
+        "required with a pkg output",
     );
+    refused(
+        &SERVICE.replace("account = \"root\"", "account = \"_acmeagent\""),
+        "unknown variant",
+    );
+    refused(
+        &SERVICE
+            .replace("outputs = [\"deb\", \"pkg\"]", "outputs = [\"deb\"]")
+            .replace(
+                "[product.agent.macos]\nbundle-id = \"com.acme.agent\"\n",
+                "",
+            ),
+        "set, but no output is a pkg",
+    );
+}
+
+/// Each platform's identity is its own: a product shipping a pkg beside a
+/// deb and an MSI runs as its virtual account on Windows and its sandbox
+/// user under systemd, and as root only on macOS, where it says so (a pkg
+/// creates no daemon account yet).
+#[test]
+fn a_pkg_beside_a_deb_and_an_msi_keeps_each_platform_s_identity() {
+    let text = SERVICE
+        .replace(
+            "outputs = [\"deb\", \"pkg\"]",
+            "outputs = [\"deb\", \"msi\", \"pkg\"]",
+        )
+        .replace("account = \"local-system\"", "account = \"virtual\"")
+        .replace(
+            "[product.agent.service.macos]",
+            "[product.agent.service.sandbox]\nuser = \"acme-agent\"\n\n[product.agent.service.macos]",
+        );
+    let config = config(&text).unwrap();
+    let product = &config.products["agent"];
+    // Linux: the sandbox user.
+    let spec = config
+        .service_spec("agent", product, Path::new("/opt/acme/agent/AcmeTool"))
+        .unwrap();
+    let unit = seaworthy_service::render::systemd::unit(
+        &spec,
+        seaworthy_service::render::systemd::Scope::System,
+    )
+    .unwrap();
+    assert!(unit.contains("\nUser=acme-agent\n"), "{unit}");
+    // Windows: the virtual account.
+    let record = seaworthy_service::render::windows::service_record(&spec).unwrap();
+    assert_eq!(record.account, "NT SERVICE\\AcmeAgent");
+    // macOS: root, explicitly — the LaunchDaemon names no user.
+    let daemons = seaworthy::macos::launch_daemons(&config, "agent", product).unwrap();
+    assert!(!daemons[0].1.contains("UserName"), "{}", daemons[0].1);
+    let mac = config
+        .macos_service_spec(
+            "agent",
+            product,
+            Path::new("/Applications/x.app/Contents/MacOS/x"),
+        )
+        .unwrap();
+    assert_eq!(mac.unix_identity, seaworthy_service::UnixIdentity::Root);
 }
 
 #[test]

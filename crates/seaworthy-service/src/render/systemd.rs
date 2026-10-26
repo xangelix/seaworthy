@@ -18,7 +18,8 @@ use std::{
 
 use super::is_conservative_path;
 use crate::{
-    ServiceError, ServiceSpec, SystemdHardening, SystemdSandbox, render::is_safe_service_name,
+    ServiceError, ServiceSpec, SystemdHardening, SystemdSandbox, UnixIdentity,
+    render::is_safe_service_name,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,18 +44,31 @@ pub fn unit_file_name(spec: &ServiceSpec) -> Result<String, ServiceError> {
     Ok(format!("{}.service", spec.name))
 }
 
-/// Validates everything the service unit renders from `spec`: the name,
-/// the sandbox, and every text, path and policy value.
+/// Validates everything the system unit renders from `spec`: the name,
+/// the identity (which must be chosen: [`UnixIdentity::Unspecified`] is
+/// refused), and every text, path and policy value.
 ///
 /// # Errors
 /// [`ServiceError::InvalidName`] / [`ServiceError::InvalidSpec`] naming the
 /// first refused value.
 pub fn validate(spec: &ServiceSpec) -> Result<(), ServiceError> {
     validate_unit_name(&spec.name)?;
-    if let Some(sandbox) = &spec.sandbox {
-        validate_sandbox(sandbox)?;
-    }
+    validate_identity(&spec.unix_identity, false)?;
     validate_spec(spec)
+}
+
+/// The identity rule: a system unit's identity must be chosen (no unit
+/// runs as root because a field was left out), and a user's values pass
+/// [`validate_sandbox`]. A user manager's unit renders no `User=`, so it
+/// takes [`UnixIdentity::Unspecified`].
+pub(crate) fn validate_identity(identity: &UnixIdentity, user: bool) -> Result<(), ServiceError> {
+    match identity {
+        UnixIdentity::Unspecified if !user => Err(ServiceError::InvalidSpec(
+            "unix_identity is unspecified: name the account the unit runs as, UnixIdentity::User (a dedicated user, the least-privilege choice) or UnixIdentity::Root (every capability, by explicit choice)".to_owned(),
+        )),
+        UnixIdentity::User(sandbox) => validate_sandbox(sandbox),
+        UnixIdentity::Unspecified | UnixIdentity::Root => Ok(()),
+    }
 }
 
 /// `spec`'s service unit, for `scope`.
@@ -368,8 +382,9 @@ fn helper_unit(label: &str, helper: &Path, cache_directory: &str) -> Result<Stri
 
 /// The `sysusers.d` entry creating `spec`'s sandbox user (and its group,
 /// when it differs), for `/usr/lib/sysusers.d/<name>.conf`. `None` when the
-/// unit has no sandbox, or runs as root with root's group: there is
-/// nothing to create. A root user with another group gets only the group.
+/// unit runs as root ([`UnixIdentity::Root`]), or its user is root with
+/// root's group: there is nothing to create. A root user with another
+/// group gets only the group.
 ///
 /// A user whose group differs is `u <user> -:<group> …` (sysusers.d(5):
 /// the group goes in the ID field), after a `g <group> -` line.
@@ -380,7 +395,7 @@ fn helper_unit(label: &str, helper: &Path, cache_directory: &str) -> Result<Stri
 /// rewrites those; `%` is escaped as `%%` (sysusers expands specifiers).
 pub fn sysusers(spec: &ServiceSpec) -> Result<Option<String>, ServiceError> {
     validate(spec)?;
-    let Some(sandbox) = &spec.sandbox else {
+    let UnixIdentity::User(sandbox) = &spec.unix_identity else {
         return Ok(None);
     };
     if spec
@@ -707,9 +722,7 @@ pub(crate) fn validate_failure_policy(policy: &crate::FailurePolicy) -> Result<(
 /// callers.
 pub(crate) fn render_unit(spec: &ServiceSpec, user: bool) -> Result<String, ServiceError> {
     validate_spec(spec)?;
-    if let Some(sandbox) = &spec.sandbox {
-        validate_sandbox(sandbox)?;
-    }
+    validate_identity(&spec.unix_identity, user)?;
     let mut unit = String::new();
 
     unit.push_str("[Unit]\n");
@@ -762,7 +775,9 @@ pub(crate) fn render_unit(spec: &ServiceSpec, user: bool) -> Result<String, Serv
         unit.push_str("StateDirectoryMode=0700\n");
     }
 
-    if let Some(sandbox) = &spec.sandbox {
+    // Root (UnixIdentity::Root) renders neither a user nor a bounding set:
+    // every capability, chosen explicitly.
+    if let UnixIdentity::User(sandbox) = &spec.unix_identity {
         if !user {
             unit.push_str(&format!("User={}\n", sandbox.user));
             unit.push_str(&format!("Group={}\n", sandbox.group));
@@ -944,16 +959,23 @@ pub(crate) mod tests {
             environment_files: vec![],
             open_files_limit: None,
             failure_policy: FailurePolicy::default(),
-            sandbox: None,
+            unix_identity: UnixIdentity::Root,
             systemd_hardening: SystemdHardening::none(),
             windows_account: WindowsServiceAccount::default(),
             state_directory: None,
         }
     }
 
+    pub(crate) fn sandbox(spec: &mut ServiceSpec) -> &mut SystemdSandbox {
+        match &mut spec.unix_identity {
+            UnixIdentity::User(sandbox) => sandbox,
+            _ => panic!("not a sandboxed spec"),
+        }
+    }
+
     pub(crate) fn sandboxed_spec() -> ServiceSpec {
         ServiceSpec {
-            sandbox: Some(SystemdSandbox {
+            unix_identity: UnixIdentity::User(SystemdSandbox {
                 user: "acme".to_owned(),
                 group: "acme".to_owned(),
                 capabilities: vec!["CAP_NET_BIND_SERVICE".to_owned(), "CAP_NET_RAW".to_owned()],
@@ -1248,21 +1270,55 @@ WantedBy=multi-user.target
         assert!(exec_line(&unit).contains("$${PATH}"));
     }
 
-    // ---- sandbox + hardening ----
+    // ---- identity, sandbox + hardening ----
+
+    #[test]
+    fn a_system_unit_never_runs_as_root_by_omission() {
+        // The default spec names no identity: refused for a system unit,
+        // its sysusers entry and its update units alike.
+        let unspecified = ServiceSpec {
+            unix_identity: UnixIdentity::Unspecified,
+            state_directory: Some("acme/demo".to_owned()),
+            ..demo_spec()
+        };
+        for result in [
+            validate(&unspecified).map(|()| String::new()),
+            unit(&unspecified, Scope::System),
+            sysusers(&unspecified).map(Option::unwrap_or_default),
+            update_path_unit(&unspecified),
+        ] {
+            let err = result.expect_err("refused").to_string();
+            assert!(err.contains("unix_identity is unspecified"), "{err}");
+        }
+        assert!(matches!(
+            ServiceSpec::default().unix_identity,
+            UnixIdentity::Unspecified
+        ));
+        // A user manager's unit renders no User=: any identity will do.
+        assert!(unit(&unspecified, Scope::User).is_ok());
+        // Root is an explicit choice: no User=, no bounding set.
+        let root = unit(&demo_spec(), Scope::System).expect("renders");
+        assert!(!root.contains("User="), "{root}");
+        assert!(!root.contains("CapabilityBoundingSet"), "{root}");
+        assert_eq!(sysusers(&demo_spec()).expect("valid"), None);
+        // A dedicated user: User=, Group= and the capability pair.
+        let user = unit(&sandboxed_spec(), Scope::System).expect("renders");
+        assert!(user.contains("\nUser=acme\nGroup=acme\n"), "{user}");
+    }
 
     #[test]
     fn root_sandbox_refused_and_empty_caps_mean_none() {
         for (user, group) in [("root", "acme"), ("acme", "root")] {
             let mut spec = sandboxed_spec();
-            let sandbox = spec.sandbox.as_mut().unwrap();
+            let sandbox = sandbox(&mut spec);
             sandbox.user = user.to_owned();
             sandbox.group = group.to_owned();
-            assert!(validate_sandbox(spec.sandbox.as_ref().unwrap()).is_err());
-            spec.sandbox.as_mut().unwrap().allow_root = true;
-            assert!(validate_sandbox(spec.sandbox.as_ref().unwrap()).is_ok());
+            assert!(validate_sandbox(sandbox).is_err());
+            sandbox.allow_root = true;
+            assert!(validate_sandbox(sandbox).is_ok());
         }
         let mut spec = sandboxed_spec();
-        spec.sandbox.as_mut().unwrap().capabilities = vec![];
+        sandbox(&mut spec).capabilities = vec![];
         let unit = render_unit(&spec, false).expect("renders");
         assert!(unit.contains("CapabilityBoundingSet=\n"), "{unit}");
         assert!(!unit.contains("AmbientCapabilities"), "{unit}");
@@ -1307,13 +1363,13 @@ WantedBy=multi-user.target
         ] {
             for field in ["user", "group"] {
                 let mut spec = sandboxed_spec();
-                let sandbox = spec.sandbox.as_mut().unwrap();
+                let sandbox = sandbox(&mut spec);
                 if field == "user" {
                     sandbox.user = bad.to_owned();
                 } else {
                     sandbox.group = bad.to_owned();
                 }
-                let result = validate_sandbox(spec.sandbox.as_ref().unwrap());
+                let result = validate_sandbox(sandbox);
                 assert!(
                     matches!(result, Err(ServiceError::InvalidName(_))),
                     "{field} {bad:?} must be rejected, got {result:?}"
@@ -1329,13 +1385,13 @@ WantedBy=multi-user.target
             "CAP_%i",
         ] {
             let mut spec = sandboxed_spec();
-            spec.sandbox.as_mut().unwrap().capabilities = vec![bad.to_owned()];
+            sandbox(&mut spec).capabilities = vec![bad.to_owned()];
             assert!(matches!(
-                validate_sandbox(spec.sandbox.as_ref().unwrap()),
+                validate_sandbox(sandbox(&mut spec)),
                 Err(ServiceError::InvalidName(_))
             ));
         }
-        assert!(validate_sandbox(sandboxed_spec().sandbox.as_ref().unwrap()).is_ok());
+        assert!(validate_sandbox(sandbox(&mut sandboxed_spec())).is_ok());
     }
 
     // ---- path lists ----
@@ -1832,7 +1888,7 @@ console.log(JSON.stringify([
         // sysusers.d(5): `u user -:group …` — `user:group` in the NAME field
         // is not a valid name, and sysusers then creates nothing.
         let mut split = sandboxed_spec();
-        if let Some(sandbox) = split.sandbox.as_mut() {
+        if let UnixIdentity::User(sandbox) = &mut split.unix_identity {
             sandbox.group = "acme-data".to_owned();
         }
         let text = sysusers(&split).expect("valid").expect("a sandbox");
@@ -1846,13 +1902,13 @@ console.log(JSON.stringify([
     #[test]
     fn sysusers_for_root_creates_at_most_the_group() {
         let mut root = sandboxed_spec();
-        if let Some(sandbox) = root.sandbox.as_mut() {
+        if let UnixIdentity::User(sandbox) = &mut root.unix_identity {
             sandbox.user = "root".to_owned();
             sandbox.group = "root".to_owned();
             sandbox.allow_root = true;
         }
         assert_eq!(sysusers(&root).expect("valid"), None);
-        if let Some(sandbox) = root.sandbox.as_mut() {
+        if let UnixIdentity::User(sandbox) = &mut root.unix_identity {
             sandbox.group = "acme-data".to_owned();
         }
         let text = sysusers(&root).expect("valid").expect("the group");
@@ -1890,7 +1946,7 @@ console.log(JSON.stringify([
             "a$b",
         ] {
             let mut spec = sandboxed_spec();
-            if let Some(sandbox) = spec.sandbox.as_mut() {
+            if let UnixIdentity::User(sandbox) = &mut spec.unix_identity {
                 sandbox.user = bad.to_owned();
             }
             assert!(validate(&spec).is_err(), "{bad:?}");
@@ -1898,7 +1954,7 @@ console.log(JSON.stringify([
         // (A leading `_` is already refused by the shared name rule.)
         for good in ["acme-svc", "svc_user", "a1"] {
             let mut spec = sandboxed_spec();
-            if let Some(sandbox) = spec.sandbox.as_mut() {
+            if let UnixIdentity::User(sandbox) = &mut spec.unix_identity {
                 sandbox.user = good.to_owned();
             }
             assert!(validate(&spec).is_ok(), "{good:?}");

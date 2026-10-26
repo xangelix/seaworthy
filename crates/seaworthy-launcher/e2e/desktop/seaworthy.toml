@@ -111,6 +111,11 @@ arguments = ["serve"]
 restart-delays = ["15s"]
 state-directory = "acme/daemon"
 
+# A macOS service runs as root, said explicitly (its package creates no
+# daemon account yet).
+[product.daemon.service.macos]
+account = "root"
+
 [product.daemon.macos]
 bundle-id = "com.example.acme.daemon"
 

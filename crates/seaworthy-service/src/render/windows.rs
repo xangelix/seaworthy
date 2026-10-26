@@ -415,7 +415,7 @@ mod tests {
             environment_files: vec![],
             open_files_limit: None,
             failure_policy: FailurePolicy::default(),
-            sandbox: None,
+            unix_identity: crate::UnixIdentity::Unspecified,
             systemd_hardening: SystemdHardening::none(),
             windows_account: account,
             state_directory: None,

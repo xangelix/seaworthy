@@ -222,7 +222,8 @@ executable, `CFBundleShortVersionString` = `MAJOR.MINOR.PATCH`, `CFBundleVersion
 - for a desktop product, a **dmg** with `hdiutil` (the app beside a link to `/Applications`). It
   carries no update helper: on macOS a helper is a LaunchDaemon, which only a pkg installs;
 - for a service, a **pkg** with `pkgbuild` and `productbuild`: the bundle in `/Applications`, the
-  service's LaunchDaemon and, with the helper, an on-demand helper daemon watching the update request
+  service's LaunchDaemon (as root, which `[product.<id>.service.macos] account = "root"` must
+  say: a pkg creates no daemon account yet) and, with the helper, an on-demand helper daemon watching the update request
   file, scripts that stop the service before an install and load the daemons after it, and an
   uninstaller at `Contents/Resources/uninstall`.
 

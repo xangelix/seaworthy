@@ -234,7 +234,7 @@ mod tests {
     use std::{ffi::OsString, fs};
 
     use super::*;
-    use crate::render::systemd::tests::{demo_spec, sandboxed_spec};
+    use crate::render::systemd::tests::{demo_spec, sandbox, sandboxed_spec};
     use crate::render::systemd::{render_unit, validate_sandbox, validate_spec};
 
     #[test]
@@ -282,9 +282,9 @@ mod tests {
     #[test]
     fn a_sandbox_value_that_would_inject_a_line_is_refused() {
         let mut spec = sandboxed_spec();
-        spec.sandbox.as_mut().unwrap().user = "a\nb".to_owned();
+        sandbox(&mut spec).user = "a\nb".to_owned();
         assert!(matches!(
-            validate_sandbox(spec.sandbox.as_ref().unwrap()),
+            validate_sandbox(sandbox(&mut spec)),
             Err(ServiceError::InvalidName(_))
         ));
     }
@@ -390,9 +390,9 @@ mod tests {
         let mut spec = sandboxed_spec();
         spec.program = PathBuf::from("/usr/bin/true");
         spec.arguments = vec![];
-        spec.sandbox.as_mut().unwrap().user = "nobody".to_owned();
-        spec.sandbox.as_mut().unwrap().group = "nobody".to_owned();
-        spec.sandbox.as_mut().unwrap().capabilities = vec![];
+        sandbox(&mut spec).user = "nobody".to_owned();
+        sandbox(&mut spec).group = "nobody".to_owned();
+        sandbox(&mut spec).capabilities = vec![];
         let unit_path = root.join("acme-analyze.service");
         fs::write(&unit_path, render_unit(&spec, false).expect("renders")).expect("write");
 
