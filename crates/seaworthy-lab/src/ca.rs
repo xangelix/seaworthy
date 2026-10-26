@@ -7,7 +7,8 @@
 //!
 //! - **Name constraints.** The root's critical `nameConstraints` permit
 //!   exactly the leaf's DNS names (and their subdomains): a certificate it
-//!   signed for any other host fails validation.
+//!   signed for any other host fails validation. Those names must be under
+//!   `.invalid` or `.test` (RFC 6761), which never resolve publicly.
 //! - **No root key after generation.** The root's private key lives in
 //!   memory for the two signatures (root and leaf) and is dropped; it is
 //!   never written, so nothing can issue another certificate under the
@@ -124,9 +125,15 @@ fn serial() -> Result<SerialNumber, LabError> {
     Ok(SerialNumber::from_slice(&bytes))
 }
 
+/// The top-level domains the lab certifies names under: RFC 6761's
+/// `.invalid` and `.test`, which never resolve on the public internet, so
+/// a root the machine trusts for the run can't vouch for a real host even
+/// within its name constraints.
+const LAB_DOMAINS: [&str; 2] = ["invalid", "test"];
+
 /// A DNS name the lab certifies: lowercase letters, digits, `-` and `.`,
 /// labels of 1-63 characters, at most 253 in all, at least two labels, no
-/// wildcard.
+/// wildcard, under one of [`LAB_DOMAINS`].
 fn check_name(name: &str) -> Result<(), LabError> {
     let labels_ok = name.split('.').all(|label| {
         !label.is_empty()
@@ -140,6 +147,15 @@ fn check_name(name: &str) -> Result<(), LabError> {
     if name.len() > 253 || !name.contains('.') || !labels_ok {
         return Err(LabError::Invalid(format!(
             "{name:?} is not a DNS name the lab certifies (lowercase labels of a-z 0-9 -, at least two)"
+        )));
+    }
+    let reserved = name
+        .rsplit('.')
+        .next()
+        .is_some_and(|top| LAB_DOMAINS.contains(&top));
+    if !reserved {
+        return Err(LabError::Invalid(format!(
+            "{name:?} is not under .invalid or .test: the lab certifies only names that never resolve publicly"
         )));
     }
     Ok(())
@@ -327,10 +343,22 @@ mod tests {
             "a..b",
             "-a.b",
             "a_b.c",
+            // Real names, however lab-like: never certified.
+            "packages.example.com",
+            "lab.internal",
+            "invalid.example",
+            "test.invalid.com",
+            "lab.testing",
         ] {
             assert!(
                 LabCa::generate(&[bad.to_owned()], DEFAULT_VALIDITY).is_err(),
                 "{bad:?}"
+            );
+        }
+        for good in ["lab.invalid", "packages.lab.invalid", "updates.lab.test"] {
+            assert!(
+                LabCa::generate(&[good.to_owned()], DEFAULT_VALIDITY).is_ok(),
+                "{good:?}"
             );
         }
         assert!(LabCa::generate(&[], DEFAULT_VALIDITY).is_err());

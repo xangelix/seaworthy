@@ -8,7 +8,7 @@ fixture; no product depends on it.
 | Part | What it is |
 |---|---|
 | `seaworthy-lab serve` (feature `server`) | The lab server: a release tree from a directory, and a product's required-version endpoint |
-| `seaworthy-lab ca` (feature `ca`) | A throwaway CA: a name-constrained root and one leaf for the lab's host names |
+| `seaworthy-lab ca` (feature `ca`) | A throwaway CA: a name-constrained root and one leaf for the lab's host names (under `.invalid` or `.test` only) |
 | `seaworthy-lab required-version` (feature `client`) | The required-version client the fixture's helper uses, from the command line |
 | `seaworthy-lab foreign-manifest` | A signed release manifest re-signed by a throwaway key no build trusts |
 | `conformance_server` (`crates/seaworthy-launcher/e2e/`) | `serve` alone, built beside the fixture in the lanes' builder image |

@@ -25,7 +25,7 @@ use crate::server::{Hold, Options, Server, TlsFiles, Token};
 const USAGE: &str = "usage:
   seaworthy-lab serve --root DIR (--token TOKEN | --token-file FILE) [--listen ADDR]...
                       [--ready FILE] [--hold FILE [--held FILE]] [--tls-cert PEM --tls-key PEM]
-  seaworthy-lab ca --out DIR --name HOST [--name HOST]... [--days N]
+  seaworthy-lab ca --out DIR --name HOST [--name HOST]... [--days N]   (HOST under .invalid or .test)
   seaworthy-lab foreign-manifest --manifest FILE --out FILE
   seaworthy-lab required-version --url URL [--timeout SECONDS]";
 
