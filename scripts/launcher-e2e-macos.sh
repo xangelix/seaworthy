@@ -70,7 +70,10 @@ skip() {
 build() { # <target-dir> <rustflags> <package> [cargo args…]
     local dir="$1" flags="$2" package="$3"
     shift 3
-    RUSTFLAGS="$flags" CARGO_TARGET_DIR="$dir" cargo build --quiet --release --locked \
+    # MACOSX_DEPLOYMENT_TARGET as the build plan sets it (defaults.macos-minimum,
+    # 11.0 in these fixtures): without it AWS-LC's CMake build targets the SDK's
+    # macOS, which seaworthy verify refuses.
+    MACOSX_DEPLOYMENT_TARGET=11.0 RUSTFLAGS="$flags" CARGO_TARGET_DIR="$dir" cargo build --quiet --release --locked \
         --manifest-path "$FIXTURE/Cargo.toml" --target "$TARGET" -p "$package" "$@"
 }
 
