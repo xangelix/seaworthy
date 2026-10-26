@@ -733,7 +733,9 @@ try {
                 $acl.SetSecurityDescriptorSddlForm($TrustedKeyDacl, [System.Security.AccessControl.AccessControlSections]::Access)
                 Set-Acl -LiteralPath $path -AclObject $acl
             }
-            $owner = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            # Through the key: Windows PowerShell 5.1's Get-Acl -LiteralPath
+            # reports a registry key that exists as missing.
+            $owner = (Get-Item -LiteralPath $path).GetAccessControl().GetOwner([System.Security.Principal.SecurityIdentifier]).Value
             Assert-True ($TrustedOwners -contains $owner) "$path is owned by SYSTEM or Administrators, as the helper requires (it is owned by $owner)"
         }
         New-ItemProperty -LiteralPath $PolicyKey -Name 'UpdatePolicy' -PropertyType String -Value 'off' -Force | Out-Null
