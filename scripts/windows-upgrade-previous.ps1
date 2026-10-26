@@ -12,8 +12,10 @@
       the run       a successful run of -Workflow (default lab-windows.yml) on -Branch
                     (default main), from a push, the schedule or a manual dispatch (never
                     a pull request's: its code isn't main's), whose head is this
-                    repository's, with a lower run number than this run (an older release
-                    than this run's candidate), the highest such;
+                    repository's and whose commit is on the branch (reachable from its
+                    tip, read through the branches API: a run of a tag named like the
+                    branch never counts), with a lower run number than this run (an
+                    older release than this run's candidate), the highest such;
       the artifact  that run's one artifact of that name, not expired, its zip no larger
                     than 1 GiB and matching the SHA-256 digest GitHub recorded at upload;
                     then every file lab-build.json lists matches its SHA-256, and the
@@ -94,11 +96,17 @@ function Test-Digits($Value) { return ($null -ne $Value) -and ("$Value" -match '
 # ---------------------------------------------------------------------------
 # The rules (pure; -Phase SelfTest covers them)
 
+# How many of the newest candidate runs are checked for being on the branch.
+$MaxCandidates = 10
+
 # The previous run among the workflow's runs (the API's JSON, parsed): see the header.
-# Exact, case-sensitive comparisons, as jq's.
+# Exact, case-sensitive comparisons, as jq's. -OnBranch answers whether a commit is on
+# the branch (reachable from its tip); the newest candidates are asked in turn, and one
+# whose commit isn't (a run of a tag named like the branch, a rewritten history) is
+# passed over.
 function Select-PreviousRun {
-    param($Runs, [long]$Current, [string]$Repository, [string]$Branch)
-    $best = $null
+    param($Runs, [long]$Current, [string]$Repository, [string]$Branch, [scriptblock]$OnBranch)
+    $candidates = @()
     foreach ($run in @(Get-Field $Runs 'workflow_runs')) {
         if ($null -eq $run) { continue }
         $number = Get-Field $run 'run_number'
@@ -107,14 +115,24 @@ function Select-PreviousRun {
         if ((Get-Field $run 'head_branch') -cne $Branch) { continue }
         if (@('push', 'schedule', 'workflow_dispatch') -cnotcontains (Get-Field $run 'event')) { continue }
         if ((Get-Field (Get-Field $run 'head_repository') 'full_name') -cne $Repository) { continue }
-        if ($null -eq $best -or [long]$number -gt [long](Get-Field $best 'run_number')) { $best = $run }
+        $candidates += $run
     }
-    if ($null -eq $best) { return $null }
-    $id = Get-Field $best 'id'
-    $sha = Get-Field $best 'head_sha'
-    if (-not (Test-Digits $id)) { Fail "run $(Get-Field $best 'run_number') has the id '$id'" }
-    if ("$sha" -cnotmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') { Fail "run $(Get-Field $best 'run_number') has the head '$sha'" }
-    return [pscustomobject]@{ Id = [long]$id; Number = [long](Get-Field $best 'run_number'); HeadSha = [string]$sha }
+    $sorted = @($candidates | Sort-Object -Property @{ Expression = { [long](Get-Field $_ 'run_number') } } -Descending)
+    $checked = 0
+    foreach ($best in $sorted) {
+        if ($checked -ge $MaxCandidates) { break }
+        $checked++
+        $id = Get-Field $best 'id'
+        $sha = Get-Field $best 'head_sha'
+        if (-not (Test-Digits $id)) { Fail "run $(Get-Field $best 'run_number') has the id '$id'" }
+        if ("$sha" -cnotmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') { Fail "run $(Get-Field $best 'run_number') has the head '$sha'" }
+        if (-not (& $OnBranch ([string]$sha))) {
+            Say "run $(Get-Field $best 'run_number')'s commit $sha isn't on $Branch (a tag of that name, or a rewritten history): passed over"
+            continue
+        }
+        return [pscustomobject]@{ Id = [long]$id; Number = [long](Get-Field $best 'run_number'); HeadSha = [string]$sha }
+    }
+    return $null
 }
 
 # The run's artifact named $Name (the API's JSON, parsed), checked: none, or an expired
@@ -280,8 +298,29 @@ function Invoke-Fetch {
         if (-not (Invoke-Api -Url "$api/repos/$repository/actions/workflows/$Workflow/runs?branch=$Branch&status=success&exclude_pull_requests=true&per_page=100" -File $runsFile -MaxBytes $MaxApiBytes -MaxSeconds 120)) {
             Fail "listing $Workflow's runs failed"
         }
-        $run = Select-PreviousRun -Runs ([System.IO.File]::ReadAllText($runsFile) | ConvertFrom-Json) -Current ([long]$runNumber) -Repository $repository -Branch $Branch
-        if ($null -eq $run) { Skip "no successful $Workflow run on $Branch before run $runNumber" }
+        # The branch's tip, through the branches API (which a tag never answers), and
+        # whether a commit is on the branch: its merge base with the tip is itself. (The
+        # block runs inside Select-PreviousRun, and reads this function's variables
+        # through PowerShell's dynamic scope: no closure, which would hide the script's
+        # own functions from it.)
+        $branchFile = Join-Path $private 'branch.json'
+        if (-not (Invoke-Api -Url "$api/repos/$repository/branches/$Branch" -File $branchFile -MaxBytes $MaxApiBytes -MaxSeconds 120)) {
+            Fail "reading the branch $Branch failed"
+        }
+        $tip = Get-Field (Get-Field ([System.IO.File]::ReadAllText($branchFile) | ConvertFrom-Json) 'commit') 'sha'
+        if ("$tip" -cnotmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') { Fail "the branch $Branch has the tip '$tip'" }
+        $compareFile = Join-Path $private 'compare.json'
+        $onBranch = {
+            param([string]$Sha)
+            if ($Sha -ceq $tip) { return $true }
+            if (-not (Invoke-Api -Url "$api/repos/$repository/compare/$Sha...$($tip)?per_page=1" -File $compareFile -MaxBytes $MaxApiBytes -MaxSeconds 120)) {
+                Fail "comparing $Sha with $Branch failed"
+            }
+            $base = Get-Field (Get-Field ([System.IO.File]::ReadAllText($compareFile) | ConvertFrom-Json) 'merge_base_commit') 'sha'
+            return ($base -ceq $Sha)
+        }
+        $run = Select-PreviousRun -Runs ([System.IO.File]::ReadAllText($runsFile) | ConvertFrom-Json) -Current ([long]$runNumber) -Repository $repository -Branch $Branch -OnBranch $onBranch
+        if ($null -eq $run) { Skip "no successful $Workflow run on $Branch, its commit on the branch, before run $runNumber" }
         Say "the previous build is run $($run.Number)'s ($($run.HeadSha))"
 
         $artifactsFile = Join-Path $private 'artifacts.json'
@@ -335,12 +374,20 @@ function Invoke-SelfTest {
             (& $run 14 -Branch 'next'), (& $run 15 -Event 'pull_request'), (& $run 16 -Repository 'fork/seaworthy'),
             (& $run 17 -Repository ''), (& $run 18 -Event 'workflow_run'), (& $run 19 -Repository 'Acme/Seaworthy'),
             (& $run 20), (& $run 25)) }
-    $chosen = Select-PreviousRun -Runs $runs -Current 20 -Repository $repository -Branch 'main'
+    $everyCommit = { param([string]$Sha) $true }
+    $chosen = Select-PreviousRun -Runs $runs -Current 20 -Repository $repository -Branch 'main' -OnBranch $everyCommit
     if ($null -eq $chosen -or $chosen.Number -ne 12 -or $chosen.Id -ne 1012) { throw 'selftest: the previous run is the highest successful main run before this one (12)' }
-    if ($null -ne (Select-PreviousRun -Runs $runs -Current 5 -Repository $repository -Branch 'main')) { throw 'selftest: no run before the first' }
-    if ($null -ne (Select-PreviousRun -Runs ([pscustomobject]@{ workflow_runs = @() }) -Current 9 -Repository $repository -Branch 'main')) { throw 'selftest: no runs, no previous run' }
-    if ($null -ne (Select-PreviousRun -Runs ([pscustomobject]@{ total_count = 0 }) -Current 9 -Repository $repository -Branch 'main')) { throw 'selftest: an answer without runs' }
-    Say 'selftest: the run: the highest successful push, schedule or dispatch run of this repository on main before this one'
+    if ($null -ne (Select-PreviousRun -Runs $runs -Current 5 -Repository $repository -Branch 'main' -OnBranch $everyCommit)) { throw 'selftest: no run before the first' }
+    if ($null -ne (Select-PreviousRun -Runs ([pscustomobject]@{ workflow_runs = @() }) -Current 9 -Repository $repository -Branch 'main' -OnBranch $everyCommit)) { throw 'selftest: no runs, no previous run' }
+    if ($null -ne (Select-PreviousRun -Runs ([pscustomobject]@{ total_count = 0 }) -Current 9 -Repository $repository -Branch 'main' -OnBranch $everyCommit)) { throw 'selftest: an answer without runs' }
+    # A run of a tag named main (its commit isn't on the branch) is passed over for the
+    # next one whose commit is; none on the branch is none at all.
+    $tagged = ('{0:x40}' -f 12)
+    $notTagged = { param([string]$Sha) $Sha -cne $tagged }.GetNewClosure()
+    $chosen = Select-PreviousRun -Runs $runs -Current 20 -Repository $repository -Branch 'main' -OnBranch $notTagged
+    if ($null -eq $chosen -or $chosen.Number -ne 11) { throw 'selftest: a run whose commit is off the branch is passed over (11 instead of 12)' }
+    if ($null -ne (Select-PreviousRun -Runs $runs -Current 20 -Repository $repository -Branch 'main' -OnBranch { param([string]$Sha) $false })) { throw 'selftest: no run on the branch, no previous run' }
+    Say 'selftest: the run: the highest successful push, schedule or dispatch run of this repository on main before this one, its commit on main'
 
     $digest = 'sha256:' + ('ab' * 32)
     $artifact = { param($Fields) [pscustomobject]@{ artifacts = @([pscustomobject]$Fields) } }

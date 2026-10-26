@@ -10,7 +10,9 @@
 # The run: a successful run of SEAWORTHY_UPGRADE_WORKFLOW (default
 # lab.yml) on SEAWORTHY_UPGRADE_BRANCH (default main), from a push, the
 # schedule or a manual dispatch (never a pull request's: its code isn't
-# main's), whose head is this repository's, with a lower run number than
+# main's), whose head is this repository's and whose commit is on the
+# branch (reachable from its tip, read through the branches API: a run of a
+# tag named like the branch never counts), with a lower run number than
 # this run (an older release than this run's candidate), the highest such.
 # The artifact: that run's one artifact of that name, not expired, its zip
 # no larger than 1 GiB and matching the SHA-256 digest GitHub recorded at
@@ -80,16 +82,37 @@ get() { # <url> <out file>
 
 get "$api/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=$branch&status=success&exclude_pull_requests=true&per_page=100" \
     "$tmp/runs.json" || fail "listing $workflow's runs failed"
-run="$(jq -r --argjson current "$GITHUB_RUN_NUMBER" --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" '
+# The candidates, newest first (at most 10 are checked).
+mapfile -t candidates < <(jq -r --argjson current "$GITHUB_RUN_NUMBER" --arg repo "$GITHUB_REPOSITORY" --arg branch "$branch" '
     [.workflow_runs[]
      | select(.conclusion == "success" and .head_branch == $branch
               and (.event == "push" or .event == "schedule" or .event == "workflow_dispatch")
               and .head_repository.full_name == $repo and .run_number < $current)]
-    | max_by(.run_number) // empty
-    | "\(.id) \(.run_number) \(.head_sha)"' "$tmp/runs.json")"
-[ -n "$run" ] || none "no successful $workflow run on $branch before run $GITHUB_RUN_NUMBER"
-read -r run_id run_number head_sha <<<"$run"
-[[ "$run_id" =~ ^[0-9]+$ ]] || fail "run id ${run_id@Q}"
+    | sort_by(.run_number) | reverse | .[:10][]
+    | "\(.id) \(.run_number) \(.head_sha)"' "$tmp/runs.json")
+[ "${#candidates[@]}" -gt 0 ] || none "no successful $workflow run on $branch before run $GITHUB_RUN_NUMBER"
+# The branch's tip, through the branches API (which a tag never answers); a
+# run's commit is on the branch when its merge base with the tip is itself.
+get "$api/repos/$GITHUB_REPOSITORY/branches/$branch" "$tmp/branch.json" || fail "reading the branch $branch failed"
+tip="$(jq -r '.commit.sha // empty' "$tmp/branch.json")"
+[[ "$tip" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || fail "the branch $branch has the tip ${tip@Q}"
+run_id="" run_number="" head_sha=""
+for candidate in "${candidates[@]}"; do
+    read -r id number sha <<<"$candidate"
+    [[ "$id" =~ ^[0-9]+$ ]] || fail "run id ${id@Q}"
+    [[ "$sha" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || fail "run $number has the head ${sha@Q}"
+    if [ "$sha" != "$tip" ]; then
+        get "$api/repos/$GITHUB_REPOSITORY/compare/$sha...$tip?per_page=1" "$tmp/compare.json" ||
+            fail "comparing run $number's commit with $branch failed"
+        if [ "$(jq -r '.merge_base_commit.sha // empty' "$tmp/compare.json")" != "$sha" ]; then
+            say "run $number's commit $sha isn't on $branch (a tag of that name, or a rewritten history): passed over"
+            continue
+        fi
+    fi
+    run_id="$id" run_number="$number" head_sha="$sha"
+    break
+done
+[ -n "$run_id" ] || none "no successful $workflow run on $branch, its commit on the branch, before run $GITHUB_RUN_NUMBER"
 say "the previous build is run $run_number's ($head_sha)"
 
 get "$api/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?name=$name&per_page=100" \
