@@ -677,11 +677,14 @@ fn said(out: &Output) -> String {
     )
 }
 
-/// `seaworthy/bin/seaworthy`, as the prepare job leaves it (this build's).
+/// `seaworthy/bin/seaworthy`, as the prepare job leaves it (this build's):
+/// a link to it, not a copy. A file this multi-threaded test process
+/// writes and then runs can fail with ETXTBSY: another test's fork may
+/// still hold the write descriptor until its child execs.
 fn tool_into(dir: &Path) {
     let bin = dir.join("seaworthy/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_seaworthy"), bin.join("seaworthy")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_seaworthy"), bin.join("seaworthy")).unwrap();
 }
 
 #[test]
@@ -739,7 +742,7 @@ fn the_build_step_carries_out_the_plan() {
         .unwrap();
     assert!(lock.status.success(), "{}", said(&lock));
     tool_into(dir.path());
-    let plan = Command::new(dir.path().join("seaworthy/bin/seaworthy"))
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
         .current_dir(dir.path())
         .args(["build-plan", "--triple", "x86_64-unknown-linux-gnu"])
         .output()
@@ -1545,7 +1548,7 @@ fn the_windows_build_carries_out_the_plan_in_both_argument_passing_modes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("seaworthy.toml"), WINDOWS_PRODUCT).unwrap();
         tool_into(dir.path());
-        let plan = Command::new(dir.path().join("seaworthy/bin/seaworthy"))
+        let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
             .current_dir(dir.path())
             .args(["build-plan", "--triple", "x86_64-pc-windows-msvc"])
             .output()
@@ -1718,7 +1721,7 @@ fn the_windows_build_enters_the_msvc_developer_environment() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("seaworthy.toml"), WINDOWS_PRODUCT).unwrap();
     tool_into(dir.path());
-    let plan = Command::new(dir.path().join("seaworthy/bin/seaworthy"))
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
         .current_dir(dir.path())
         .args(["build-plan", "--triple", "x86_64-pc-windows-msvc"])
         .output()
@@ -3471,7 +3474,8 @@ fn azure_sign_keeps_the_secret_and_the_token_off_every_command_line() {
     assert!(out.status.success(), "{}", said(&out));
     let curl = std::fs::read_to_string(dir.join("curl.args")).unwrap();
     assert!(
-        curl.contains("--config - https://token.example/oidc?api-version=2.0&audience=api%3A%2F%2FAzureADTokenExchange"),
+        curl.lines().any(|l| l.contains("--config -")
+            && l.ends_with(" https://token.example/oidc?api-version=2.0&audience=api%3A%2F%2FAzureADTokenExchange")),
         "{curl}"
     );
     assert!(
