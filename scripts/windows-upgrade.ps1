@@ -775,7 +775,9 @@ try {
         Wait-Until 120 "$Service runs again, under a new process" {
             $s = Get-Svc $Service; $s -and $s.State -eq 'Running' -and $s.ProcessId -ne $script:FirstPid
         }
-        Assert-True ((Get-HelperLogFiles).Count -gt 0 -and [bool](Select-String -LiteralPath (Get-HelperLogFiles) -Pattern "handed $([regex]::Escape($Package)) .* to its installer" -Quiet)) "the helper's log says it handed $Package to its installer"
+        # @(): a function's one-element array returns as its element, which has no Count
+        # under StrictMode (Windows PowerShell 5.1).
+        Assert-True (@(Get-HelperLogFiles).Count -gt 0 -and [bool](Select-String -LiteralPath (Get-HelperLogFiles) -Pattern "handed $([regex]::Escape($Package)) .* to its installer" -Quiet)) "the helper's log says it handed $Package to its installer"
         Assert-True ([bool](Select-String -LiteralPath $MsiexecLog -Pattern 'success or error status: 0' -Quiet)) "msiexec's log reports success"
     }
 
