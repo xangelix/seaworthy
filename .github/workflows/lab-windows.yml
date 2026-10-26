@@ -54,6 +54,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
+      # The upgrade candidate's plan alone is built with seaworthy-formats' CI
+      # test-key switch (SEAWORTHY_ALLOW_CI_TEST_KEYS=1, set by the script for
+      # that build: a dev build, never a release), so its helper trusts the
+      # fixture's CI test key through ci_test_keys!; the script checks the
+      # helper carries the CI test-key marker.
       - name: Build, package and bundle
         env:
           # The upgrade candidate's release sequence: a later run is a newer release.

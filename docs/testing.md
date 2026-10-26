@@ -48,10 +48,13 @@ a throwaway CA, and the client the fixture helper's version source uses.
   the fixture's builds are non-release builds signed with a **public CI test key** committed in
   `crates/seaworthy-launcher/e2e/desktop/keys/` (Linux and macOS) and
   `crates/seaworthy-launcher/e2e/scm/keys/` (Windows) (`--ci-test-signing`; the
-  [threat model's CI test-key mechanism](threat-model.md#the-ci-test-key-mechanism)). Nothing but
-  the fixture trusts it, and the fixture's helper only ever reaches names under `.invalid`, which
-  never resolve outside a lab's hosts entries (the Windows helper's build script refuses any
-  other name).
+  [threat model's CI test-key mechanism](threat-model.md#the-ci-test-key-mechanism)). The
+  candidates' helpers trust it as a product's CI build would: as a CI test key beside the release
+  key, through `ci_test_keys!` in a build made with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1` (set for that
+  build alone; the binary carries the CI test-key marker, which the candidate build checks and
+  `seaworthy verify` accepts in a `--ci-test-signing` build only). Nothing but the fixture trusts
+  it, and a helper that does only ever reaches names under `.invalid`, which never resolve outside
+  a lab's hosts entries, or 127.0.0.1 (both helpers' build scripts refuse any other URL).
 - **The throwaway CA** permits only the lab's names (critical name constraints), and its private
   key never leaves the process that made it, so nothing can issue another certificate under the
   root a lane trusts. The lanes remove it, the hosts entries and the installed product on every

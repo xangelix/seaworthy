@@ -15,7 +15,9 @@
 # token into `lab/build.txt` (a copy of this directory), so an upgrade
 # shows in the installed files. Its builds are non-release builds signed
 # with the CI test key (`--ci-test-signing`), which the lab's helper is
-# built to trust: `keys/ci-test.key` is a PUBLIC test key, committed on
+# built to trust as a CI test key (`[defaults.ci-test-keys]` below,
+# `ci_test_keys!` under SEAWORTHY_ALLOW_CI_TEST_KEYS=1, beside the release
+# key): `keys/ci-test.key` is a PUBLIC test key, committed on
 # purpose so that every run, and the next run's previous build, signs
 # with it. Anyone can sign with it, so nothing but this fixture may ever
 # trust it (docs/threat-model.md, the CI test-key mechanism).

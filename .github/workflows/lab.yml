@@ -256,6 +256,11 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Pull the digest-pinned images
         run: scripts/pull-test-images.sh --only debian-13,ubuntu-24.04,ubi-9,fedora-43,arch,rust-builder
+      # Its helper trusts the fixture's CI test key as a CI build does: the
+      # script builds the plan, and only the plan, with seaworthy-formats'
+      # switch (SEAWORTHY_ALLOW_CI_TEST_KEYS=1: a lab build, never a
+      # release), checks the helper carries the CI test-key marker, and
+      # packages with --ci-test-signing.
       - name: The candidate (this run's build)
         env:
           SEAWORTHY_UPGRADE_SEQUENCE: ${{ github.run_number }}
@@ -320,6 +325,7 @@ jobs:
         run: |
           brew list bash >/dev/null 2>&1 || brew install bash
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      # As on Linux: the plan alone built with the CI test-key switch.
       - name: The candidate (this run's build)
         env:
           SEAWORTHY_UPGRADE_SEQUENCE: ${{ github.run_number }}

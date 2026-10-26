@@ -57,7 +57,11 @@ lab_builder_image() {
 # the pinned builder. The release is <version>+<build>. Each VAR=VALUE is
 # the demo helper's build input (SEAWORTHY_LAB_*, demo_helper/build.rs): a
 # value naming a file on this side is copied in and passed as its path
-# inside; any other value is passed as is.
+# inside; any other value is passed as is. SEAWORTHY_ALLOW_CI_TEST_KEYS=1
+# (that value alone) builds the plan with seaworthy-formats' CI test-key
+# switch, for a helper given SEAWORTHY_LAB_CI_TEST_PUB: a lab build, never
+# a release (seaworthy.sh refuses the switch on one); the lab server is
+# built without it.
 lab_build_linux() {
     local plan="$1" artifacts="$2" server="$3" version="$4" build="$5"
     shift 5
@@ -85,7 +89,11 @@ lab_build_linux() {
     for assignment in "$@"; do
         name="${assignment%%=*}"
         value="${assignment#*=}"
-        case "$name" in SEAWORTHY_LAB_[A-Z_]*) ;; *) lab_fail "not a demo helper input: $name" ;; esac
+        case "$name=$value" in
+            SEAWORTHY_LAB_[A-Z_]*=*) ;;
+            SEAWORTHY_ALLOW_CI_TEST_KEYS=1) env+=(-e "$name=$value"); continue ;;
+            *) lab_fail "not a demo helper input: $name" ;;
+        esac
         if [ -f "$value" ]; then
             index=$((index + 1))
             cp "$value" "$src/src/lab-inputs/$index-$(basename "$value")"
@@ -94,7 +102,9 @@ lab_build_linux() {
         env+=(-e "$name=$value")
     done
     local offline="--offline --config source.crates-io.replace-with=\"vendored\" --config source.vendored.directory=\"/src/vendor\""
+    # CARGO_BUILD_JOBS passes through when set (a shared machine's limit).
     LAB_CLEANUP_CONTAINER="$(docker create --network none -w /src -e CARGO_INCREMENTAL=0 \
+        -e CARGO_BUILD_JOBS \
         -e RUSTUP_TOOLCHAIN="$channel" -e RUSTUP_AUTO_INSTALL=0 \
         -e SEAWORTHY_WORK=lab-work \
         -e SEAWORTHY_MANIFEST="$LAB_E2E/Cargo.toml" \
@@ -104,8 +114,10 @@ lab_build_linux() {
         "${env[@]}" \
         "$image" bash -c "set -euo pipefail
             bash scripts/ci/seaworthy.sh build $LAB_LINUX
-            # Word-split, never re-parsed: the TOML quotes stay.
-            cargo build --quiet --locked --release --target $LAB_LINUX \$SEAWORTHY_CARGO_ARGS \
+            # Word-split, never re-parsed: the TOML quotes stay. The lab
+            # server trusts no key: never with the CI test-key switch.
+            env -u SEAWORTHY_ALLOW_CI_TEST_KEYS \
+                cargo build --quiet --locked --release --target $LAB_LINUX \$SEAWORTHY_CARGO_ARGS \
                 --manifest-path $LAB_E2E/Cargo.toml -p conformance_server")"
     tar -C "$src" -cf - src | docker cp - "$LAB_CLEANUP_CONTAINER:/" ||
         lab_fail "copying the checkout into the builder failed"

@@ -10,8 +10,11 @@
 # The product is crates/seaworthy-launcher/e2e/desktop/seaworthy.toml's
 # (copied, with this build's version token written into its lab/build.txt,
 # so an upgrade shows in the installed files): the launcher and its cores
-# as a service, with demo_helper compiled to trust the fixture's CI test key
-# and to reach the lab under its names (SEAWORTHY_LAB_*:
+# as a service, with demo_helper compiled to trust the fixture's release
+# key and, through seaworthy-formats' CI test-key switch
+# (SEAWORTHY_ALLOW_CI_TEST_KEYS=1, `ci_test_keys!`: the helper carries the
+# CI test-key marker), its CI test key, and to reach the lab under its
+# names alone (SEAWORTHY_LAB_*:
 # https://updates.lab.invalid/_lab/required-version for its version
 # source, https://packages.lab.invalid/repo/releases/... for releases).
 # Built through the CI template's build step (on Linux in the pinned
@@ -101,7 +104,12 @@ seaworthy check --config "$config" >/dev/null || fail "the fixture's seaworthy.t
 
 inputs=(
     "SEAWORTHY_LAB_CONFIG=$config"
-    "SEAWORTHY_LAB_RELEASE_PUB=$fixture/keys/ci-test.pub"
+    # The release key (its secret discarded: it never signs), and the CI
+    # test key the candidates are signed with, as a CI test build trusts
+    # it: beside the release keys, under the switch.
+    "SEAWORTHY_LAB_RELEASE_PUB=$fixture/keys/release.pub"
+    "SEAWORTHY_LAB_CI_TEST_PUB=$fixture/keys/ci-test.pub"
+    "SEAWORTHY_ALLOW_CI_TEST_KEYS=1"
     "SEAWORTHY_LAB_PRODUCT=$PRODUCT"
     "SEAWORTHY_LAB_PACKAGE_URL=https://packages.lab.invalid/repo/releases/{product}/{channel}/{version}/{target}/{product}.{format}"
     "SEAWORTHY_LAB_VERSION_URL=https://updates.lab.invalid/_lab/required-version"
@@ -124,6 +132,14 @@ else
     mkdir -p "$artifacts"
     cp -R "$work/artifacts/$TRIPLE" "$artifacts/"
 fi
+
+# The candidate's helper trusts the CI test key through the switch: it
+# carries the marker such a build embeds (which `seaworthy verify` accepts
+# in a --ci-test-signing build alone).
+helper="$(find "$artifacts/$TRIPLE" -type f -name demo_helper | head -n 1)"
+[ -n "$helper" ] || fail "the build made no demo_helper under $artifacts/$TRIPLE"
+grep -qaF -- "seaworthy-ci-test-keys"":trusted:1" "$helper" ||
+    fail "$helper doesn't carry the CI test-key marker: built without the switch?"
 
 # The CI test key, in a private copy: the CLI signs only with key files
 # no one else can read (git checks it out 0644).

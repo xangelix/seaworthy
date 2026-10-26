@@ -10,6 +10,13 @@
 //! `seaworthy repo` publishes it: `releases/<package>/<channel>/<token>/
 //! <target>/<package>.<format>`, its `.manifest`, and for pacman its `.sig`.
 //! The lanes lay their refused cases out in the same place.
+//!
+//! The upgrade lanes' candidates trust the fixture's public CI test key as
+//! a product's CI build would: through `ci_test_keys!` and
+//! `ManifestTrust::with_ci_test_keys`, in a build made with the CI
+//! test-key switch (`SEAWORTHY_ALLOW_CI_TEST_KEYS=1`), never among the
+//! release keys. Such a binary carries the CI test-key marker and logs the
+//! warning at every run.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -22,6 +29,14 @@ use seaworthy_updater::{ManifestTrust, Product, ReleaseKey, SignatureAlgorithm};
 const CONFIG: &str = include_str!(concat!(env!("OUT_DIR"), "/seaworthy.toml"));
 const RELEASE_KEYS_HEX: &str = include_str!(concat!(env!("OUT_DIR"), "/release.pub"));
 const OPENPGP_KEYS: &str = include_str!(concat!(env!("OUT_DIR"), "/openpgp.asc"));
+
+/// The product's public CI test keys (`SEAWORTHY_LAB_CI_TEST_PUB`): `Some`
+/// only in a build made with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1`, whose binary
+/// then carries the CI test-key marker; in any other build the file is
+/// never compiled in.
+fn ci_test_keys() -> Option<&'static str> {
+    seaworthy_updater::ci_test_keys!(include_str!(concat!(env!("OUT_DIR"), "/ci-test.pub")))
+}
 const PRODUCT: &str = env!("LAB_PRODUCT");
 const PACKAGE_URL: &str = env!("LAB_PACKAGE_URL");
 const VERSION_URL: &str = env!("LAB_VERSION_URL");
@@ -66,16 +81,11 @@ fn config() -> Result<HelperConfig, String> {
             .to_owned());
     }
     let product = Product::from_config(CONFIG, PRODUCT).map_err(|e| e.to_string())?;
-    let mut keys = Vec::new();
-    for line in RELEASE_KEYS_HEX
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-    {
-        let key = hex::decode(line).map_err(|e| format!("release key: {e}"))?;
-        keys.push(ReleaseKey::new(key, SignatureAlgorithm::MlDsa87).map_err(|e| e.to_string())?);
-    }
-    let trust = ManifestTrust::for_product(&product, keys).map_err(|e| e.to_string())?;
+    let keys = ml_dsa_keys(RELEASE_KEYS_HEX, "release key")?;
+    let test_keys = ml_dsa_keys(ci_test_keys().unwrap_or_default(), "CI test key")?;
+    let trust = ManifestTrust::for_product(&product, keys)
+        .and_then(|trust| trust.with_ci_test_keys(test_keys))
+        .map_err(|e| e.to_string())?;
     let signatures = if OPENPGP_KEYS.trim().is_empty() {
         PackageSignatures::ManifestOnly
     } else {
@@ -98,4 +108,16 @@ fn config() -> Result<HelperConfig, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(config.probe_timeout(PROBE_BUDGET + Duration::from_secs(10)))
+}
+
+/// ML-DSA-87 public keys, one lowercase hex key per line.
+fn ml_dsa_keys(text: &str, what: &str) -> Result<Vec<ReleaseKey>, String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let key = hex::decode(line).map_err(|e| format!("{what}: {e}"))?;
+            ReleaseKey::new(key, SignatureAlgorithm::MlDsa87).map_err(|e| format!("{what}: {e}"))
+        })
+        .collect()
 }

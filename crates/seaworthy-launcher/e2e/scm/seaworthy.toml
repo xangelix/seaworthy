@@ -9,7 +9,9 @@
 #
 # The upgrade-from-previous lane (scripts/windows-upgrade.ps1) needs one key
 # across runs: its builds are non-release builds signed with the CI test
-# key (`--ci-test-signing`), which that lane's helper is built to trust.
+# key (`--ci-test-signing`), which that lane's helper is built to trust as
+# a CI test key (`ci_test_keys!` under SEAWORTHY_ALLOW_CI_TEST_KEYS=1,
+# beside the run's release key).
 # `keys/ci-test.key` is a PUBLIC test key, committed on purpose so that
 # every run, and the next run's previous build, signs with it; the build
 # copies `keys/ci-test.pub` beside this file's copy. Anyone can sign with

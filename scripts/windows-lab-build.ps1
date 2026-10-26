@@ -39,8 +39,11 @@
                 desktop viewer 1.0.0 (1) and 1.0.1 (2), unsigned. Every MSI passes Windows
                 Installer's validation (`wix msi validate`: an ICE error fails the build).
       upgrade   the upgrade-from-previous lane's candidate (scripts/windows-upgrade.ps1):
-                the plan built again with the helper trusting the CI test key alone and
-                dialing the lab's names under .invalid, the agent packaged as the
+                the plan built again with seaworthy-formats' CI test-key switch
+                (SEAWORTHY_ALLOW_CI_TEST_KEYS=1, for this build alone: a dev build, never
+                a release), the helper trusting the run's release key and, through
+                `ci_test_keys!`, the CI test key (so it carries the CI test-key marker),
+                and dialing the lab's names under .invalid alone, the agent packaged as the
                 workspace's version, sequence -UpgradeSequence, build g<commit>, its
                 token written into lab\build.txt: a dev build (`--authenticode-only`, the
                 run's certificate) whose manifest the CI test key signs
@@ -116,6 +119,13 @@ function Resolve-RepoPath([string]$Path) {
 
 function Write-Text([string]$Path, [string]$Text) {
     [System.IO.File]::WriteAllText($Path, $Text, $Utf8NoBom)
+}
+
+# Whether the file at $Path holds the ASCII text $Text (Latin-1 maps each byte to one
+# character, so an ordinal search over the decoded bytes is a byte search).
+function Test-FileContains([string]$Path, [string]$Text) {
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    return $latin1.GetString([System.IO.File]::ReadAllBytes($Path)).IndexOf($Text, [System.StringComparison]::Ordinal) -ge 0
 }
 
 # A native program, its exit code checked. Its output goes to the job log and to
@@ -586,7 +596,7 @@ if (-not $Fips) {
     Invoke-Checked $Seaworthy @('keygen', '--algorithm', 'ml-dsa-87', '--secret', (Join-Path $Keys 'release.key'), '--public', (Join-Path $Keys 'release.pub')) 'seaworthy keygen'
     $signingText += "[[manifest]]`nalgorithm = `"ml-dsa-87`"`nkey = `"keys/release.key`"`n`n"
     # The fixture's public CI test key (seaworthy.toml's [defaults.ci-test-keys]): the
-    # upgrade candidate's manifest signer, the one key its helper trusts.
+    # upgrade candidate's manifest signer, which its helper trusts as a CI test key.
     foreach ($name in @('ci-test.pub', 'ci-test.key')) {
         Copy-Item -LiteralPath (Join-Path $Repo "crates\seaworthy-launcher\e2e\scm\keys\$name") -Destination (Join-Path $Keys $name)
     }
@@ -748,18 +758,32 @@ if (-not $Fips) {
     $labSequence = [long]$UpgradeSequence
     # The installed files name the build (lab\build.txt, the agent's files).
     Write-Text (Join-Path $Out 'lab\build.txt') "$labToken`n"
-    # The helper trusts the CI test key alone and dials the lab's names only
-    # (scm_helper/build.rs refuses any other URL); everything else is the same build.
-    $env:SEAWORTHY_E2E_HELPER_RELEASE_KEY = Join-Path $Keys 'ci-test.pub'
+    # The helper trusts the run's release key and, as a CI test build does, the CI test
+    # key: through ci_test_keys! under the CI test-key switch, set for this build alone
+    # (a dev build; seaworthy-build.ps1 refuses the switch on a release). It dials the
+    # lab's names only (scm_helper/build.rs refuses any other URL); everything else is
+    # the same build.
+    $env:SEAWORTHY_E2E_HELPER_RELEASE_KEY = Join-Path $Keys 'release.pub'
+    $env:SEAWORTHY_E2E_HELPER_CI_TEST_KEY = Join-Path $Keys 'ci-test.pub'
+    $env:SEAWORTHY_ALLOW_CI_TEST_KEYS = '1'
     $env:SEAWORTHY_E2E_HELPER_PACKAGE_URL = "https://$LabPackagesHost/repo/releases/{product}/{channel}/{version}/{target}/{product}.{format}"
     $env:SEAWORTHY_E2E_HELPER_VERSION_URL = "https://$LabUpdatesHost/_lab/required-version"
     try {
         $upgradeArtifacts = Build-Products -Config $ScmConfig -Work (Join-Path $Out 'upgrade-build')
     } finally {
-        foreach ($name in @('SEAWORTHY_E2E_HELPER_RELEASE_KEY', 'SEAWORTHY_E2E_HELPER_PACKAGE_URL', 'SEAWORTHY_E2E_HELPER_VERSION_URL')) {
+        foreach ($name in @('SEAWORTHY_E2E_HELPER_RELEASE_KEY', 'SEAWORTHY_E2E_HELPER_CI_TEST_KEY', 'SEAWORTHY_ALLOW_CI_TEST_KEYS',
+                'SEAWORTHY_E2E_HELPER_PACKAGE_URL', 'SEAWORTHY_E2E_HELPER_VERSION_URL')) {
             Remove-Item -LiteralPath "Env:\$name" -ErrorAction SilentlyContinue
         }
     }
+    # The candidate's helper carries the CI test-key marker (it trusts a CI test key),
+    # which `seaworthy verify` accepts in a --ci-test-signing build alone.
+    $helper = Get-ChildItem -LiteralPath $upgradeArtifacts -Recurse -File -Filter 'scm_helper.exe' | Select-Object -First 1
+    if (-not $helper) { Fail "the upgrade build made no scm_helper.exe under $upgradeArtifacts" }
+    if (-not (Test-FileContains $helper.FullName ('seaworthy-ci-test-keys' + ':trusted:1'))) {
+        Fail "$($helper.FullName) doesn't carry the CI test-key marker: built without the switch?"
+    }
+    Say "the candidate's helper trusts the CI test key (it carries the CI test-key marker)"
     $packages = Invoke-Package -Config $ScmConfig -Artifacts $upgradeArtifacts -Name 'agent-upgrade' -Product 'agent' `
         -Version $labVersion -Sequence $labSequence -Build $labBuild -CiTest
     $msi = Get-Single $packages '*.msi'

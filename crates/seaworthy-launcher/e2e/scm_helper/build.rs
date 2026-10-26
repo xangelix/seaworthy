@@ -3,9 +3,16 @@
 //!
 //! - `SEAWORTHY_E2E_HELPER_CONFIG` (a file): the product's seaworthy.toml;
 //! - `SEAWORTHY_E2E_HELPER_RELEASE_KEY` (a file): the one trusted ML-DSA-87
-//!   release key, hex as `seaworthy keygen --public` writes it (the update
-//!   lane's throwaway key, or the upgrade lane's public CI test key,
-//!   `scm/keys/ci-test.pub`);
+//!   release key, hex as `seaworthy keygen --public` writes it (the run's
+//!   throwaway key);
+//! - `SEAWORTHY_E2E_HELPER_CI_TEST_KEY` (a file, optional): the product's
+//!   public CI test key, hex (the upgrade lane's `scm/keys/ci-test.pub`),
+//!   which the helper trusts beside the release key through
+//!   `ci_test_keys!` and `ManifestTrust::with_ci_test_keys`. It needs
+//!   seaworthy-formats' CI test-key switch, `SEAWORTHY_ALLOW_CI_TEST_KEYS=1`
+//!   (the binary then carries the CI test-key marker, which
+//!   `seaworthy verify` refuses outside a `--ci-test-signing` build);
+//!   without the switch the build fails;
 //! - `SEAWORTHY_E2E_HELPER_PACKAGE_URL` (a value; default the update lane's
 //!   loopback stub, `PACKAGE_URL` below): the URL template releases are
 //!   fetched from;
@@ -13,10 +20,10 @@
 //!   `/required`, `VERSION_URL`): the endpoint the version source asks.
 //!
 //! A URL is plain HTTP to 127.0.0.1 (the update lane's stub) or HTTPS to a
-//! name under `.invalid` (the upgrade lane's lab, behind its hosts entries):
-//! a helper that trusts the public CI test key accepts a release anyone
-//! signed, so it must never dial a name that resolves outside a lab.
-//! Anything else fails the build.
+//! name under `.invalid` (the upgrade lane's lab, behind its hosts entries),
+//! with or without a CI test key: a helper that trusts the public CI test
+//! key accepts a release anyone signed, so it must never dial a name that
+//! resolves outside a lab. Anything else fails the build.
 //!
 //! Unset (any other build of this workspace), the files are empty and the
 //! helper refuses to run.
@@ -32,6 +39,7 @@ fn main() {
     for (var, name) in [
         ("SEAWORTHY_E2E_HELPER_CONFIG", "seaworthy.toml"),
         ("SEAWORTHY_E2E_HELPER_RELEASE_KEY", "release.pub"),
+        ("SEAWORTHY_E2E_HELPER_CI_TEST_KEY", "ci-test.pub"),
     ] {
         println!("cargo:rerun-if-env-changed={var}");
         let bytes = match std::env::var_os(var) {
@@ -42,6 +50,17 @@ fn main() {
             None => Vec::new(),
         };
         std::fs::write(out.join(name), bytes).expect("write an OUT_DIR input");
+    }
+    // The CI test key needs the switch (seaworthy-formats' build script
+    // reads the same variable): without it the helper would quietly drop
+    // the key and refuse every test-signed release at run time.
+    println!("cargo:rerun-if-env-changed=SEAWORTHY_ALLOW_CI_TEST_KEYS");
+    if std::env::var_os("SEAWORTHY_E2E_HELPER_CI_TEST_KEY").is_some() {
+        assert!(
+            std::env::var("SEAWORTHY_ALLOW_CI_TEST_KEYS").as_deref() == Ok("1"),
+            "SEAWORTHY_E2E_HELPER_CI_TEST_KEY needs the CI test-key switch, \
+             SEAWORTHY_ALLOW_CI_TEST_KEYS=1 (a lab build, never a release)"
+        );
     }
     for (var, default, name) in [
         (

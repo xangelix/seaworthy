@@ -17,7 +17,7 @@ passed; the FIPS lane is reported in its summary and never required.
 |---|---|
 | `scm` | The launcher: plain x86-64, three cores in preference order (x86-64-v4, v3, v2). |
 | `scm_core` | The service, one core per CPU target: seaworthy-service's run loop (`run_windows_service`), the update request API, a simulated version gate (`GET /required` on a loopback stub), and control files that make it fail on purpose. Its crate docs list the commands and the evidence files. |
-| `scm_helper` | The update helper: seaworthy-updater's `helper::main` with a lane's `seaworthy.toml`, release key and URLs compiled in (`SEAWORTHY_E2E_HELPER_*`, `scm_helper/build.rs`), asking for the version through the lab's required-version client (`seaworthy-lab`'s `client`). The update lane's build asks the loopback stub (127.0.0.1:8470) and fetches the release from it; the upgrade lane's trusts the public CI test key alone and dials only the lab's names under `.invalid` over TLS. Its build script refuses any other URL: plain HTTP goes to 127.0.0.1 only, HTTPS to `.invalid` names only. |
+| `scm_helper` | The update helper: seaworthy-updater's `helper::main` with a lane's `seaworthy.toml`, release key and URLs compiled in (`SEAWORTHY_E2E_HELPER_*`, `scm_helper/build.rs`), asking for the version through the lab's required-version client (`seaworthy-lab`'s `client`). The update lane's build asks the loopback stub (127.0.0.1:8470) and fetches the release from it; the upgrade lane's trusts the run's release key and, as a CI test key (`SEAWORTHY_E2E_HELPER_CI_TEST_KEY`, `ci_test_keys!`, built with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1`), the public CI test key, and dials only the lab's names under `.invalid` over TLS. Its build script refuses any other URL: plain HTTP goes to 127.0.0.1 only, HTTPS to `.invalid` names only. |
 | `demo`, `demo_core` | The desktop fixture's launcher and cores (also the Linux launcher lanes'). |
 
 The products:
@@ -67,8 +67,10 @@ leaves a bundle for the lanes:
    recovery actions (past `InstallServices`), built by WiX directly; the viewer 1.0.0 and 1.0.1.
    Every MSI passes Windows Installer's validation (`wix msi validate`): an ICE error fails the
    build.
-6. **The upgrade candidate**: the plan built again with the helper trusting the CI test key
-   alone and dialing the lab's names (`https://packages.lab.invalid/...`,
+6. **The upgrade candidate**: the plan built again with seaworthy-formats' CI test-key switch
+   (`SEAWORTHY_ALLOW_CI_TEST_KEYS=1`, for this build alone), the helper trusting the run's release
+   key and, through `ci_test_keys!`, the CI test key (the build checks that the helper carries the
+   CI test-key marker), and dialing the lab's names (`https://packages.lab.invalid/...`,
    `https://updates.lab.invalid/_lab/required-version`), then the agent packaged as the
    workspace's version, the workflow's run number as its sequence and `g<commit>` as its build
    (`0.1.0+g0123456789ab`), the token also written into `lab/build.txt`: a dev build, its
