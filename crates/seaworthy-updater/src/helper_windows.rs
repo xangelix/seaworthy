@@ -21,6 +21,15 @@
 //! job). A missing directory is created with the same protected DACL, as
 //! the MSI would.
 //!
+//! **The log** ([`open_log`]), `%ProgramData%\<Vendor>\<Directory>\
+//! update-logs\<stem>.log`: the helper's own directory (the MSI's guard
+//! gives it SYSTEM and Administrators alone), made or audited as the
+//! staging directory is; the file opened without following a reparse point
+//! and refused unless the handle is a regular file with one link, at the
+//! path asked for, owned and writable only by SYSTEM, Administrators or
+//! TrustedInstaller. The service's account may write `logs`, so an append
+//! there as LocalSystem could be redirected.
+//!
 //! **The service.** [`main`] starts the dispatcher. Under the SCM the
 //! service reports `Running` at once, accepts STOP and SHUTDOWN (each ends
 //! the run; an install already handed to msiexec runs on), and reports
@@ -36,6 +45,7 @@
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::fs::MetadataExt as _;
+use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -47,7 +57,7 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, HANDLE, LocalFree,
+    CloseHandle, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -56,14 +66,21 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
     TOKEN_USER, TokenElevation, TokenUser,
 };
-use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_APPEND_DATA,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FileAttributeTagInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, OPEN_ALWAYS, OPEN_EXISTING,
+    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS,
+};
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
 
 use super::{HelperConfig, HelperError};
 use crate::policy::acl::{DIRECTORY_WRITE_RIGHTS, untrusted_writer_of};
-use crate::policy::windows::{path_owner_and_dacl, sid_string, wide_units};
+use crate::policy::windows::{handle_owner_and_dacl, path_owner_and_dacl, sid_string, wide_units};
 
 /// LocalSystem's SID.
 const LOCAL_SYSTEM: &str = "S-1-5-18";
@@ -302,6 +319,176 @@ fn audit_trusted(path: &Path) -> Result<(), String> {
         Some(why) => Err(why),
         None => Ok(()),
     }
+}
+
+/// A log file's stem: `[A-Za-z0-9][A-Za-z0-9._-]*`, at most 100 bytes, so
+/// `<stem>.log` names a file in the log directory and nothing else.
+fn is_log_stem(stem: &str) -> bool {
+    stem.len() <= 100
+        && stem
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// An open object's final path (`\\?\C:\…`).
+fn final_path(handle: HANDLE, what: &Path) -> Result<String, String> {
+    let mut buffer = vec![0u16; 1024];
+    loop {
+        let capacity = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        #[allow(unsafe_code, reason = "reads an object's final path")]
+        // SAFETY: an open handle and a buffer of `capacity` units.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), capacity, VOLUME_NAME_DOS)
+        } as usize;
+        if length == 0 {
+            return Err(format!(
+                "can't read {}'s final path ({})",
+                what.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        if length < buffer.len() {
+            return String::from_utf16(buffer.get(..length).unwrap_or_default())
+                .map_err(|_| format!("{}'s final path isn't UTF-16", what.display()));
+        }
+        if length > 32_768 {
+            return Err(format!("{}'s final path is too long", what.display()));
+        }
+        buffer.resize(length.saturating_add(1), 0);
+    }
+}
+
+/// Opens `path` with `access`, never through a reparse point, creating a
+/// file when `create` (its parent's inheritable DACL then applies).
+fn open_no_follow(path: &Path, access: u32, create: bool) -> Result<std::fs::File, String> {
+    let name: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let disposition = if create { OPEN_ALWAYS } else { OPEN_EXISTING };
+    #[allow(unsafe_code, reason = "opens a file without following a reparse point")]
+    // SAFETY: a NUL-terminated path, no security attributes, no template.
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            access,
+            FILE_SHARE_READ,
+            std::ptr::null(),
+            disposition,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(format!(
+            "can't open {} ({})",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    #[allow(unsafe_code, reason = "takes ownership of the handle")]
+    // SAFETY: a valid handle CreateFileW just returned, owned by nothing
+    // else: the File closes it.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
+/// [`super::log_file`]: the log directory made or audited as the staging
+/// directory is, then `<stem>.log` opened to append without following a
+/// reparse point and kept only if the open handle is a regular file with
+/// one link, at the path asked for, owned and writable only by SYSTEM,
+/// Administrators or TrustedInstaller.
+pub(super) fn open_log(dir: &Path, stem: &str) -> Result<std::fs::File, String> {
+    if !is_log_stem(stem) {
+        return Err(format!("{stem:?} is not a plain file name"));
+    }
+    prepare_staging(dir, true).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{stem}.log"));
+    let file = open_no_follow(
+        &path,
+        FILE_APPEND_DATA | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        true,
+    )?;
+    let handle = file.as_raw_handle();
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    #[allow(unsafe_code, reason = "reads the open file's attributes")]
+    // SAFETY: the open handle and a buffer of the class's own type and
+    // size.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>()).unwrap_or(0),
+        )
+    };
+    if read == 0 {
+        return Err(format!(
+            "can't read {}'s attributes ({})",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    if tag.FileAttributes & REPARSE_POINT != 0 {
+        return Err(format!(
+            "{} is a reparse point (a junction or a link)",
+            path.display()
+        ));
+    }
+    if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    #[allow(unsafe_code, reason = "a zeroed information buffer")]
+    // SAFETY: BY_HANDLE_FILE_INFORMATION is plain data; all zeroes is a
+    // valid value, overwritten by the call below.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    #[allow(unsafe_code, reason = "reads the open file's link count")]
+    // SAFETY: the open handle and a buffer of the call's type.
+    let read = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    if read == 0 {
+        return Err(format!(
+            "can't read {}'s links ({})",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    if info.nNumberOfLinks != 1 {
+        return Err(format!(
+            "{} has {} names (a hard link to another file)",
+            path.display(),
+            info.nNumberOfLinks
+        ));
+    }
+    let directory = open_no_follow(dir, FILE_READ_ATTRIBUTES | SYNCHRONIZE, false)?;
+    let wanted = format!(
+        "{}\\{stem}.log",
+        final_path(directory.as_raw_handle(), dir)?.trim_end_matches('\\')
+    );
+    let found = final_path(handle, &path)?;
+    if !found.eq_ignore_ascii_case(&wanted) {
+        return Err(format!(
+            "{} is not where it was asked for (it is {found})",
+            path.display()
+        ));
+    }
+    let what = path.display().to_string();
+    let (owner, dacl) = handle_owner_and_dacl(handle, &what)?;
+    if let Some(why) = untrusted_writer_of(
+        &what,
+        owner.as_deref(),
+        dacl.as_deref(),
+        DIRECTORY_WRITE_RIGHTS,
+    ) {
+        return Err(why);
+    }
+    Ok(file)
 }
 
 /// [`super::read_protected_file`]: the file and each directory above it up

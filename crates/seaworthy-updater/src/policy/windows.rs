@@ -378,6 +378,53 @@ pub(crate) fn path_owner_and_dacl(
     result
 }
 
+/// An open file's owner and DACL, reduced for
+/// [`super::acl::untrusted_writer_of`] (read through the handle, so what
+/// was opened is what is judged).
+#[cfg_attr(
+    not(feature = "helper"),
+    allow(dead_code, reason = "only the helper audits its log file")
+)]
+pub(crate) fn handle_owner_and_dacl(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    what: &str,
+) -> Result<(Option<String>, Option<Vec<Ace>>), String> {
+    use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    #[allow(unsafe_code, reason = "reads an open file's security descriptor")]
+    // SAFETY: an open handle with READ_CONTROL and valid out pointers; the
+    // descriptor is allocated by the call and freed with LocalFree below;
+    // `owner` and `dacl` point into it.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS || descriptor.is_null() {
+        return Err(format!(
+            "{what}: can't read its security descriptor ({})",
+            std::io::Error::from_raw_os_error(status as i32)
+        ));
+    }
+    #[allow(unsafe_code, reason = "reduces the descriptor just read")]
+    // SAFETY: the descriptor GetSecurityInfo returned, freed only after
+    // this read.
+    let result = unsafe { owner_and_aces(descriptor, what) };
+    #[allow(unsafe_code, reason = "frees the descriptor")]
+    // SAFETY: allocated by GetSecurityInfo, freed once.
+    let _ = unsafe { LocalFree(descriptor) };
+    result
+}
+
 /// `HKLM\<key>\<value>`, a string the MSI wrote under the product's
 /// install key (the helper's `Release`), after the same writer check as
 /// the policy; `None` when the key or the value doesn't exist.

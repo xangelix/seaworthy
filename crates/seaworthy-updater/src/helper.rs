@@ -829,22 +829,42 @@ pub fn read_protected_file(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>
     windows::read_protected_file(path, max_bytes)
 }
 
-/// The helper's log file on Windows, `<stem>.log` in the product's log
-/// directory ([`Product::windows_log_directory`], which the MSI creates
-/// and locks), opened to append: under the Service Control Manager a
-/// service has no stderr, so a product's helper `main` points its log
-/// here. `None` elsewhere (journald and launchd keep a helper's stderr),
-/// or when the directory isn't there.
+/// The helper's log file on Windows, `<stem>.log` in the helper's own log
+/// directory ([`Product::windows_helper_log_directory`],
+/// `%ProgramData%\<Vendor>\<Directory>\update-logs`), opened to append:
+/// under the Service Control Manager a service has no stderr, so a
+/// product's helper `main` points its log here.
+///
+/// The helper appends as LocalSystem, so nothing a less privileged account
+/// can write may decide where: the directory is the helper's alone (SYSTEM
+/// and Administrators; the service's own logs are in `logs`, which its
+/// account may modify), made if missing and audited like the staging
+/// directory (it and every directory above it up to `%ProgramData%`: no
+/// reparse point, a trusted owner, no one else may write); the file is
+/// opened without following a reparse point and kept only if the open
+/// handle is a regular file with one link, at the path asked for, owned
+/// and writable by SYSTEM, Administrators or TrustedInstaller alone.
+///
+/// `None` elsewhere (journald and launchd keep a helper's stderr; on macOS
+/// the service, the only other writer of the log directory, is root
+/// itself), for a `stem` that isn't a plain file name
+/// (`[A-Za-z0-9][A-Za-z0-9._-]*`), or when the directory or the file is
+/// refused (the reason goes to stderr).
 #[must_use]
 pub fn log_file(product: &Product, stem: &str) -> Option<std::fs::File> {
     #[cfg(windows)]
     {
-        let dir = product.windows_log_directory(&windows::program_data().ok()?);
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(format!("{stem}.log")))
-            .ok()
+        let dir = product.windows_helper_log_directory(&windows::program_data().ok()?);
+        match windows::open_log(&dir, stem) {
+            Ok(file) => Some(file),
+            Err(why) => {
+                eprintln!(
+                    "the update helper's log is refused: {}",
+                    crate::log::line_safe(&why)
+                );
+                None
+            }
+        }
     }
     #[cfg(not(windows))]
     {

@@ -270,21 +270,35 @@ pub fn updates_dir_sddl() -> String {
     programdata_dir_sddl()
 }
 
+/// The security descriptor of the update helper's log directory
+/// (`%ProgramData%\<Vendor>\<Product>\update-logs`), as
+/// [`updates_dir_sddl`]: SYSTEM and Administrators only. The helper writes
+/// its log as LocalSystem, so no other account, the service's included,
+/// may create, replace or link anything there (the service's own logs are
+/// in `logs`, which its account may modify).
+#[must_use]
+pub fn helper_log_dir_sddl() -> String {
+    programdata_dir_sddl()
+}
+
 /// The security descriptor of the packaged directories above `state` and
 /// `updates` (`%ProgramData%\<Vendor>` and `…\<Product>`): owner SYSTEM
 /// (`O:SY`), and a protected DACL of SYSTEM and Administrators full
 /// control and OWNER RIGHTS read-control only (`(A;OICI;RC;;;OW)`).
 ///
 /// `%ProgramData%` lets any user create a directory there, so a user can
-/// create one of these before the product is installed. The installer
-/// replaces the DACL and takes the owner back (the update helper
-/// refuses a staging directory, or one above it, with an untrusted owner,
-/// so a squatter would otherwise keep updates off). The OWNER RIGHTS entry
-/// also strips an owner's implicit `WRITE_DAC`, so a squatting owner can't
-/// re-grant themselves access, rename `state` or `updates`, or swap in a
-/// junction. Without a lock, these parents would inherit ProgramData's
-/// user-writable entries. The helper and the service still check, at
-/// runtime, that the directories they use have a trusted owner.
+/// create one of these, and fill it, before the product is installed. A
+/// lock on a folder doesn't reach a child with its own protected DACL
+/// (its owner and grants survive), and an installer working by path
+/// follows a junction put in a folder's place, so the seaworthy CLI's MSI
+/// applies these descriptors through the launcher's guard, by handle: it
+/// takes each folder back (owner SYSTEM, this DACL), refuses the install
+/// when anything below the product's folder is a reparse point or owned
+/// or writable by anyone else, and only then propagates. The OWNER RIGHTS
+/// entry strips an owner's implicit `WRITE_DAC`, so whoever owns a folder
+/// can't re-grant themselves anything. At run time the update helper
+/// audits its staging and log directories, and a service its state
+/// directory (seaworthy-service's runtime), refusing what isn't trusted.
 #[must_use]
 pub fn data_dir_sddl() -> String {
     programdata_dir_sddl()

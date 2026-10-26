@@ -441,12 +441,23 @@ impl Product {
     }
 
     /// The Windows log directory, `<data directory>\logs`: the service's
-    /// and its update helper's logs. The MSI creates it, locked like
-    /// `state`: never readable by every user (logs can carry what users
-    /// must not read).
+    /// logs. The MSI creates it, locked like `state` (the service's account
+    /// may modify it): never readable by every user (logs can carry what
+    /// users must not read).
     #[must_use]
     pub fn windows_log_directory(&self, program_data: &Path) -> PathBuf {
         self.windows_data_directory(program_data).join("logs")
+    }
+
+    /// The Windows update helper's log directory, `<data
+    /// directory>\update-logs`: SYSTEM and Administrators only, like the
+    /// staging directory, so nothing a less privileged account (the
+    /// service's) can write decides where the helper, as LocalSystem,
+    /// appends.
+    #[must_use]
+    pub fn windows_helper_log_directory(&self, program_data: &Path) -> PathBuf {
+        self.windows_data_directory(program_data)
+            .join("update-logs")
     }
 
     /// The Windows helper's staging directory, `<data directory>\updates`:
@@ -615,6 +626,10 @@ windows-directory = "Desk"
         assert_eq!(
             agent.windows_log_directory(program_data),
             program_data.join("Acme").join("Agent").join("logs")
+        );
+        assert_eq!(
+            agent.windows_helper_log_directory(program_data),
+            program_data.join("Acme").join("Agent").join("update-logs")
         );
         let console = Product::from_config(CONFIG, "console").unwrap();
         assert_eq!(console.windows_directory(), "Desk");
