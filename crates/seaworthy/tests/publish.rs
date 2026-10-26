@@ -717,12 +717,23 @@ fn the_public_url_must_serve_what_was_published() {
     let mut target = bucket.target();
     target.public_url = Some(url);
     let report = publish(&repo, &target, &credentials, &options(DATE)).unwrap();
+    // Every index and manifest, every file this run uploaded (the packages
+    // too), and the plan.
     let checked = plan
         .files
         .iter()
-        .filter(|f| f.class == Class::Index || f.path.ends_with(".manifest"))
+        .filter(|f| {
+            f.class == Class::Index
+                || f.path.ends_with(".manifest")
+                || !report.skipped.contains(&f.path)
+        })
         .count()
         + 1;
+    assert_eq!(
+        checked,
+        plan.files.len() + 1,
+        "a first publication uploads all"
+    );
     assert_eq!(report.verified, checked);
     let seen = seen.lock().unwrap().clone();
     assert!(
@@ -841,8 +852,8 @@ fn a_signed_repository_from_repo_publishes_byte_for_byte() {
     )
     .unwrap();
     assert_order(&report, &plan);
-    // Every index (the setup/ copies among them), manifest and the plan
-    // fetched back through the public URL.
+    // Every index (the setup/ copies among them), manifest, uploaded
+    // package and the plan fetched back through the public URL.
     let seen = seen.lock().unwrap().clone();
     for setup in [
         "/packages/setup/acme-repository.deb?",
@@ -854,14 +865,7 @@ fn a_signed_repository_from_repo_publishes_byte_for_byte() {
             "{setup}: {seen:?}"
         );
     }
-    assert_eq!(
-        report.verified,
-        plan.files
-            .iter()
-            .filter(|f| f.class == Class::Index || f.path.ends_with(".manifest"))
-            .count()
-            + 1
-    );
+    assert_eq!(report.verified, plan.files.len() + 1);
     let mut on_disk = BTreeSet::new();
     files_of(&out, &out, &mut on_disk);
     for file in &on_disk {
@@ -894,6 +898,22 @@ struct Object {
     content_type: Option<String>,
     cache_control: Option<String>,
     metadata: BTreeMap<String, String>,
+    /// `LastModified` in a listing.
+    modified: String,
+}
+
+/// The time every object is written at, unless planted earlier.
+const MODIFIED: &str = "2026-10-14T12:00:00.000Z";
+
+impl Object {
+    /// Its ETag: a quoted digest of its bytes, so a new version has a new
+    /// one.
+    fn etag(&self) -> String {
+        format!(
+            "\"{}\"",
+            &seaworthy_crypto::digest::sha256_hex(&self.body)[..32]
+        )
+    }
 }
 
 /// What the stand-in does beyond storing.
@@ -914,6 +934,15 @@ struct Script {
     /// A GET of a key ending with this answers these bytes after the
     /// object's (a HEAD still states the object's size).
     longer_get: Option<(String, Vec<u8>)>,
+    /// HEAD and GET report the store's own checksum of each object's
+    /// bytes (`x-amz-checksum-sha256`), as S3 does in checksum mode.
+    checksums: bool,
+    /// A PUT of a key ending with this keeps other bytes of the same size
+    /// (and the metadata sent).
+    corrupt_put: Option<String>,
+    /// Right before the PUT of the current plan, another publication
+    /// writes it.
+    race_pointer: bool,
 }
 
 /// One logged request: method, key, `If-None-Match`.
@@ -924,6 +953,8 @@ struct State {
     objects: BTreeMap<String, Object>,
     pointer_reads: usize,
     requests: Vec<Logged>,
+    /// The key and `If-Match` of every PUT that carried one.
+    if_match: Vec<(String, String)>,
 }
 
 /// The stand-in: its endpoint, its state and its script (the runtime
@@ -1001,13 +1032,26 @@ impl MemoryS3 {
 
     /// An object put there by something else (no publisher metadata).
     fn plant(&self, key: &str, body: &[u8]) {
+        self.plant_with(key, body, BTreeMap::new(), MODIFIED);
+    }
+
+    /// An object put there by something else, with `metadata`, written at
+    /// `modified`.
+    fn plant_with(
+        &self,
+        key: &str,
+        body: &[u8],
+        metadata: BTreeMap<String, String>,
+        modified: &str,
+    ) {
         self.state.lock().unwrap().objects.insert(
             key.to_owned(),
             Object {
                 body: body.to_vec(),
                 content_type: None,
                 cache_control: None,
-                metadata: BTreeMap::new(),
+                metadata,
+                modified: modified.to_owned(),
             },
         );
     }
@@ -1086,7 +1130,8 @@ fn handle(
                     break;
                 }
                 xml.push_str(&format!(
-                    "<Contents><Key>{k}</Key><LastModified>2026-10-14T12:00:00.000Z</LastModified><ETag>\"e\"</ETag><Size>{}</Size></Contents>",
+                    "<Contents><Key>{k}</Key><LastModified>{}</LastModified><ETag>\"e\"</ETag><Size>{}</Size></Contents>",
+                    o.modified,
                     o.body.len()
                 ));
             }
@@ -1117,6 +1162,7 @@ fn handle(
                             content_type: None,
                             cache_control: None,
                             metadata: BTreeMap::new(),
+                            modified: MODIFIED.to_owned(),
                         },
                     );
                     script.move_pointer_after = None;
@@ -1126,12 +1172,20 @@ fn handle(
                 return response("404 Not Found", &[], b"", false);
             };
             let mut out = vec![
-                ("ETag".to_owned(), "\"e\"".to_owned()),
+                ("ETag".to_owned(), object.etag()),
                 (
                     "Last-Modified".to_owned(),
                     "Wed, 14 Oct 2026 12:00:00 GMT".to_owned(),
                 ),
             ];
+            if script.checksums && header("x-amz-checksum-mode").as_deref() == Some("ENABLED") {
+                use base64::Engine as _;
+                out.push((
+                    "x-amz-checksum-sha256".to_owned(),
+                    base64::engine::general_purpose::STANDARD
+                        .encode(seaworthy_crypto::digest::sha256(&object.body)),
+                ));
+            }
             if let Some(t) = &object.content_type {
                 out.push(("Content-Type".to_owned(), t.clone()));
             }
@@ -1161,28 +1215,56 @@ fn handle(
             {
                 return response("403 Forbidden", &[], b"", false);
             }
-            if header("if-none-match").as_deref() == Some("*") {
-                if let Some((suffix, racer)) = script.race.clone()
-                    && key.ends_with(&suffix)
-                {
-                    script.race = None;
-                    state.objects.insert(
-                        key.clone(),
-                        Object {
-                            body: racer.clone(),
-                            content_type: None,
-                            cache_control: None,
-                            metadata: [(
-                                "sha256".to_owned(),
-                                seaworthy_crypto::digest::sha256_hex(&racer),
-                            )]
-                            .into(),
-                        },
-                    );
-                }
-                if state.objects.contains_key(&key) {
+            if header("if-none-match").as_deref() == Some("*")
+                && let Some((suffix, racer)) = script.race.clone()
+                && key.ends_with(&suffix)
+            {
+                script.race = None;
+                state.objects.insert(
+                    key.clone(),
+                    Object {
+                        body: racer.clone(),
+                        content_type: None,
+                        cache_control: None,
+                        metadata: [(
+                            "sha256".to_owned(),
+                            seaworthy_crypto::digest::sha256_hex(&racer),
+                        )]
+                        .into(),
+                        modified: MODIFIED.to_owned(),
+                    },
+                );
+            }
+            if script.race_pointer && key.ends_with(&format!("/{CURRENT_PLAN}")) {
+                script.race_pointer = false;
+                state.objects.insert(
+                    key.clone(),
+                    Object {
+                        body: b"{\"another\": \"publication\"}".to_vec(),
+                        content_type: None,
+                        cache_control: None,
+                        metadata: BTreeMap::new(),
+                        modified: MODIFIED.to_owned(),
+                    },
+                );
+            }
+            if header("if-none-match").as_deref() == Some("*") && state.objects.contains_key(&key) {
+                return response("412 Precondition Failed", &[], b"", false);
+            }
+            if let Some(etag) = header("if-match") {
+                state.if_match.push((key.clone(), etag.clone()));
+                if state.objects.get(&key).map(Object::etag) != Some(etag) {
                     return response("412 Precondition Failed", &[], b"", false);
                 }
+            }
+            let mut body = body;
+            if script
+                .corrupt_put
+                .as_deref()
+                .is_some_and(|suffix| key.ends_with(suffix))
+                && let Some(first) = body.first_mut()
+            {
+                *first ^= 1;
             }
             let metadata = headers
                 .iter()
@@ -1195,6 +1277,7 @@ fn handle(
                     content_type: header("content-type"),
                     cache_control: header("cache-control"),
                     metadata,
+                    modified: MODIFIED.to_owned(),
                 },
             );
             response("200 OK", &[], b"", false)
@@ -1481,4 +1564,188 @@ fn a_pruning_failure_is_reported_apart_and_foreign_keys_are_left() {
     assert!(report.prune_error.is_none());
     assert_eq!(report.deleted.len(), 3, "{report:?}");
     assert!(s3.keys().contains("packages/apt/zz/CON"));
+}
+
+/// The "same bytes" check and the read-back after an upload trust the
+/// store's own checksum, else the bytes, read and hashed: never the
+/// SHA-256 metadata, which whoever writes the bucket sets.
+#[test]
+fn metadata_claiming_the_same_bytes_is_never_trusted() {
+    let files = release("1.0.0");
+    let (_d, repo, _) = repo_of("r1", DATE, &files);
+    let (path, bytes, _) = &files[0];
+    let mut other = bytes.clone();
+    other[0] ^= 1;
+    let claim: BTreeMap<String, String> = [(
+        "sha256".to_owned(),
+        seaworthy_crypto::digest::sha256_hex(bytes),
+    )]
+    .into();
+    for checksums in [false, true] {
+        let s3 = MemoryS3::start();
+        s3.script.lock().unwrap().checksums = checksums;
+        s3.plant_with(&format!("packages/{path}"), &other, claim.clone(), MODIFIED);
+        let err = publish(&repo, &s3.target(), &credentials(), &options(DATE))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("{path} (other bytes)")),
+            "checksums {checksums}: {err}"
+        );
+        assert!(s3.puts().is_empty(), "{:?}", s3.puts());
+        // The same bytes, by the store's checksum or read: skipped.
+        let s3 = MemoryS3::start();
+        s3.script.lock().unwrap().checksums = checksums;
+        s3.plant(&format!("packages/{path}"), bytes);
+        let report = publish(&repo, &s3.target(), &credentials(), &options(DATE)).unwrap();
+        assert_eq!(
+            report.skipped,
+            std::slice::from_ref(path),
+            "checksums {checksums}"
+        );
+    }
+}
+
+/// A store that keeps other bytes than it was sent, with the metadata sent,
+/// is caught at the read-back.
+#[test]
+fn a_store_keeping_other_bytes_than_sent_is_caught() {
+    let files = release("1.0.0");
+    let (_d, repo, _) = repo_of("r1", DATE, &files);
+    for checksums in [false, true] {
+        let s3 = MemoryS3::start();
+        {
+            let mut script = s3.script.lock().unwrap();
+            script.checksums = checksums;
+            script.corrupt_put = Some(files[1].0.clone());
+        }
+        let err = publish(&repo, &s3.target(), &credentials(), &options(DATE))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!(
+                "the store didn't keep {} as sent (its bytes aren't the SHA-256 uploaded)",
+                files[1].0
+            )),
+            "checksums {checksums}: {err}"
+        );
+    }
+}
+
+/// The pointer moves only from the version read at the start (If-Match),
+/// or appears only where there was none (create-only): a publication racing
+/// this one after the last check isn't overwritten.
+#[test]
+fn the_pointer_moves_only_from_the_version_read() {
+    let s3 = MemoryS3::start();
+    let target = s3.target();
+    let (_da, ra, _) = repo_of("ra", DATE, &release("1.0.0"));
+    let (_db, rb, _) = repo_of("rb", DATE + DAY, &release("1.1.0"));
+    // A first publication: create-only.
+    publish(&ra, &target, &credentials(), &options(DATE)).unwrap();
+    let pointer = format!("packages/{CURRENT_PLAN}");
+    assert!(
+        s3.state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|(m, k, c)| m == "PUT" && *k == pointer && c.as_deref() == Some("*")),
+        "the first pointer goes up create-only"
+    );
+    // The next one: If-Match on the version read.
+    let a_etag = s3.state.lock().unwrap().objects[&pointer].etag();
+    publish(&rb, &target, &credentials(), &options(DATE + DAY)).unwrap();
+    assert_eq!(
+        s3.state.lock().unwrap().if_match,
+        [(pointer.clone(), a_etag)]
+    );
+    // Another publication writing the pointer right before this one's
+    // write: refused, the other's pointer kept.
+    let (_dc, rc, _) = repo_of("rc", DATE + 2 * DAY, &release("1.2.0"));
+    s3.script.lock().unwrap().race_pointer = true;
+    let err = publish(&rc, &target, &credentials(), &options(DATE + 2 * DAY))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("another publication replaced publish-plan.json"),
+        "{err}"
+    );
+    assert_eq!(s3.get(&pointer).unwrap(), b"{\"another\": \"publication\"}");
+    // The same race on a first publication: refused too.
+    let s3 = MemoryS3::start();
+    s3.script.lock().unwrap().race_pointer = true;
+    let err = publish(&ra, &s3.target(), &credentials(), &options(DATE))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("another publication replaced publish-plan.json"),
+        "{err}"
+    );
+}
+
+/// A first publication into a prefix holding files no plan lists leaves
+/// them, however old, and says so; a dry run previews the pruning.
+#[test]
+fn a_first_publication_never_prunes_what_it_didn_t_write() {
+    let s3 = MemoryS3::start();
+    let target = s3.target();
+    s3.plant_with(
+        "packages/apt/pool/main/old/old_1.0_amd64.deb",
+        b"someone else's",
+        BTreeMap::new(),
+        "2020-01-01T00:00:00.000Z",
+    );
+    let (_da, ra, _) = repo_of("ra", DATE, &release("1.0.0"));
+    let dry = Options {
+        dry_run: true,
+        prune: true,
+        now: DATE + 400 * DAY,
+    };
+    let report = publish(&ra, &target, &credentials(), &dry).unwrap();
+    assert!(report.deleted.is_empty(), "{report:?}");
+    assert_eq!(report.unrecognized, ["apt/pool/main/old/old_1.0_amd64.deb"]);
+    let report = publish(&ra, &target, &credentials(), &options(DATE + 400 * DAY)).unwrap();
+    assert!(report.deleted.is_empty(), "{report:?}");
+    assert_eq!(report.unrecognized.len(), 1);
+    // Later publications, long after: still never pruned.
+    let (_db, rb, _) = repo_of("rb", DATE + DAY, &release("1.1.0"));
+    publish(&rb, &target, &credentials(), &options(DATE + DAY)).unwrap();
+    let report = seaworthy::publish::prune(&target, &credentials(), DATE + 900 * DAY).unwrap();
+    assert!(
+        !report.contains(&"apt/pool/main/old/old_1.0_amd64.deb".to_owned()),
+        "{report:?}"
+    );
+    assert!(
+        s3.keys()
+            .contains("packages/apt/pool/main/old/old_1.0_amd64.deb")
+    );
+    // A dry run of a later publication previews what pruning deletes.
+    let (_dc, rc, _) = repo_of("rc", DATE + 2 * DAY, &release("1.2.0"));
+    let report = publish(
+        &rc,
+        &target,
+        &credentials(),
+        &Options {
+            dry_run: true,
+            prune: true,
+            now: DATE + 900 * DAY,
+        },
+    )
+    .unwrap();
+    // (1.0.0's files went in the prune above; 1.1.0's would go now.)
+    assert!(
+        report
+            .deleted
+            .iter()
+            .any(|k| k.starts_with("apt/pool/main/acme-agent/acme-agent_1.1.0")),
+        "{report:?}"
+    );
+    let keys = s3.keys();
+    for key in &report.deleted {
+        assert!(
+            keys.contains(&format!("packages/{key}")),
+            "{key} deleted by a dry run"
+        );
+    }
 }

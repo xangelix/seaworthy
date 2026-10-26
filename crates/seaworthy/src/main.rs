@@ -94,7 +94,10 @@
 //! plan's repository and date, every immutable path against the bucket),
 //! then the immutable files, the indexes in order and the plan last, then
 //! the public URL checked and old files pruned (`--no-prune` skips it; a
-//! pruning failure exits 1 after the publication is reported).
+//! pruning failure exits 1 after the publication is reported). Pruning
+//! never deletes a file no plan lists that predates the repository's first
+//! plan in the store (on a first publication into a non-empty prefix, all
+//! of them): it names them instead.
 //! `--dry-run` checks and reports what would be uploaded and pruned. The store's
 //! credentials come from `SEAWORTHY_S3_ACCESS_KEY_ID`,
 //! `SEAWORTHY_S3_SECRET_ACCESS_KEY` (and optionally
@@ -1076,7 +1079,9 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                 &credentials,
                 &seaworthy::publish::Options {
                     dry_run: args.dry_run,
-                    prune: !args.no_prune && !args.dry_run,
+                    // A dry run previews the pruning too (and deletes
+                    // nothing).
+                    prune: !args.no_prune,
                     now,
                 },
             )?;
@@ -1098,6 +1103,11 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
             for key in &report.foreign {
                 eprintln!(
                     "seaworthy: warning: {key} isn't a key this publisher writes: left alone"
+                );
+            }
+            for key in &report.unrecognized {
+                eprintln!(
+                    "seaworthy: warning: {key}: no plan lists it and it predates this repository's first plan here: not pruned (delete it yourself if it's yours)"
                 );
             }
             println!(

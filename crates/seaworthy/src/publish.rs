@@ -15,13 +15,18 @@
 //! URL (the plan's `url`) is the target's `public-url`; the published plans —
 //! the current one and the history in `plans/` — are this repository's,
 //! and the newest of them is older than this one (an identical current plan
-//! means already published); and every immutable path is looked up in the
-//! bucket — present with the same SHA-256, it's skipped; present with other
-//! bytes, the publication is refused naming it. The SHA-256 is the one
-//! `publish` stored as the object's `x-amz-meta-sha256` (every
-//! S3-compatible store keeps user metadata), else the store's own stored
-//! checksum, else the object's bytes, read and hashed. The bucket is the
-//! truth, not only the last plan: an immutable path is published once.
+//! means already published), its releases by (version, sequence) as
+//! clients order them; no path any of those plans published as immutable
+//! gets other bytes or another class here (the plans' history outlives
+//! pruning, so a pruned path is never republished with other bytes); and
+//! every immutable path is looked up in the bucket — present with the same
+//! SHA-256, it's skipped; present with other bytes, the publication is
+//! refused naming it. The SHA-256 is the store's own checksum of the
+//! object's bytes (`x-amz-checksum-sha256`, asked for with the checksum
+//! mode), else the bytes, read and hashed: never the `x-amz-meta-sha256`
+//! metadata `publish` writes beside it, which anyone who can write the
+//! bucket can set. The bucket is the truth, not only the last plan: an
+//! immutable path is published once.
 //!
 //! **Then, in order**: the missing
 //! immutable files, create-only (`If-None-Match: *`: a concurrent writer
@@ -30,13 +35,18 @@
 //! may be live, so pruning must count it); the indexes, in the plan's
 //! order, with a short `max-age` (default 60 s); and last
 //! `publish-plan.json`, after checking no other publication moved it
-//! meanwhile. Every upload carries the body's SHA-256, which the store
-//! verifies, and is read back at once: its size, SHA-256, type and cache
-//! rule must be what was sent. A re-run of the published plan uploads its
-//! indexes again (a later publication may have stopped midway).
+//! meanwhile, written with `If-Match` on the version read at the start
+//! (create-only when there was none), so a publication racing this one
+//! can't be overwritten either. Every upload carries the body's SHA-256,
+//! which the store verifies, and is read back at once: its size, type and
+//! cache rule must be what was sent, and its bytes that SHA-256 (the
+//! store's checksum, else read and hashed). A re-run of the published plan
+//! uploads its indexes again (a later publication may have stopped midway).
 //!
 //! **Afterwards**, given the public URL clients use, every index, every
-//! release manifest and the plan are fetched back through it (a
+//! release manifest, every file this run uploaded (the packages too) and
+//! the plan are fetched back through it, each within its transfer deadline
+//! (a
 //! cache-busting query, so the answer comes from the bucket through the
 //! CDN's routing) and compared byte for byte: a wrong domain or rule, or a
 //! store decoding a key differently, shows here, not on customers'
@@ -48,10 +58,14 @@
 //! after the last one listing it went live — `plans/` keeps each plan with
 //! the time it was written there — or, for a file no plan ever listed (a
 //! publication that failed before its plan went into `plans/`), since it
-//! was written. Only keys under the repository's own directories (`apt/`,
-//! `rpm/`, `pacman/`, `releases/`, `keys/`, `setup/`) are ever deleted; a key there
-//! that can't be a store path isn't ours and is left; `plans/` is kept. A
-//! pruning failure doesn't undo a publication: it's reported apart.
+//! was written. A key no plan lists that was written before the first plan
+//! in `plans/` (on a first publication into a non-empty prefix, every such
+//! key) isn't this publisher's: never deleted, only reported. Only keys
+//! under the repository's own directories (`apt/`, `rpm/`, `pacman/`,
+//! `releases/`, `keys/`, `setup/`) are ever deleted; a key there that can't
+//! be a store path isn't ours and is left; `plans/` is kept. A pruning
+//! failure doesn't undo a publication: it's reported apart. A dry run
+//! reports what pruning would delete.
 //!
 //! Credentials come from the environment (`SEAWORTHY_S3_ACCESS_KEY_ID`,
 //! `SEAWORTHY_S3_SECRET_ACCESS_KEY`, optionally
@@ -315,6 +329,10 @@ pub struct Report {
     /// Keys under the repository's directories that can't be store paths:
     /// not ours, left alone.
     pub foreign: Vec<String>,
+    /// Keys under the repository's directories that no plan lists and that
+    /// predate this repository's first plan in the store (on a first
+    /// publication, every such key): not this publisher's, never pruned.
+    pub unrecognized: Vec<String>,
     /// Why pruning was refused, when it was (the publication stands).
     pub prune_error: Option<String>,
     /// Files fetched back through the public URL and found identical.
@@ -347,7 +365,10 @@ pub fn publish(
     runtime()?.block_on(async {
         let store = Store::new(target, credentials)?;
         let mut report = Report::default();
-        let current = store.current_plan().await?;
+        let (current, current_etag) = match store.current_plan_tagged().await? {
+            Some((bytes, plan, etag)) => (Some((bytes, plan)), etag),
+            None => (None, None),
+        };
         let history = store.history().await?;
         report.already_published = current
             .as_ref()
@@ -361,6 +382,10 @@ pub fn publish(
         )?;
         let mut upload = Vec::new();
         if !report.already_published {
+            // Every plan that went (or may have gone) live names each path
+            // it published: none of them gets other bytes or another class,
+            // even after pruning deleted it from the bucket.
+            check_published_paths(&plan, current.as_ref().map(|(_, p)| p), &history)?;
             let mut conflicts = Vec::new();
             for entry in plan.files.iter().filter(|f| f.class == Class::Immutable) {
                 match store.compare(&entry.path, &entry.sha256, entry.size).await? {
@@ -400,8 +425,9 @@ pub fn publish(
                     .prune_plan(&plan, &history, target.retention_days, options.now)
                     .await
                 {
-                    Ok((doomed, foreign)) => {
-                        report.deleted = doomed;
+                    Ok((pruning, foreign)) => {
+                        report.deleted = pruning.doomed;
+                        report.unrecognized = pruning.unrecognized;
                         report.foreign = foreign;
                     }
                     Err(e) => report.prune_error = Some(e.to_string()),
@@ -411,7 +437,7 @@ pub fn publish(
         }
         let index_cache = format!("public, max-age={}", target.index_max_age_seconds);
         if !report.already_published {
-            for entry in upload {
+            for entry in &upload {
                 let bytes = read_planned(repo, entry)?;
                 store
                     .put_immutable(&entry.path, bytes, &entry.sha256)
@@ -431,7 +457,13 @@ pub fn publish(
         for entry in &indexes {
             let bytes = read_planned(repo, entry)?;
             store
-                .put(&entry.path, bytes, &entry.sha256, &index_cache, false)
+                .put(
+                    &entry.path,
+                    bytes,
+                    &entry.sha256,
+                    &index_cache,
+                    Condition::None,
+                )
                 .await?;
             report.uploaded.push(entry.path.clone());
         }
@@ -445,20 +477,35 @@ pub fn publish(
                     "another publication replaced {CURRENT_PLAN} while this one ran: this plan's indexes are up, the pointer isn't, nothing was pruned — publish one at a time, then re-run"
                 )));
             }
+            // The pointer moves only from the version read at the start
+            // (If-Match), or appears only where there was none
+            // (create-only): a publication racing this one between the
+            // check above and the write can't be overwritten either. A
+            // store that gave no ETag leaves the check above alone.
+            let condition = match (&current, current_etag) {
+                (_, Some(etag)) => Condition::IfMatch(etag),
+                (None, None) => Condition::CreateOnly,
+                (Some(_), None) => Condition::None,
+            };
             let digest = seaworthy_crypto::digest::sha256_hex(&plan_bytes);
-            store
+            let moved = store
                 .put(
                     CURRENT_PLAN,
                     Bytes::from(plan_bytes.clone()),
                     &digest,
                     &index_cache,
-                    false,
+                    condition,
                 )
                 .await?;
+            if !matches!(moved, PutOutcome::Created { .. }) {
+                return Err(DistError::Tool(format!(
+                    "another publication replaced {CURRENT_PLAN} while this one ran: this plan's indexes are up, the pointer isn't, nothing was pruned — publish one at a time, then re-run"
+                )));
+            }
             report.uploaded.push(CURRENT_PLAN.to_owned());
         }
         if let Some(url) = &target.public_url {
-            report.verified = verify_public(&store, url, &plan, &plan_bytes).await?;
+            report.verified = verify_public(&store, url, &plan, &plan_bytes, &upload).await?;
         }
         if options.prune {
             let planned = match store.history().await {
@@ -470,10 +517,11 @@ pub fn publish(
                 Err(e) => Err(e),
             };
             match planned {
-                Ok((doomed, foreign)) => {
+                Ok((pruning, foreign)) => {
                     report.foreign = foreign;
-                    match store.delete(&doomed).await {
-                        Ok(()) => report.deleted = doomed,
+                    report.unrecognized = pruning.unrecognized;
+                    match store.delete(&pruning.doomed).await {
+                        Ok(()) => report.deleted = pruning.doomed,
                         Err(e) => report.prune_error = Some(e.to_string()),
                     }
                 }
@@ -503,7 +551,11 @@ pub fn prune(
                 "nothing is published here: no publish-plan.json to prune against".to_owned(),
             ));
         };
-        Ok(store.prune(&plan, target.retention_days, now).await?.0)
+        Ok(store
+            .prune(&plan, target.retention_days, now)
+            .await?
+            .0
+            .doomed)
     })
 }
 
@@ -815,6 +867,17 @@ impl Store {
     }
 
     async fn get_plan(&self, key: &str) -> Result<Option<(Vec<u8>, Plan)>, DistError> {
+        Ok(self
+            .get_plan_tagged(key)
+            .await?
+            .map(|(bytes, plan, _)| (bytes, plan)))
+    }
+
+    /// [`get_plan`](Self::get_plan), with the ETag of the version read.
+    async fn get_plan_tagged(
+        &self,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, Plan, Option<String>)>, DistError> {
         let path = Self::path(key)?;
         let fetched = Self::retried(&format!("reading {key}"), || {
             self.backend.get_object(&path, MAX_PLAN_BYTES)
@@ -828,12 +891,20 @@ impl Store {
                 "the published {key} isn't a plan this seaworthy reads ({e}): nothing was done"
             ))
         })?;
-        Ok(Some((fetched.body.to_vec(), plan)))
+        Ok(Some((fetched.body.to_vec(), plan, fetched.etag)))
     }
 
     /// The published plan: its bytes and itself.
     async fn current_plan(&self) -> Result<Option<(Vec<u8>, Plan)>, DistError> {
         self.get_plan(CURRENT_PLAN).await
+    }
+
+    /// The published plan, with the ETag of the version read: the pointer
+    /// moves only from that version (`If-Match`).
+    async fn current_plan_tagged(
+        &self,
+    ) -> Result<Option<(Vec<u8>, Plan, Option<String>)>, DistError> {
+        self.get_plan_tagged(CURRENT_PLAN).await
     }
 
     /// Every plan in `plans/`, with when it was written there.
@@ -854,8 +925,9 @@ impl Store {
     }
 
     /// The bucket's object at `key` against the planned SHA-256 and size:
-    /// by the SHA-256 `publish` stored in its metadata, else the store's
-    /// stored checksum, else its bytes, hashed.
+    /// by the store's own checksum of its bytes, when the store keeps one,
+    /// else by its bytes, read and hashed — never by the SHA-256 metadata a
+    /// writer sets (anyone who can write the bucket can set it to anything).
     async fn compare(&self, key: &str, sha256: &str, size: u64) -> Result<Compared, DistError> {
         let path = Self::path(key)?;
         let detail = Self::retried(&format!("looking up {key}"), || {
@@ -870,27 +942,39 @@ impl Store {
         }
         let expected = hex::decode(sha256)
             .map_err(|_| DistError::Layout(format!("{sha256:?} isn't a hex SHA-256")))?;
-        let found = match stored_sha256(&detail) {
-            Some(found) => found,
-            None => match self.hash_object(key, size, transfer_deadline(size)).await? {
-                Hashed::Digest(digest) => digest,
-                Hashed::Short(read) => {
-                    return Ok(Compared::Other(format!(
-                        "{read} of its {size} bytes when read"
-                    )));
-                }
-                Hashed::Long => {
-                    return Ok(Compared::Other(format!(
-                        "more than its {size} bytes when read"
-                    )));
-                }
-            },
+        let found = match self.object_sha256(key, &detail, size).await? {
+            Hashed::Digest(digest) => digest,
+            Hashed::Short(read) => {
+                return Ok(Compared::Other(format!(
+                    "{read} of its {size} bytes when read"
+                )));
+            }
+            Hashed::Long => {
+                return Ok(Compared::Other(format!(
+                    "more than its {size} bytes when read"
+                )));
+            }
         };
-        Ok(if found == expected {
+        Ok(if seaworthy_crypto::ct_eq(&found, &expected) {
             Compared::Same
         } else {
             Compared::Other("other bytes".to_owned())
         })
+    }
+
+    /// The SHA-256 of the object `detail` describes (`size` bytes): the
+    /// store's own checksum when it reports one, else its bytes, hashed
+    /// within [`transfer_deadline`].
+    async fn object_sha256(
+        &self,
+        key: &str,
+        detail: &ObjectDetail,
+        size: u64,
+    ) -> Result<Hashed, DistError> {
+        match store_checksum(detail) {
+            Some(digest) => Ok(Hashed::Digest(digest)),
+            None => self.hash_object(key, size, transfer_deadline(size)).await,
+        }
     }
 
     /// The object's bytes, streamed and hashed: the request and the whole
@@ -932,15 +1016,17 @@ impl Store {
         Ok(Hashed::Digest(hasher.finish().to_vec()))
     }
 
-    /// Uploads `body`, then reads the object back: its size, SHA-256, type
-    /// and cache rule must be what was sent.
+    /// Uploads `body` under `condition`, then reads the object back: its
+    /// size, type and cache rule must be what was sent, and its bytes the
+    /// SHA-256 planned (by the store's own checksum, else read and hashed:
+    /// [`object_sha256`](Self::object_sha256)).
     async fn put(
         &self,
         key: &str,
         body: Bytes,
         sha256: &str,
         cache_control: &str,
-        create_only: bool,
+        condition: Condition,
     ) -> Result<PutOutcome, DistError> {
         let path = Self::path(key)?;
         let size = body.len() as u64;
@@ -950,7 +1036,11 @@ impl Store {
             .with_metadata(SHA256_METADATA, sha256)
             .with_max_body_bytes(MAX_FILE_BYTES)
             .with_timeout(transfer_deadline(size));
-        options.create_only = create_only;
+        match condition {
+            Condition::CreateOnly => {}
+            Condition::None => options.create_only = false,
+            Condition::IfMatch(etag) => options = options.with_if_match(etag),
+        }
         let outcome = Self::retried(&format!("uploading {key}"), || {
             self.backend.put_object(&path, body.clone(), &options)
         })
@@ -961,13 +1051,23 @@ impl Store {
             })
             .await?
             .ok_or_else(|| DistError::Tool(format!("{key} is missing right after its upload")))?;
-            let kept = detail.size == size
-                && stored_sha256(&detail).is_some_and(|s| hex::encode(s) == sha256)
+            let shaped = detail.size == size
                 && detail.content_type.as_deref() == Some(content_type(key))
                 && detail.cache_control.as_deref() == Some(cache_control);
+            if !shaped {
+                return Err(DistError::Tool(format!(
+                    "the store didn't keep {key} as sent (size, type or cache rule): {detail:?}"
+                )));
+            }
+            let expected = hex::decode(sha256)
+                .map_err(|_| DistError::Layout(format!("{sha256:?} isn't a hex SHA-256")))?;
+            let kept = match self.object_sha256(key, &detail, size).await? {
+                Hashed::Digest(digest) => seaworthy_crypto::ct_eq(&digest, &expected),
+                Hashed::Short(_) | Hashed::Long => false,
+            };
             if !kept {
                 return Err(DistError::Tool(format!(
-                    "the store didn't keep {key} as sent (size, SHA-256 metadata, type or cache rule): {detail:?}"
+                    "the store didn't keep {key} as sent (its bytes aren't the SHA-256 uploaded)"
                 )));
             }
         }
@@ -978,14 +1078,19 @@ impl Store {
     /// (a concurrent publication), its bytes must be these.
     async fn put_immutable(&self, key: &str, body: Bytes, sha256: &str) -> Result<(), DistError> {
         let size = body.len() as u64;
-        match self.put(key, body, sha256, IMMUTABLE_CACHE, true).await? {
+        match self
+            .put(key, body, sha256, IMMUTABLE_CACHE, Condition::CreateOnly)
+            .await?
+        {
             PutOutcome::Created { .. } => Ok(()),
-            PutOutcome::AlreadyExists => match self.compare(key, sha256, size).await? {
-                Compared::Same => Ok(()),
-                Compared::Missing | Compared::Other(_) => Err(DistError::Layout(format!(
-                    "{key} was published with other bytes while this publication ran"
-                ))),
-            },
+            PutOutcome::AlreadyExists | PutOutcome::Changed => {
+                match self.compare(key, sha256, size).await? {
+                    Compared::Same => Ok(()),
+                    Compared::Missing | Compared::Other(_) => Err(DistError::Layout(format!(
+                        "{key} was published with other bytes while this publication ran"
+                    ))),
+                }
+            }
         }
     }
 
@@ -1016,15 +1121,16 @@ impl Store {
         )))
     }
 
-    /// What pruning against `plan` would delete, and the keys under the
-    /// repository's directories that aren't ours.
+    /// What pruning against `plan` would delete (and leave as
+    /// unrecognized), and the keys under the repository's directories that
+    /// aren't ours.
     async fn prune_plan(
         &self,
         plan: &Plan,
         history: &[Published],
         retention_days: u64,
         now: u64,
-    ) -> Result<(Vec<String>, Vec<String>), DistError> {
+    ) -> Result<(Pruning, Vec<String>), DistError> {
         let mut listed = Vec::new();
         let mut foreign = Vec::new();
         for dir in OWN_DIRS {
@@ -1045,11 +1151,11 @@ impl Store {
         plan: &Plan,
         retention_days: u64,
         now: u64,
-    ) -> Result<(Vec<String>, Vec<String>), DistError> {
+    ) -> Result<(Pruning, Vec<String>), DistError> {
         let history = self.history().await?;
-        let (doomed, foreign) = self.prune_plan(plan, &history, retention_days, now).await?;
-        self.delete(&doomed).await?;
-        Ok((doomed, foreign))
+        let (pruning, foreign) = self.prune_plan(plan, &history, retention_days, now).await?;
+        self.delete(&pruning.doomed).await?;
+        Ok((pruning, foreign))
     }
 
     /// Deletes `keys`, every one a valid key first.
@@ -1068,21 +1174,28 @@ impl Store {
     }
 }
 
-/// The SHA-256 an object carries: `publish`'s metadata, else the store's
-/// stored checksum (base64).
-fn stored_sha256(detail: &ObjectDetail) -> Option<Vec<u8>> {
+/// The store's own full-object SHA-256 of an object (`x-amz-checksum-sha256`,
+/// base64, which the store computed over the bytes it keeps), when it
+/// reports one. The `x-amz-meta-sha256` metadata `publish` writes beside it
+/// is a writer's claim, never read here.
+fn store_checksum(detail: &ObjectDetail) -> Option<Vec<u8>> {
     use base64::Engine as _;
     detail
-        .metadata
-        .get(SHA256_METADATA)
-        .and_then(|hex_digest| hex::decode(hex_digest).ok())
-        .or_else(|| {
-            detail
-                .sha256
-                .as_deref()
-                .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-        })
+        .sha256
+        .as_deref()
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
         .filter(|digest| digest.len() == 32)
+}
+
+/// How a put may write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Condition {
+    /// Whatever is there (an index).
+    None,
+    /// Only where nothing is (`If-None-Match: *`).
+    CreateOnly,
+    /// Only over the version with this ETag (`If-Match`).
+    IfMatch(String),
 }
 
 /// The deadline of a transfer of `size` bytes, whichever way (a put, a
@@ -1094,14 +1207,32 @@ fn transfer_deadline(size: u64) -> Duration {
         .min(crate::s3::MAX_PUT_TIMEOUT)
 }
 
+/// What pruning chooses ([`doomed`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pruning {
+    /// The keys to delete.
+    pub doomed: Vec<String>,
+    /// The keys no plan lists that predate the repository's first plan in
+    /// the store (or, before there is one, every key no plan lists): what
+    /// a publisher finds in a prefix it didn't fill, never deleted.
+    pub unrecognized: Vec<String>,
+}
+
 /// What pruning deletes: of the `listed` keys (each with its modification
 /// time), those `current` doesn't list whose retention is over. A key is
 /// unreferenced since the plan after the last one listing it went live —
 /// a plan's time is the later of its date and when its history entry was
 /// written (`history`; `current` too, by its date, when it isn't there) —
-/// or, for a key no plan ever listed, since it was written. Keys outside
+/// or, for a key no plan ever listed (a publication that failed before
+/// its plan went into the history), since it was written. Keys outside
 /// the repository's own directories are never chosen, nor any key whose
 /// time can't be told.
+///
+/// A key no plan lists that was written before the repository's first
+/// plan in the store (its history entry's time, else its date) — or any
+/// such key when the history is empty, a first publication — is
+/// [unrecognized](Pruning::unrecognized): content this publisher didn't
+/// write, left alone.
 #[must_use]
 pub fn doomed(
     current: &Plan,
@@ -1109,18 +1240,23 @@ pub fn doomed(
     listed: &[(String, Option<String>)],
     retention_days: u64,
     now: u64,
-) -> Vec<String> {
+) -> Pruning {
     let keep: BTreeSet<&str> = current.files.iter().map(|f| f.path.as_str()).collect();
     let mut plans: Vec<(u64, &Plan)> = history
         .iter()
         .map(|h| (h.plan.date.max(h.written.unwrap_or(h.plan.date)), &h.plan))
         .collect();
+    // The first plan in the store: when this publisher started writing.
+    let first = history
+        .iter()
+        .map(|h| h.written.unwrap_or(h.plan.date).min(h.plan.date))
+        .min();
     if !history.iter().any(|h| h.plan == *current) {
         plans.push((current.date, current));
     }
     plans.sort_by_key(|(time, _)| *time);
     let retention = retention_days.saturating_mul(86_400);
-    let mut doomed = Vec::new();
+    let mut pruning = Pruning::default();
     for (key, modified) in listed {
         let own = OWN_DIRS.iter().any(|d| {
             key.strip_prefix(d)
@@ -1134,13 +1270,59 @@ pub fn doomed(
             .rposition(|(_, p)| p.files.iter().any(|f| &f.path == key));
         let since = match last {
             Some(i) => plans.get(i + 1).map(|(time, _)| *time),
-            None => modified.as_deref().and_then(parse_iso8601),
+            None => {
+                let written = modified.as_deref().and_then(parse_iso8601);
+                match (written, first) {
+                    (Some(written), Some(first)) if written >= first => Some(written),
+                    _ => {
+                        pruning.unrecognized.push(key.clone());
+                        continue;
+                    }
+                }
+            }
         };
         if since.is_some_and(|since| since.saturating_add(retention) <= now) {
-            doomed.push(key.clone());
+            pruning.doomed.push(key.clone());
         }
     }
-    doomed
+    pruning
+}
+
+/// Every path `plan` publishes against every plan that went (or may have
+/// gone) live here (`current`, `history`): a path one of them published
+/// as immutable keeps its bytes and its class for ever — pruning deletes
+/// an old file from the bucket, never from the plans' history — and no
+/// path becomes immutable over another's index.
+///
+/// # Errors
+/// [`DistError::Layout`] naming every path that would change.
+pub fn check_published_paths(
+    plan: &Plan,
+    current: Option<&Plan>,
+    history: &[Published],
+) -> Result<(), DistError> {
+    let mut changed = BTreeSet::new();
+    for other in current.into_iter().chain(history.iter().map(|h| &h.plan)) {
+        let theirs: BTreeMap<&str, &PlanEntry> =
+            other.files.iter().map(|f| (f.path.as_str(), f)).collect();
+        for entry in &plan.files {
+            let Some(old) = theirs.get(entry.path.as_str()) else {
+                continue;
+            };
+            let immutable = entry.class == Class::Immutable || old.class == Class::Immutable;
+            if immutable && (old.class != entry.class || old.sha256 != entry.sha256) {
+                changed.insert(entry.path.as_str());
+            }
+        }
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(DistError::Layout(format!(
+        "{} path(s) an earlier plan here published as immutable would get other bytes or another class: {} — nothing was uploaded; a path is published once, even after pruning deleted it",
+        changed.len(),
+        changed.into_iter().collect::<Vec<_>>().join(", ")
+    )))
 }
 
 /// `2026-10-14T12:00:00.000Z` (ListObjectsV2's `LastModified`) as seconds
@@ -1174,21 +1356,29 @@ pub fn parse_iso8601(text: &str) -> Option<u64> {
     Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
-/// Fetches every index, every release manifest and the plan back through
-/// `public_url`, each with a cache-busting query, and compares them with
-/// what was published. Returns how many were checked.
+/// Fetches every index, every release manifest, every file this run
+/// uploaded (`uploaded`: the packages too) and the plan back through
+/// `public_url`, each with a cache-busting query and within its transfer
+/// deadline, and compares them with what was published. Returns how many
+/// were checked.
 async fn verify_public(
     store: &Store,
     public_url: &str,
     plan: &Plan,
     plan_bytes: &[u8],
+    uploaded: &[&PlanEntry],
 ) -> Result<usize, DistError> {
     let client = store.backend.http_client();
     let plan_digest = seaworthy_crypto::digest::sha256_hex(plan_bytes);
+    let uploaded: BTreeSet<&str> = uploaded.iter().map(|e| e.path.as_str()).collect();
     let mut checks: Vec<(&str, &str, u64)> = plan
         .files
         .iter()
-        .filter(|f| f.class == Class::Index || f.path.ends_with(".manifest"))
+        .filter(|f| {
+            f.class == Class::Index
+                || f.path.ends_with(".manifest")
+                || uploaded.contains(f.path.as_str())
+        })
         .map(|f| (f.path.as_str(), f.sha256.as_str(), f.size))
         .collect();
     checks.push((CURRENT_PLAN, &plan_digest, plan_bytes.len() as u64));
@@ -1334,7 +1524,7 @@ mod tests {
         // a's files stopped being referenced when b went live (day 20), b's
         // when c did (day 25); the stray was written on day 10; c's are
         // current.
-        let at = |now_days: u64| doomed(&c, &history, &listed, 30, now_days * day);
+        let at = |now_days: u64| doomed(&c, &history, &listed, 30, now_days * day).doomed;
         assert_eq!(at(39), Vec::<String>::new());
         assert_eq!(at(40), ["apt/stray.deb"]);
         assert_eq!(at(49), ["apt/stray.deb"]);
@@ -1347,7 +1537,7 @@ mod tests {
         // The history in any order (as a listing returns it).
         let shuffled = [history[1].clone(), history[0].clone(), history[2].clone()];
         assert_eq!(
-            doomed(&c, &shuffled, &listed, 30, 50 * day),
+            doomed(&c, &shuffled, &listed, 30, 50 * day).doomed,
             ["apt/a.deb", "releases/x/1/a", "apt/stray.deb"]
         );
         // A plan built long ago but published late: its
@@ -1355,27 +1545,95 @@ mod tests {
         // live, not after its date.
         let late = [published(&a, Some(10 * day)), published(&b, Some(45 * day))];
         assert_eq!(
-            doomed(&b, &late, &listed[..2], 30, 50 * day),
+            doomed(&b, &late, &listed[..2], 30, 50 * day).doomed,
             Vec::<String>::new()
         );
-        assert_eq!(doomed(&b, &late, &listed[..2], 30, 75 * day), ["apt/a.deb"]);
+        assert_eq!(
+            doomed(&b, &late, &listed[..2], 30, 75 * day).doomed,
+            ["apt/a.deb"]
+        );
         // The current plan not yet in the history counts by its date: it
         // is a's successor here.
         assert_eq!(
-            doomed(&c, &history[..1], &listed[..1], 30, 54 * day),
+            doomed(&c, &history[..1], &listed[..1], 30, 54 * day).doomed,
             Vec::<String>::new()
         );
         assert_eq!(
-            doomed(&c, &history[..1], &listed[..1], 30, 55 * day),
+            doomed(&c, &history[..1], &listed[..1], 30, 55 * day).doomed,
             ["apt/a.deb"]
         );
-        // A key with no time and no plan is kept; outside the repository's
-        // directories, never touched.
+        // A key with no time and no plan is kept (unrecognized); outside
+        // the repository's directories, never touched.
         let unknown = vec![
             ("apt/when.deb".to_owned(), None),
             ("aptly/x".to_owned(), None),
         ];
-        assert!(doomed(&c, &history, &unknown, 1, u64::MAX).is_empty());
+        let pruning = doomed(&c, &history, &unknown, 1, u64::MAX);
+        assert!(pruning.doomed.is_empty());
+        assert_eq!(pruning.unrecognized, ["apt/when.deb"]);
+    }
+
+    /// A prefix this publisher didn't fill: what no plan lists and predates
+    /// its first plan here (or, on a first publication, all of it) is never
+    /// pruned, however old; what a failed publication left after the
+    /// first plan is.
+    #[test]
+    fn content_no_plan_lists_from_before_the_first_plan_is_never_pruned() {
+        let day = 86_400;
+        let at = |date: &str| Some(format!("{date}T00:00:00.000Z"));
+        let first = plan(100 * day, &["apt/ours.deb"]);
+        let listed = vec![
+            ("apt/ours.deb".to_owned(), at("1970-04-11")),
+            ("apt/theirs.deb".to_owned(), at("1970-01-02")),
+            ("releases/old/agent.deb".to_owned(), at("1970-01-02")),
+        ];
+        // A first publication (a dry run: nothing in the history yet).
+        let pruning = doomed(&first, &[], &listed, 30, 1000 * day);
+        assert!(pruning.doomed.is_empty(), "{pruning:?}");
+        assert_eq!(
+            pruning.unrecognized,
+            ["apt/theirs.deb", "releases/old/agent.deb"]
+        );
+        // After it went live, and long after: still never theirs to prune.
+        let history = [published(&first, Some(100 * day))];
+        let pruning = doomed(&first, &history, &listed, 30, 1000 * day);
+        assert!(pruning.doomed.is_empty(), "{pruning:?}");
+        assert_eq!(pruning.unrecognized.len(), 2);
+        // A file a later, failed publication left: pruned after retention.
+        let mut stray = listed.clone();
+        stray.push(("apt/stray.deb".to_owned(), at("1970-04-21")));
+        let pruning = doomed(&first, &history, &stray, 30, 140 * day);
+        assert_eq!(pruning.doomed, ["apt/stray.deb"]);
+        assert_eq!(pruning.unrecognized.len(), 2);
+    }
+
+    /// A path an earlier plan published as immutable keeps its bytes and
+    /// class, even when pruning has deleted it from the bucket since.
+    #[test]
+    fn a_path_is_published_once_even_after_pruning() {
+        let day = 86_400;
+        let old = plan(10 * day, &["apt/pool/a.deb", "releases/x/1/a"]);
+        let mut again = plan(90 * day, &["apt/pool/a.deb", "apt/pool/b.deb"]);
+        assert!(check_published_paths(&again, None, &[published(&old, None)]).is_ok());
+        again.files[0].sha256 = "11".repeat(32);
+        let err = check_published_paths(&again, None, &[published(&old, None)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("1 path(s) an earlier plan here published as immutable would get other bytes or another class: apt/pool/a.deb"),
+            "{err}"
+        );
+        // The current plan counts as much as the history.
+        assert!(check_published_paths(&again, Some(&old), &[]).is_err());
+        // An immutable path turned into an index, or the other way.
+        let mut index = plan(90 * day, &["releases/x/1/a"]);
+        index.files[0].class = Class::Index;
+        assert!(check_published_paths(&index, Some(&old), &[]).is_err());
+        assert!(check_published_paths(&old, Some(&index), &[]).is_err());
+        // Two indexes at one path differ freely.
+        let mut other = index.clone();
+        other.files[0].sha256 = "22".repeat(32);
+        assert!(check_published_paths(&other, Some(&index), &[]).is_ok());
     }
 
     #[test]
@@ -1766,7 +2024,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_digests_prefer_the_metadata_and_decode_the_checksum() {
+    fn only_the_store_s_own_checksum_is_trusted_never_the_metadata() {
         use base64::Engine as _;
         let digest = [7_u8; 32];
         let detail = |metadata: Option<&str>, sha256: Option<String>| ObjectDetail {
@@ -1782,24 +2040,24 @@ mod tests {
         };
         let b64 = base64::engine::general_purpose::STANDARD.encode(digest);
         assert_eq!(
-            stored_sha256(&detail(Some(&hex::encode(digest)), None)),
+            store_checksum(&detail(Some(&hex::encode(digest)), None)),
+            None,
+            "a writer's metadata is no checksum"
+        );
+        assert_eq!(
+            store_checksum(&detail(None, Some(b64.clone()))),
             Some(digest.to_vec())
         );
         assert_eq!(
-            stored_sha256(&detail(None, Some(b64.clone()))),
-            Some(digest.to_vec())
+            store_checksum(&detail(Some(&hex::encode([1_u8; 32])), Some(b64))),
+            Some(digest.to_vec()),
+            "the store's, whatever the metadata says"
         );
         assert_eq!(
-            stored_sha256(&detail(Some(&hex::encode([1_u8; 32])), Some(b64))),
-            Some(vec![1_u8; 32]),
-            "the metadata first"
-        );
-        assert_eq!(stored_sha256(&detail(Some("zz"), None)), None);
-        assert_eq!(
-            stored_sha256(&detail(Some("00ff"), None)),
+            store_checksum(&detail(None, Some("AP8=".to_owned()))),
             None,
             "not 32 bytes"
         );
-        assert_eq!(stored_sha256(&detail(None, None)), None);
+        assert_eq!(store_checksum(&detail(None, None)), None);
     }
 }
