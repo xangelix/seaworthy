@@ -14,7 +14,8 @@
                 build with; MS-RL) and osslsigncode 2.14 from its pinned Windows build, each
                 checked against its SHA-256 before anything runs; with -Fips also NASM
                 2.16.03 from its pinned zip (the AWS-LC FIPS module's assembly needs it),
-                with CMake, Go and Visual Studio's clang (bindgen) from the image.
+                with CMake, Go, Ninja and Visual Studio's clang (bindgen) from the image
+                (Ninja 1.13.2 from its pinned zip when neither has it).
       cli       `seaworthy` and the lanes' binaries, release builds of this workspace:
                 seaworthy-service's windows_scm_e2e example (the version-gate stub and
                 start/stop/status) and its windows_scm test, seaworthy-crypto's
@@ -68,7 +69,12 @@ param(
     [string]$OsslsigncodeVersion = '2.14',
     [string]$NasmUrl = 'https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip',
     [string]$NasmSha256 = '3EE4782247BCB874378D02F7EAB4E294A84D3D15F3F6EE2DE2F47A46AA7226E6',
-    [string]$NasmVersion = '2.16.03'
+    [string]$NasmVersion = '2.16.03',
+    # Only when neither the image nor Visual Studio's developer environment has Ninja (the
+    # FIPS module's CMake build uses its generator on Windows).
+    [string]$NinjaUrl = 'https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip',
+    [string]$NinjaSha256 = '07FC8261B42B20E71D1720B39068C2E14FFCEE6396B76FB7A795FB460B78DC65',
+    [string]$NinjaVersion = '1.13.2'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -219,6 +225,18 @@ function Install-Nasm {
     Say "nasm: $version"
 }
 
+function Install-NinjaIfMissing {
+    $found = Get-Command 'ninja' -ErrorAction SilentlyContinue
+    if ($found) { Say "ninja: $($found.Source)"; return }
+    $dir = Expand-PinnedZip -Url $NinjaUrl -Sha256 $NinjaSha256 -Name 'ninja'
+    $exe = Join-Path $dir 'ninja.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Fail 'the Ninja zip holds no ninja.exe' }
+    $version = (& $exe --version | Out-String).Trim()
+    if ($version -ne $NinjaVersion) { Fail "ninja reports '$version', not $NinjaVersion" }
+    $env:PATH = "$dir;$env:PATH"
+    Say "ninja: $version (pinned)"
+}
+
 # The x64 MSVC developer environment imported into this process (INCLUDE, LIB, PATH,
 # ...), so cargo and every build script inherit it: the FIPS module's build runs `cl`
 # and its bindgen step needs %INCLUDE% and libclang. Mirrors
@@ -257,7 +275,7 @@ function Assert-FipsTools {
         if ($roots.Count -eq 0) { Fail 'go is not on PATH and no GOROOT_<major>_<minor>_X64 tool cache entry exists: the FIPS module''s build needs Go' }
         $env:PATH = "$(Join-Path $roots[0].Value 'bin');$env:PATH"
     }
-    foreach ($tool in @('cmake', 'go', 'nasm')) {
+    foreach ($tool in @('cmake', 'go', 'nasm', 'ninja')) {
         $found = Get-Command $tool -ErrorAction SilentlyContinue
         if (-not $found) { Fail "$tool is not on PATH: the FIPS module's build needs it" }
         Say "$tool -> $($found.Source)"
@@ -432,8 +450,9 @@ Say "WiX: $($script:Wix) ($((& $script:Wix --version | Out-String).Trim()))"
 $Osslsigncode = Install-Osslsigncode
 if ($Fips) {
     Install-Nasm
-    Assert-FipsTools
     Enter-MsvcEnvironment
+    Install-NinjaIfMissing
+    Assert-FipsTools
 }
 Say "rustc: $((& rustc --version | Out-String).Trim())"
 

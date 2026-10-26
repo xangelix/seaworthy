@@ -42,7 +42,8 @@ leaves a bundle for the lanes:
    published metadata), osslsigncode 2.14 from its Windows release (the hash GitHub records for
    the asset). The FIPS variant adds NASM 2.16.03 from nasm.us (which publishes no checksums;
    the pinned hash matches the one Scoop recorded for the same file independently) and checks
-   that CMake, Go and Visual Studio's clang (libclang, for bindgen) are on the image.
+   that CMake, Go, Ninja and Visual Studio's clang (libclang, for bindgen) are on the image,
+   with Ninja 1.13.2 from its pinned release when neither the image nor Visual Studio has it.
 2. **The CLI and the lanes' binaries**, release builds of this workspace: `seaworthy`,
    seaworthy-service's `windows_scm_e2e` example (the version-gate stub and start/stop/status
    through the crate's backend) and its `windows_scm` test, seaworthy-crypto's
@@ -167,7 +168,7 @@ scripts/check-powershell.sh                                           # every sc
 
 ## Bumping a pin
 
-The WiX, osslsigncode and NASM pins are parameters at the top of `scripts/windows-lab-build.ps1`
+The WiX, osslsigncode, NASM and Ninja pins are parameters at the top of `scripts/windows-lab-build.ps1`
 (version, URL and SHA-256 together), not managed by Dependabot. Take each digest from the
 publisher (WiX's release metadata, GitHub's asset digest; for NASM, compare with an independent
 record such as Scoop's manifest), download the file, and check that `Get-FileHash` agrees before
