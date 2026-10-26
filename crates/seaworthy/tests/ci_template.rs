@@ -1707,10 +1707,23 @@ fn script_at(path: &Path, text: &str) {
 }
 
 /// `PATH` with `dir` first.
-/// `pwsh`, without a compiler wrapper the caller's environment may set.
+/// `pwsh`, without a compiler wrapper the caller's environment may set, and
+/// with a cache of its own: pwsh processes started at once share
+/// `~/.cache/powershell`'s startup profile, and one reading another's
+/// half-written copy dies loading an assembly whose name came out garbled
+/// ("The given assembly name was invalid").
 fn pwsh() -> Command {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "pwsh-cache-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&cache).unwrap();
     let mut command = Command::new("pwsh");
-    command.env_remove("RUSTC_WRAPPER");
+    command
+        .env_remove("RUSTC_WRAPPER")
+        .env("XDG_CACHE_HOME", cache);
     command
 }
 
