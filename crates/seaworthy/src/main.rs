@@ -19,6 +19,7 @@
 //! seaworthy sign-statement --algorithm ALG --key FILE [--raw]
 //! seaworthy fips-check FILE…
 //! seaworthy glibc-check [--floor X.Y] FILE…
+//! seaworthy --version | --help
 //! ```
 //!
 //! Exit codes: 0 success, 1 a refusal (invalid config, failed checks, a
@@ -158,7 +159,8 @@ const USAGE: &str = "usage:
   seaworthy keygen --algorithm ml-dsa-87|ecdsa-p256|ed25519 --secret FILE --public FILE
   seaworthy sign-statement --algorithm ml-dsa-87|ecdsa-p256|ed25519 --key FILE [--raw]
   seaworthy fips-check FILE...
-  seaworthy glibc-check [--floor X.Y] FILE...";
+  seaworthy glibc-check [--floor X.Y] FILE...
+  seaworthy --version | --help";
 
 /// A command line that can't be run: exit 2 with the usage.
 struct Usage(String);
@@ -1452,6 +1454,23 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    // The tool's own version (what a release archive holds), and the
+    // usage on stdout when asked for.
+    match (command.as_str(), rest.is_empty()) {
+        ("--version" | "-V", true) => {
+            println!("seaworthy {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        ("--help" | "-h", true) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        ("--version" | "-V" | "--help" | "-h", false) => {
+            eprintln!("{command} takes no arguments\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        _ => {}
+    }
     if command == "fips-check" {
         return fips_check(rest);
     }

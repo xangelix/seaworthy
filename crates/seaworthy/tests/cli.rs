@@ -40,6 +40,25 @@ fn version_spells_every_format() {
 }
 
 #[test]
+fn version_and_help_answer_on_stdout() {
+    for flag in ["--version", "-V"] {
+        let out = seaworthy(&[flag]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("seaworthy {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+    for flag in ["--help", "-h"] {
+        let out = seaworthy(&[flag]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage:"));
+    }
+    let out = seaworthy(&["--version", "extra"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+}
+
+#[test]
 fn refusals_exit_1_and_name_the_problem() {
     let out = seaworthy(&["version", "--release", "1.0.0-rc1", "--sequence", "1"]);
     assert_eq!(out.status.code(), Some(1));
