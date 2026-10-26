@@ -18,7 +18,7 @@
 //! A desktop product whose helper ships carries instead:
 //!
 //! - `/usr/lib/systemd/system/<package>-update.service`: the helper's root
-//!   oneshot, the same unit and sandbox as a service's helper, with no path
+//!   oneshot, the same unit and hardening as a service's helper, with no path
 //!   unit, no `[Install]` section and no preset: nothing starts it but the
 //!   logged-in user's session;
 //! - `/usr/share/polkit-1/rules.d/60-<package>-update.rules`: the rule

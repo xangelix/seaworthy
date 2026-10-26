@@ -113,7 +113,13 @@ pub fn update_path_unit(spec: &ServiceSpec) -> Result<String, ServiceError> {
     Ok(unit)
 }
 
-/// The update helper's sandbox (see [`update_service_unit`]).
+/// The update helper's hardening (see [`update_service_unit`]). What runs
+/// under it is the helper and the tools it runs itself: the package
+/// managers' queries and dry runs (`dpkg-query`, `apt-get -s`, `rpm -q`,
+/// `rpm -qp`, `pacman -Q`, `pacman -U --print`, `pacman-conf`), the OpenPGP
+/// checks (`gpg`, `rpmkeys` on throw-away homes in the staging directory),
+/// `systemd-run` and `journalctl`. The install itself runs in a transient
+/// unit PID 1 starts, outside all of it.
 const HELPER_SANDBOX: &[&str] = &[
     "NoNewPrivileges=true",
     "ProtectSystem=strict",
@@ -126,13 +132,37 @@ const HELPER_SANDBOX: &[&str] = &[
     "ProtectControlGroups=true",
     "ProtectClock=true",
     "ProtectHostname=true",
+    // No other user's processes, and of /proc only the process
+    // directories: neither the helper nor its tools look at other
+    // processes (the install's unit is watched through systemd), and none
+    // reads the kernel's /proc files (libgcrypt's fips_enabled probe reads
+    // as absent: gpg only verifies here).
+    "ProtectProc=invisible",
+    "ProcSubset=pid",
     "RestrictNamespaces=true",
     "RestrictRealtime=true",
     "RestrictSUIDSGID=true",
     "LockPersonality=true",
     "MemoryDenyWriteExecute=true",
+    // Root keeps only what the tools above use: reading databases and
+    // caches another account owns (apt's lists are `_apt`'s, some
+    // configuration is 0600), and switching to a package manager's own
+    // unprivileged user (apt's `_apt`, pacman's download user) should a
+    // query reach that code. No CAP_SYS_ADMIN, CAP_SYS_PTRACE, CAP_NET_*,
+    // CAP_SYS_MODULE, CAP_MKNOD, CAP_CHOWN or CAP_FOWNER: talking to systemd
+    // needs none (it trusts uid 0), and the staging directory is the
+    // helper's own.
+    "CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID",
     "SystemCallArchitectures=native",
+    // systemd's service allowlist, which keeps what the tools need (the
+    // set-user-ID calls for a privilege drop, mlock for gpg's secure
+    // memory, setrlimit for its core-dump guard, the chown family), minus
+    // groups none of them uses, named even where the allowlist already
+    // leaves them out so a later systemd's allowlist can't bring them
+    // back; a refused call fails with EPERM instead of killing the tool.
     "SystemCallFilter=@system-service",
+    "SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap",
+    "SystemCallErrorNumber=EPERM",
     "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 ];
 
@@ -146,19 +176,32 @@ const HELPER_SANDBOX: &[&str] = &[
 /// Package scripts never restart this unit or the path unit on upgrade.
 /// The helper hands the package manager to a transient unit
 /// (`systemd-run --wait --collect`), so the upgrade it starts can't kill it
-/// mid-transaction. That transient unit is
-/// started by PID 1 and inherits none of this unit's sandbox, so the
-/// helper itself (a root process parsing network data) is sandboxed:
+/// mid-transaction. That transient unit is started by PID 1 and inherits
+/// none of this unit's hardening, so the helper itself (a root process
+/// parsing network data) and the tools it runs are hardened:
 ///
 /// - the file system is read-only (`ProtectSystem=strict`) except its
 ///   root-only staging directory, `CacheDirectory=<cache_directory>`
 ///   (mode 0700: `/var/cache/<vendor>/<product>`);
 /// - no home directories, devices, kernel tunables, modules, logs or
-///   control groups; no new privileges; native system calls of the
-///   `@system-service` set; IPv4, IPv6 and Unix sockets only.
+///   control groups; no other user's processes and none of /proc but the
+///   process directories (`ProtectProc=invisible`, `ProcSubset=pid`); no
+///   new privileges;
+/// - a capability bounding set of `CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+///   CAP_SETUID CAP_SETGID` (the package managers' queries read files
+///   other accounts own and may switch to their own unprivileged users);
+/// - native system calls of the `@system-service` set without the clock,
+///   debug, module, mount, raw-I/O, reboot and swap groups, a refused call
+///   failing with `EPERM`; IPv4, IPv6 and Unix sockets only.
 ///
+/// This hardens; it does not contain. The helper is root and may ask
+/// systemd for units (that is how it installs), so code running as the
+/// helper can leave all of this behind: the defense is that the helper
+/// parses nothing from the network before a signature check, and the
+/// planned split moves fetching and parsing into an unprivileged process.
 /// Connecting to systemd's socket needs neither write access nor
-/// capabilities, so `systemd-run` works under all of this.
+/// capabilities (systemd trusts uid 0), so `systemd-run` works under all
+/// of this.
 ///
 /// # Errors
 /// [`ServiceError::InvalidSpec`] for a `helper` path systemd would misread
@@ -1472,16 +1515,48 @@ WantedBy=multi-user.target
             expected.push('\n');
         }
         assert_eq!(helper, expected);
-        // The sandbox that matters: read-only system, no new privileges,
-        // the network families only.
+        // The hardening that matters: read-only system, no new
+        // privileges, a bounded capability set without the escalation
+        // capabilities, hidden processes, the system-call allowlist
+        // failing softly, the network families only.
         for must in [
             "ProtectSystem=strict",
             "NoNewPrivileges=true",
+            "ProtectProc=invisible",
+            "ProcSubset=pid",
+            "CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
             "SystemCallFilter=@system-service",
+            "SystemCallErrorNumber=EPERM",
         ] {
-            assert!(helper.contains(must), "{must}");
+            assert!(helper.lines().any(|line| line == must), "{must}");
         }
+        let bounding = helper
+            .lines()
+            .find_map(|line| line.strip_prefix("CapabilityBoundingSet="))
+            .expect("a bounding set");
+        for never in [
+            "CAP_SYS_ADMIN",
+            "CAP_SYS_PTRACE",
+            "CAP_SYS_MODULE",
+            "CAP_NET_ADMIN",
+            "CAP_NET_RAW",
+            "CAP_MKNOD",
+            "CAP_SYS_RAWIO",
+            "CAP_BPF",
+        ] {
+            assert!(!bounding.contains(never), "{never} in {bounding}");
+        }
+        // Every directive once, and systemd's own syntax: Key=value lines.
+        let mut keys: Vec<&str> = HELPER_SANDBOX
+            .iter()
+            .filter(|d| !d.starts_with("SystemCallFilter="))
+            .map(|d| d.split('=').next().unwrap())
+            .collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before, "a directive set twice");
         assert!(
             !helper.contains("[Install]"),
             "only the path unit starts the helper"

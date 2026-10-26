@@ -90,10 +90,15 @@ sentinel or automatic rollback.
   can do to ask for an update. No `TriggerLimit*=` beyond systemd's defaults: a tripped limit
   fails the path unit, and nothing would restart it.
 - `render::systemd::update_service_unit(spec, helper, cache_directory)`: the update helper, a
-  root oneshot with no `[Install]` and no start limit, sandboxed (`ProtectSystem=strict`
+  root oneshot with no `[Install]` and no start limit, hardened (`ProtectSystem=strict`
   except its 0700 `CacheDirectory=`, no home, devices, kernel tunables, modules, logs or
-  control groups, `NoNewPrivileges`, `@system-service`, IPv4/IPv6/Unix sockets only). The
-  package manager it starts runs in a transient unit that inherits none of this.
+  control groups, `ProtectProc=invisible` and `ProcSubset=pid`, `NoNewPrivileges`, the
+  capability bounding set `CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID` its
+  package-manager queries need, `@system-service` without the clock, debug, module, mount,
+  raw-I/O, reboot and swap groups and failing with `EPERM`, IPv4/IPv6/Unix sockets only). The
+  package manager it starts runs in a transient unit that inherits none of this, and the
+  helper, being root and allowed to start units, could leave it all behind if compromised:
+  this is hardening, not a sandbox ([threat model](threat-model.md#residual-risks)).
 - `render::systemd::desktop_update_service_unit` and `desktop_update_polkit_rule`: for a
   product with no service, the same helper unit and a polkit rule letting the active, local
   session `start` exactly that unit, nothing else.
