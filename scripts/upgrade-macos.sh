@@ -167,6 +167,27 @@ untouched() { # <case> <pid>
 
 SERVER_PID=""
 POLICY_MADE=0
+# Runs <command…> for at most <seconds>, its output in the evidence: a
+# Security framework call that wants a person's authorization waits for a
+# dialog nobody answers, and one still holding the step's output would keep
+# the job running after the lane ended.
+bounded() { # <seconds> <command…>
+    local seconds="$1" waited=0
+    shift
+    "$@" >> "$EVIDENCE/cleanup.log" 2>&1 &
+    local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$seconds" ]; then
+            sudo pkill -KILL -P "$pid" 2>/dev/null || true
+            sudo kill -KILL "$pid" 2>/dev/null || true
+            echo "upgrade-macos: cleanup gave up on '$*' after ${seconds} s (the VM is thrown away)" >&2
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$pid" || true
+}
 cleanup() {
     local rc=$?
     mkdir -p "$EVIDENCE"
@@ -186,14 +207,14 @@ cleanup() {
         sudo killall -HUP mDNSResponder 2>/dev/null || true
     fi
     if [ -f "$LAB/tls/ca.pem" ]; then
-        sudo security remove-trusted-cert -d "$LAB/tls/ca.pem" 2>/dev/null || true
-        sudo security delete-certificate -Z "$(openssl x509 -in "$LAB/tls/ca.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)" \
-            /Library/Keychains/System.keychain 2>/dev/null || true
+        bounded 60 sudo security remove-trusted-cert -d "$LAB/tls/ca.pem"
+        bounded 60 sudo security delete-certificate -Z "$(openssl x509 -in "$LAB/tls/ca.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)" \
+            /Library/Keychains/System.keychain
     fi
     if [ -s "$LAB/authdb.plist" ]; then
-        # The right as the lane saved it (its own file).
-        # shellcheck disable=SC2024
-        sudo security authorizationdb write com.apple.trust-settings.admin < "$LAB/authdb.plist" >/dev/null 2>&1 || true
+        # The right as the lane saved it (its own file); $1 expands in that sh.
+        # shellcheck disable=SC2016
+        bounded 60 sh -c 'sudo security authorizationdb write com.apple.trust-settings.admin < "$1"' sh "$LAB/authdb.plist"
     fi
     exit "$rc"
 }
