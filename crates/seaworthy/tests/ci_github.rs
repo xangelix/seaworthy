@@ -760,15 +760,10 @@ fn signing_toml_names_each_signer_it_was_handed() {
         .output()
         .unwrap();
     assert!(export.status.success(), "{}", said(&export));
-    let encoded = String::from_utf8(
-        Command::new("base64")
-            .arg("-w0")
-            .arg(&p12)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
+    // Encoded here: macOS's base64 has no -w0, and an empty secret means no
+    // PKCS#12 at all.
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&p12).unwrap());
     let out = run(&[
         ("SEAWORTHY_GH_AUTHENTICODE_PFX", &encoded),
         ("SEAWORTHY_GH_AUTHENTICODE_PASSWORD", "pfx-pass"),

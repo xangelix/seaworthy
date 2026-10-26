@@ -907,6 +907,12 @@ pub(crate) fn required() -> bool {
 /// Whether `tool` runs (`tool probe…` exits 0); a skip is announced, and
 /// fails under [`required`].
 pub(crate) fn have(tool: &str, probe: &[&str]) -> bool {
+    if cfg!(windows) && tool == "gpg" && !native_gpg() {
+        eprintln!(
+            "SKIPPED: gpg is an MSYS build (Git for Windows's), which reads C:\\ paths as relative"
+        );
+        return false;
+    }
     let ok = std::process::Command::new(tool)
         .args(probe)
         .output()
@@ -919,6 +925,21 @@ pub(crate) fn have(tool: &str, probe: &[&str]) -> bool {
         eprintln!("SKIPPED: {tool} is not installed");
     }
     ok
+}
+
+/// Whether `gpg` is a native Windows build (Gpg4win), whose home is a drive
+/// path. Git for Windows's MSYS gpg names a POSIX one (`/c/Users/…`,
+/// `~/.gnupg`) and joins a `--homedir C:\…` onto its working directory.
+fn native_gpg() -> bool {
+    std::process::Command::new("gpg")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("Home: "))
+                .any(|home| home.get(1..3).is_some_and(|s| s == ":\\" || s == ":/"))
+        })
 }
 
 /// Runs `cmd`, which must succeed; its stdout.
