@@ -2,7 +2,9 @@
 //! loopback stub: what `put_object` sends (the in-module SHA-256 checksum
 //! on every write, `If-None-Match: *`, the type, cache rule and user
 //! metadata, all SIGNED), how it reads the answers (`412` = already
-//! exists, a lying checksum echo, a retryable `409`), and the bounded,
+//! exists for a create-only write, another version for an `If-Match` one,
+//! an error otherwise; a lying checksum echo, a retryable `409`), and the
+//! bounded,
 //! verified `get_object` and `head_object_detail`. The real semantics
 //! (conditional writes, stored checksums) are proven against RustFS in
 //! `s3_rustfs.rs`.
@@ -180,6 +182,75 @@ async fn a_precondition_failure_is_already_exists_never_an_overwrite() {
         backend_put(&server).await.expect("bare 412"),
         PutOutcome::AlreadyExists
     );
+    server.stop().await;
+}
+
+/// A `412` is a condition's answer: an unconditional write that gets one
+/// failed, never "already there"; an `If-Match` write that gets one (or a
+/// `404`: nothing is there any more) found another version, and wrote
+/// nothing.
+#[tokio::test]
+async fn a_412_means_what_the_condition_sent_says() {
+    let (server, seen) = stub(|_| {
+        RawResponse::s3_error(
+            412,
+            "PreconditionFailed",
+            "At least one of the pre-conditions you specified did not hold",
+        )
+    })
+    .await;
+    let first = backend(&server.url());
+    let mut unconditional = PutOptions::create_only();
+    unconditional.create_only = false;
+    let err = first
+        .put_object(&spath("a"), Bytes::from_static(b"x"), &unconditional)
+        .await
+        .expect_err("an unconditional write's 412 is an error");
+    assert!(err.to_string().contains("PreconditionFailed"), "{err}");
+    let replacing = PutOptions::create_only().with_if_match("\"v1\"");
+    assert_eq!(
+        first
+            .put_object(&spath("a"), Bytes::from_static(b"x"), &replacing)
+            .await
+            .expect("412 answers the condition"),
+        PutOutcome::Changed
+    );
+    let request = seen
+        .lock()
+        .expect("log")
+        .last()
+        .cloned()
+        .expect("a request");
+    assert_eq!(request.header("if-match"), Some("\"v1\""));
+    assert!(request.header("if-none-match").is_none());
+    assert!(signed_headers(&request).contains(&"if-match".to_owned()));
+    server.stop().await;
+    let (server, _) = stub(|_| RawResponse::s3_error(404, "NoSuchKey", "gone")).await;
+    assert_eq!(
+        backend(&server.url())
+            .put_object(&spath("a"), Bytes::from_static(b"x"), &replacing)
+            .await
+            .expect("a 404 answers the condition"),
+        PutOutcome::Changed
+    );
+    server.stop().await;
+    // Both conditions at once, or an ETag that can't be a header: refused
+    // before any request.
+    let mut both = PutOptions::create_only().with_if_match("\"v1\"");
+    both.create_only = true;
+    let (server, seen) = stub(|_| RawResponse::new(200, Vec::new())).await;
+    let last = backend(&server.url());
+    for options in [
+        both,
+        PutOptions::create_only().with_if_match("\"v1\"\r\nx: y"),
+    ] {
+        let err = last
+            .put_object(&spath("a"), Bytes::from_static(b"x"), &options)
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, StorageError::Validation(_)), "{err}");
+    }
+    assert!(seen.lock().expect("log").is_empty());
     server.stop().await;
 }
 

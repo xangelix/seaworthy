@@ -9,6 +9,11 @@
 //!   caller decides: the same bytes are success, different bytes are an
 //!   alarm (a published file is immutable). A concurrent conditional write
 //!   (`409 ConditionalRequestConflict`) is retryable.
+//! - **Replace-if-unchanged** (`If-Match: <ETag>`) moves a pointer only
+//!   from the version the caller read: another writer's version answers
+//!   [`PutOutcome::Changed`] and nothing is written. A `412` is a
+//!   condition's answer only: an unconditional write that gets one is an
+//!   error, never taken for success.
 //! - **The checksum on every write**: SHA-256 stays inside the FIPS module
 //!   (no MD5 in the facade). The service verifies it against the body
 //!   (`BadDigest` otherwise) and stores it, and a read with
@@ -78,6 +83,12 @@ pub struct PutOptions {
     /// needs longer than any management call: scale it with the size. At
     /// most [`MAX_PUT_TIMEOUT`].
     pub timeout: Option<Duration>,
+    /// Send `If-Match: <ETag>`: the write replaces only the version with
+    /// this ETag (as [`FetchedObject::etag`] or
+    /// [`ObjectDetail::etag`] gave it, quotes included); another version,
+    /// or none, answers [`PutOutcome::Changed`]. Never with
+    /// [`create_only`](Self::create_only).
+    pub if_match: Option<String>,
 }
 
 impl PutOptions {
@@ -91,7 +102,17 @@ impl PutOptions {
             max_body_bytes: MAX_DIRECT_OBJECT_BYTES,
             metadata: Vec::new(),
             timeout: None,
+            if_match: None,
         }
+    }
+
+    /// Replace only the version whose ETag is `etag` (`If-Match`), and so
+    /// not create-only.
+    #[must_use]
+    pub fn with_if_match(mut self, etag: impl Into<String>) -> Self {
+        self.if_match = Some(etag.into());
+        self.create_only = false;
+        self
     }
 
     /// Add a user metadata entry (`x-amz-meta-<name>: <value>`).
@@ -147,6 +168,10 @@ pub enum PutOutcome {
     /// ([`S3Backend::get_object`], [`S3Backend::head_object_detail`]) to
     /// decide whether it is the same bytes.
     AlreadyExists,
+    /// An `If-Match` write ([`PutOptions::if_match`]) found another version
+    /// of the object, or none (S3 `412 PreconditionFailed`, or `404`):
+    /// NOTHING was written.
+    Changed,
 }
 
 /// What [`S3Backend::head_object_detail`] reports about an object.
@@ -198,19 +223,37 @@ fn exceeds(len: usize, cap: u64) -> bool {
     u64::try_from(len).map_or(true, |len| len > cap)
 }
 
+/// Whether `error` is S3's `412 PreconditionFailed`.
+fn is_precondition_failed(error: &StorageError) -> bool {
+    match error {
+        StorageError::S3 { code, .. } => code == "PreconditionFailed",
+        StorageError::Http { status_code, .. } => *status_code == 412,
+        _ => false,
+    }
+}
+
+/// Whether `error` is S3's `404` (no such key).
+fn is_not_found(error: &StorageError) -> bool {
+    match error {
+        StorageError::S3 { code, .. } => code == "NoSuchKey" || code == "NotFound",
+        StorageError::Http { status_code, .. } => *status_code == 404,
+        _ => false,
+    }
+}
+
 impl S3Backend {
     /// `PutObject` of an in-memory body (≤ [`PutOptions::max_body_bytes`],
     /// [`MAX_DIRECT_OBJECT_BYTES`] by default), header-signed: the body's
     /// SHA-256 (computed in-module) rides `x-amz-checksum-sha256` on EVERY
     /// write (the service refuses a body that does not match it) plus, per
-    /// `options`, `If-None-Match: *` (create-only), the stored type, cache
-    /// rule and user metadata, all signed. A service-echoed checksum is
+    /// `options`, `If-None-Match: *` (create-only) or `If-Match`, the stored
+    /// type, cache rule and user metadata, all signed. A service-echoed checksum is
     /// re-checked. Every option is validated before any request is sent.
     ///
     /// # Errors
     /// [`StorageError::Validation`] for an oversized body, an unusable
-    /// content type, cache rule or metadata entry, or a deadline out of
-    /// range; [`StorageError::HashMismatch`] when the service echoes a
+    /// content type, cache rule, ETag or metadata entry, both conditions,
+    /// or a deadline out of range; [`StorageError::HashMismatch`] when the service echoes a
     /// different checksum; request failures otherwise (`409
     /// ConditionalRequestConflict` is retryable:
     /// [`StorageError::is_retryable`]).
@@ -233,6 +276,14 @@ impl S3Backend {
             )));
         }
         validate_content_type(&options.content_type)?;
+        if let Some(etag) = &options.if_match {
+            if options.create_only {
+                return Err(StorageError::Validation(
+                    "a put is create-only or If-Match, never both".to_owned(),
+                ));
+            }
+            validate_header_value(etag, "an If-Match ETag")?;
+        }
         if let Some(cache_control) = &options.cache_control {
             validate_header_value(cache_control, "a Cache-Control value")?;
         }
@@ -282,18 +333,26 @@ impl S3Backend {
         if options.create_only {
             headers.push(("if-none-match".to_owned(), "*".to_owned()));
         }
+        if let Some(etag) = &options.if_match {
+            headers.push(("if-match".to_owned(), etag.clone()));
+        }
         let deadline = options.timeout.unwrap_or(self.config.management_timeout);
         let result = self
             .management_request_within("PUT", path, headers, body, deadline)
             .await;
         let response = match result {
             Ok(response) => response,
-            Err(StorageError::S3 { ref code, .. }) if code == "PreconditionFailed" => {
+            // A 412 is a condition's answer: what it means depends on the
+            // condition sent, and without one it's an error like any other.
+            Err(error) if is_precondition_failed(&error) && options.create_only => {
                 return Ok(PutOutcome::AlreadyExists);
             }
-            Err(StorageError::Http {
-                status_code: 412, ..
-            }) => return Ok(PutOutcome::AlreadyExists),
+            Err(error)
+                if options.if_match.is_some()
+                    && (is_precondition_failed(&error) || is_not_found(&error)) =>
+            {
+                return Ok(PutOutcome::Changed);
+            }
             Err(error) => return Err(error),
         };
         if let Some(echoed) = header(&response, "x-amz-checksum-sha256")
@@ -398,6 +457,28 @@ mod tests {
         assert_eq!(options.content_type, super::super::DEFAULT_CONTENT_TYPE);
         assert_eq!(options.max_body_bytes, MAX_DIRECT_OBJECT_BYTES);
         assert!(options.metadata.is_empty() && options.timeout.is_none());
+        assert!(options.if_match.is_none());
+        let replacing = PutOptions::create_only().with_if_match("\"e1\"");
+        assert!(!replacing.create_only);
+        assert_eq!(replacing.if_match.as_deref(), Some("\"e1\""));
+    }
+
+    #[test]
+    fn a_412_is_told_apart_from_other_failures() {
+        let s3 = |code: &str| StorageError::S3 {
+            code: code.to_owned(),
+            message: String::new(),
+        };
+        let http = |status_code: u16| StorageError::Http {
+            status_code,
+            error_text: String::new(),
+        };
+        assert!(is_precondition_failed(&s3("PreconditionFailed")));
+        assert!(is_precondition_failed(&http(412)));
+        assert!(!is_precondition_failed(&http(409)));
+        assert!(is_not_found(&http(404)));
+        assert!(is_not_found(&s3("NoSuchKey")));
+        assert!(!is_not_found(&http(412)));
     }
 
     #[test]
