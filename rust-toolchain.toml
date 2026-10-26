@@ -4,5 +4,5 @@
 # `workspace.package.rust-version` when the MSRV moves (CONTRIBUTING.md).
 # The fuzz crate pins its own nightly (fuzz/README.md).
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
