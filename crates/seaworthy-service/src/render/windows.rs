@@ -293,9 +293,12 @@ pub fn data_dir_sddl() -> String {
 /// Who may start the update helper service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HelperGrantee {
-    /// A service product: the main service's account (its SID, or SDDL
-    /// alias). For LocalSystem (`SY`) the grant adds nothing — SYSTEM may
-    /// already start any service — but keeps one code path.
+    /// A service product: the main service's account, its own SID — a
+    /// virtual account's `S-1-5-80-…`, or `SY` for LocalSystem (where the
+    /// grant adds nothing, since SYSTEM may already start any service, but
+    /// keeps one code path). Never a shared account (`LS`, `NS`): every
+    /// service running as LocalService or NetworkService would get the
+    /// right too.
     Service(String),
     /// A desktop product: interactive users (`IU`), since the app runs as
     /// whoever is logged in.
@@ -311,15 +314,23 @@ pub enum HelperGrantee {
 /// names.
 ///
 /// # Errors
-/// [`ServiceError::InvalidSpec`] for a service grantee that is none of the
-/// service accounts: `SY`, `LS`, `NS`, or a virtual account's
-/// `S-1-5-80-<five 32-bit numbers>`. Broad principals (`WD`, `BU`, `AU`,
-/// `AN`, …) are never granted the start right through this path.
+/// [`ServiceError::InvalidSpec`] for a service grantee that is neither
+/// LocalSystem (`SY`) nor a virtual account's
+/// `S-1-5-80-<five 32-bit numbers>`. The shared service accounts (`LS`,
+/// `NS`) are refused: their SID is every LocalService or NetworkService
+/// service's, so the grant would let any of them start the helper. Broad
+/// principals (`WD`, `BU`, `AU`, `AN`, …) are never granted the start
+/// right through this path.
 pub fn helper_service_sddl(grantee: &HelperGrantee) -> Result<String, ServiceError> {
     let who = match grantee {
         HelperGrantee::InteractiveUsers => "IU",
+        HelperGrantee::Service(sid) if matches!(sid.as_str(), "LS" | "NS") => {
+            return Err(ServiceError::InvalidSpec(format!(
+                "{sid:?} is a shared service account (every LocalService or NetworkService service runs as it): granting it the helper's start right would grant every such service; run the service as its virtual account"
+            )));
+        }
         HelperGrantee::Service(sid) => {
-            let builtin = matches!(sid.as_str(), "SY" | "LS" | "NS");
+            let builtin = sid == "SY";
             let virtual_account = sid.strip_prefix("S-1-5-80-").is_some_and(|rest| {
                 let parts: Vec<&str> = rest.split('-').collect();
                 parts.len() == 5
@@ -331,7 +342,7 @@ pub fn helper_service_sddl(grantee: &HelperGrantee) -> Result<String, ServiceErr
             });
             if !(builtin || virtual_account) {
                 return Err(ServiceError::InvalidSpec(format!(
-                    "{sid:?} is not a service account (SY, LS, NS, or a virtual account's S-1-5-80-… SID)"
+                    "{sid:?} is not a service's own account (SY, or a virtual account's S-1-5-80-… SID)"
                 )));
             }
             sid.as_str()
@@ -566,11 +577,14 @@ mod tests {
         let svc =
             helper_service_sddl(&HelperGrantee::Service("S-1-5-80-1-2-3-4-5".to_owned())).unwrap();
         assert!(svc.ends_with("(A;;CCLCSWRPLORC;;;S-1-5-80-1-2-3-4-5)"));
-        for ok in ["SY", "LS", "NS"] {
-            assert!(
-                helper_service_sddl(&HelperGrantee::Service(ok.to_owned())).is_ok(),
-                "{ok}"
-            );
+        assert!(helper_service_sddl(&HelperGrantee::Service("SY".to_owned())).is_ok());
+        // The shared service accounts: every LocalService or NetworkService
+        // service would get the start right.
+        for shared in ["LS", "NS"] {
+            let err = helper_service_sddl(&HelperGrantee::Service(shared.to_owned()))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("shared service account"), "{shared}: {err}");
         }
         let computed = virtual_account_sid("AcmeLiveResponseService").unwrap();
         assert!(helper_service_sddl(&HelperGrantee::Service(computed)).is_ok());
