@@ -50,6 +50,28 @@ def tail(path: str, lines: int) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+FAILURE = re.compile(
+    r"panicked at|^\s*error(\[E\d+\])?:|FAILED|FAIL[: ]|^---- .+ ----$|^Error:|fatal:|failed to"
+)
+
+
+def failure_lines(text: str, context: int = 3) -> str:
+    """Every line that looks like a failure, anywhere in the log, with the
+    lines after it (a panic's message, a test's assertion)."""
+    lines = text.splitlines()
+    keep: list[int] = []
+    for i, line in enumerate(lines):
+        if FAILURE.search(line):
+            keep.extend(range(i, min(i + 1 + context, len(lines))))
+    seen: set[int] = set()
+    out = []
+    for i in keep:
+        if i not in seen:
+            seen.add(i)
+            out.append(lines[i])
+    return "\n".join(out)
+
+
 def main() -> None:
     lines = int(os.environ.get("ANNOTATE_LINES") or "150")
     temp = os.environ.get("RUNNER_TEMP", "")
@@ -67,6 +89,20 @@ def main() -> None:
         print("::notice title=annotate-failure::no log files matched")
         return
     budget = MAX_ANNOTATIONS
+    # First: the failure-looking lines of every file, wherever they are (a
+    # test's panic can sit far above a long tail).
+    collected = []
+    for path in files:
+        with open(path, "rb") as handle:
+            text = ANSI.sub("", handle.read().decode("utf-8", errors="replace"))
+        found = failure_lines(text)
+        if found:
+            collected.append(f"== {os.path.basename(path)}\n{found}")
+    if collected:
+        summary = "\n".join(collected)
+        summary = summary.encode("utf-8")[:MAX_CHUNK].decode("utf-8", errors="ignore")
+        print(f"::error title={escape_property('error lines (whole log)')}::{escape_data(summary)}")
+        budget -= 1
     for path in files:
         text = tail(path, lines)
         if not text.strip():

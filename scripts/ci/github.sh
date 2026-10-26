@@ -74,6 +74,18 @@ set -euo pipefail
 # `${var@Q}` expansion.
 shopt -s inherit_errexit 2>/dev/null || true
 quoted() { printf '%q' "$1"; }
+# SHA-256 of files: coreutils' sha256sum, else macOS's shasum (the same
+# output format).
+if command -v sha256sum >/dev/null 2>&1; then sha256=(sha256sum); else sha256=(shasum -a 256); fi
+# OpenSSL proper: macOS's /usr/bin/openssl is LibreSSL, which can't open the
+# PKCS#12 files OpenSSL 3 writes, so Homebrew's OpenSSL 3 comes first.
+openssl() {
+    local brew
+    for brew in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+        if [ -x "$brew" ]; then "$brew" "$@"; return; fi
+    done
+    command openssl "$@"
+}
 
 fail() { echo "seaworthy (github): FAIL: $*" >&2; exit 1; }
 say() { echo "seaworthy (github): $*"; }
@@ -537,7 +549,7 @@ assemble() { # <out> <label>=<dir>...
                 [ -f "$from" ] && [ ! -L "$from" ] || fail "$listing lists $file, which isn't there"
                 mkdir -p "$(dirname "$to")"
                 cp "$from" "$to"
-                actual="$(sha256sum "$to" | cut -d' ' -f1)"
+                actual="$("${sha256[@]}" "$to" | cut -d' ' -f1)"
                 [ "$actual" = "$sha" ] || fail "$label/$product/$file: SHA-256 $actual, but the listing says $sha"
                 files=$((files + 1))
             done < <(jq -r '.artifacts[] | [.file, .sha256] | @tsv' "$listing")
@@ -545,7 +557,7 @@ assemble() { # <out> <label>=<dir>...
     done
     [ "$files" -gt 0 ] || fail "assemble: no listed artifact anywhere"
     local sums
-    sums="$(cd "$out" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's#  \./#  #')"
+    sums="$(cd "$out" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 "${sha256[@]}" | sed 's#  \./#  #')"
     printf '%s\n' "$sums" > "$out/SHA256SUMS"
     say "assembled $files artifact(s) into $out, checked against their listings (SHA256SUMS)"
 }

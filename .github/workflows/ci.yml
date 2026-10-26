@@ -100,7 +100,9 @@ jobs:
   clippy:
     defaults:
       run:
-        shell: ${{ matrix.os == 'windows-2025' && 'bash' || 'bash scripts/ci/logged.sh {0}' }}
+        # Plain bash on every leg (Git Bash on Windows); the cargo step tees its
+        # output for the failure annotations itself.
+        shell: bash
     name: Clippy (${{ matrix.os }})
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -131,7 +133,7 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked --features "$FEATURES" -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --features "$FEATURES" -- -D warnings 2>&1 | tee -a "$RUNNER_TEMP/step-output.log"
       # The failure's output as annotations, readable without signing in
       # (.github/actions/annotate-failure).
       - name: Publish the failure's log tail
@@ -141,7 +143,9 @@ jobs:
   test:
     defaults:
       run:
-        shell: ${{ matrix.os == 'windows-2025' && 'bash' || 'bash scripts/ci/logged.sh {0}' }}
+        # Plain bash on every leg (Git Bash on Windows); the cargo step tees its
+        # output for the failure annotations itself.
+        shell: bash
     name: Test (${{ matrix.os }})
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -174,7 +178,7 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: cargo test
-        run: cargo test --workspace --locked --features "$FEATURES"
+        run: cargo test --workspace --locked --features "$FEATURES" 2>&1 | tee -a "$RUNNER_TEMP/step-output.log"
 
   # seaworthy-formats built with its CI test-key switch on: the trust paths
   # only such a build has (the marker, ci_test_keys!, test keys accepted).
@@ -479,6 +483,10 @@ jobs:
     permissions:
       contents: read
     env:
+      # The container suites (the conformance suite among them, which
+      # --all-features compiles) run in the containers and lab jobs; docker
+      # is disabled here, so they skip instead of failing.
+      SEAWORTHY_TEST_CONTAINERS_REQUIRED: "0"
       # The AWS-LC FIPS module builds from source with CMake, Go, Perl and
       # Clang, all preinstalled on GitHub's Ubuntu image.
       CC: clang
