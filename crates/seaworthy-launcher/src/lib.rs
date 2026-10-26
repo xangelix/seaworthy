@@ -271,25 +271,49 @@ fn launch(launcher: &Launcher, out: &mut Report) -> i32 {
         }
         None => launcher.cpus.to_vec(),
     };
-    let candidates: Vec<select::Candidate> = cpus
-        .iter()
-        .map(|cpu| {
-            let path = core_path(&dir, launcher.core, cpu);
-            let probe = if !path.exists() {
-                select::Probe::Missing
-            } else {
-                match seaworthy_levels::read_requirement(&path) {
-                    Ok(record) => select::Probe::Record(record),
-                    Err(e) => select::Probe::Unreadable(e.to_string()),
+    // In secure-execution mode nothing is opened, let alone parsed, before
+    // the trust rule has passed on its path: a set-user-ID launcher
+    // hardlinked into a user's directory must not even read that user's
+    // files with raised privileges. Each core is then opened without
+    // following a symlink or blocking on a FIFO, and must be a regular file.
+    let secure = load::secure_execution();
+    let mut candidates: Vec<select::Candidate> = Vec::with_capacity(cpus.len());
+    for cpu in &cpus {
+        let path = core_path(&dir, launcher.core, cpu);
+        let (path, probe) = if !path.exists() {
+            (path, select::Probe::Missing)
+        } else if secure {
+            let opened = load::trusted_path(&path)
+                .and_then(|real| load::open_regular(&real).map(|file| (real, file)));
+            match opened {
+                Ok((real, file)) => {
+                    let probe = match seaworthy_levels::requirement_from_file(file) {
+                        Ok(record) => select::Probe::Record(record),
+                        Err(e) => select::Probe::Unreadable(e.to_string()),
+                    };
+                    (real, probe)
                 }
-            };
-            select::Candidate {
-                cpu: (*cpu).to_owned(),
-                path,
-                probe,
+                Err(reason) => {
+                    say!(
+                        "refusing {} in secure-execution mode: {reason}",
+                        path.display()
+                    );
+                    return EXIT_UNTRUSTED_CORE;
+                }
             }
-        })
-        .collect();
+        } else {
+            let probe = match seaworthy_levels::read_requirement(&path) {
+                Ok(record) => select::Probe::Record(record),
+                Err(e) => select::Probe::Unreadable(e.to_string()),
+            };
+            (path, probe)
+        };
+        candidates.push(select::Candidate {
+            cpu: (*cpu).to_owned(),
+            path,
+            probe,
+        });
+    }
 
     let mut report = Vec::new();
     let outcome = select::choose(
@@ -316,8 +340,9 @@ fn launch(launcher: &Launcher, out: &mut Report) -> i32 {
             };
             // Set-user-ID / file-capability launchers load only what root
             // controls: a hardlinked launcher in a user's directory must not
-            // load that user's "core" with raised privileges.
-            let path = if load::secure_execution() {
+            // load that user's "core" with raised privileges. Checked before
+            // the probe too; again here, right before the load.
+            let path = if secure {
                 match load::trusted_path(&candidate.path) {
                     Ok(path) => path,
                     Err(reason) => {

@@ -213,9 +213,13 @@ keep the file name and the flag in step.
    `seaworthy_core_main` entry point with the launcher ABI version.
 4. **In secure-execution mode** (a set-user-ID, set-group-ID or
    file-capability launcher: Linux `AT_SECURE`, macOS `issetugid()`) the
-   overrides below are ignored, and the chosen core is loaded only if root
-   controls every step of its resolved path: the file and every directory
-   up to `/` owned by root and not writable by group or others.
+   overrides below are ignored, and a core is opened only if root controls
+   every step of its resolved path: the file and every directory up to `/`
+   owned by root and not writable by group or others. The check runs on
+   every core before its record is read (a failing one exits 77 at once),
+   each is then opened without following a symlink or blocking
+   (`O_NOFOLLOW | O_NONBLOCK`) and must be a regular file on the open
+   descriptor, and the resolved path is what is loaded.
 
 ### The fallback
 

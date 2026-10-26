@@ -62,10 +62,13 @@ launcher falls back is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
    resolved first (macOS reports the path a program was started by: a
    symlink stays a symlink). **In secure-execution mode** (Linux
    `AT_SECURE`: a set-user-ID, set-group-ID or file-capability launcher;
-   macOS `issetugid()`) the core is loaded only if root controls every step
+   macOS `issetugid()`) a core is opened only if root controls every step
    of its resolved path — the file a regular file, it and every directory
-   up to `/` owned by root and not writable by group or others — and the
-   resolved path is what is loaded; otherwise exit 77. A hardlink to such a
+   up to `/` owned by root and not writable by group or others — checked
+   for every core before its record is read; it is opened without
+   following a symlink or blocking (`O_NOFOLLOW | O_NONBLOCK`), must be a
+   regular file on the open descriptor, and the resolved path is what is
+   loaded; otherwise exit 77. A hardlink to such a
    launcher in a user's own directory would otherwise load that user's
    "core" with the launcher's privileges.
 5. **One process, one ABI.** The launcher calls the core's exported

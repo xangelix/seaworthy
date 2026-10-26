@@ -180,6 +180,34 @@ pub(crate) fn trusted_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Opens `path` for reading the way secure-execution mode reads a core:
+/// never through a symlink (`O_NOFOLLOW`), never blocking on a FIFO or a
+/// device (`O_NONBLOCK`), and only if the open file is a regular file
+/// (`fstat` on the descriptor, so what was checked is what is read).
+pub(crate) fn open_regular(path: &Path) -> Result<std::fs::File, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))
+    }
+}
+
 /// What [`check_chain`] needs to know about one step of a path.
 #[cfg_attr(not(unix), allow(dead_code))]
 struct Owner {
@@ -403,6 +431,33 @@ mod tests {
         })
         .expect_err("refused");
         assert_eq!(refusal, "cannot inspect /opt: permission denied");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_reads_open_only_regular_files_and_never_follow_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("seaworthy_launcher_open_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let file = dir.join("core.so");
+        std::fs::write(&file, b"not a core").expect("write");
+        assert!(open_regular(&file).is_ok());
+        // A symlink to it is refused (O_NOFOLLOW), not read through.
+        let link = dir.join("link.so");
+        std::os::unix::fs::symlink(&file, &link).expect("symlink");
+        let refusal = open_regular(&link).expect_err("a symlink");
+        assert!(refusal.starts_with("cannot open"), "{refusal}");
+        // A FIFO neither blocks the open (O_NONBLOCK) nor passes.
+        let fifo = dir.join("fifo.so");
+        let c_fifo = std::ffi::CString::new(fifo.to_str().expect("utf-8")).expect("no NUL");
+        // SAFETY: mkfifo with a NUL-terminated path and a mode.
+        #[allow(unsafe_code, reason = "FFI: mkfifo for the test")]
+        let made = unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo");
+        let refusal = open_regular(&fifo).expect_err("a FIFO");
+        assert!(refusal.ends_with("is not a regular file"), "{refusal}");
+        // A directory.
+        assert!(open_regular(&dir).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[cfg(unix)]
