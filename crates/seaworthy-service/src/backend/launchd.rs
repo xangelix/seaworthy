@@ -214,7 +214,7 @@ impl ServiceBackend for LaunchdBackend {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
+    use std::{fs, path::Path};
 
     use super::*;
     use crate::ServiceSpec;
@@ -241,8 +241,7 @@ case "$1" in
     *) echo "unexpected: $*" >&2; exit 64 ;;
 esac
 "#;
-        fs::write(&stub, script).unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::backend::test_support::write_script(&stub, script);
         stub
     }
 

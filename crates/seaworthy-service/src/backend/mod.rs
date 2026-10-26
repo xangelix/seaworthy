@@ -65,3 +65,37 @@ pub trait ServiceBackend {
 }
 
 // ---------------------------------------------------------------------------
+
+/// Test support shared by the backends' tests.
+#[cfg(all(test, unix))]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test support: a failed fixture write fails the test"
+)]
+pub(crate) mod test_support {
+    /// Writes an executable test stub (mode 0755) at `path` through a child
+    /// process, so the test process never holds it open for writing: tests
+    /// run on parallel threads, and a stub still open for writing in another
+    /// thread's forked, not yet exec'd child fails to run with `ETXTBSY`
+    /// ("Text file busy").
+    pub(crate) fn write_script(path: &std::path::Path, contents: &str) {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(contents.as_bytes())
+            .unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "writing {}",
+            path.display()
+        );
+    }
+}

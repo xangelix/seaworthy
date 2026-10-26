@@ -326,24 +326,21 @@ mod tests {
     /// unit's verbs carry `--user`, and `status` maps `systemctl show`.
     #[test]
     fn the_lifecycle_runs_systemctl_verbs_on_the_unit() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir =
             std::env::temp_dir().join(format!("seaworthy-systemd-stub-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch");
         let log = dir.join("systemctl.log");
         let stub = dir.join("systemctl");
-        fs::write(
+        crate::backend::test_support::write_script(
             &stub,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$@\" >> '{}'\n\
                  if [ \"$2\" = show ] || [ \"$1\" = show ]; then \
                  printf 'LoadState=loaded\\nActiveState=active\\n'; fi\n",
                 log.display()
             ),
-        )
-        .expect("stub");
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+        );
         let backend = SystemdBackend::user("acme-stub")
             .with_systemctl(&stub)
             .with_poll_timing(Duration::from_millis(1), Duration::from_secs(5));
