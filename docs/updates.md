@@ -189,10 +189,16 @@ What each party can do:
 | The app, a local user | ask the helper to run (rate-limited) | pass it any data, change its policy (the policy is administrator-owned), or plant files in its staging directory |
 | A release-key holder | sign releases every helper trusting the key installs | bypass the policy, the floor or the format checks |
 
-Keys are validated at intake through `seaworthy-crypto` (degenerate ML-DSA and Ed25519 keys and
-off-curve P-256 points are refused, as are algorithms the deployment's algorithm policy doesn't
-admit). The crypto policies are install-once process globals: a helper that sets them does so
-first thing in `main`, before it builds a release key or makes its first download.
+Keys are validated at intake through `seaworthy-crypto`: small-order Ed25519 points, off-curve
+P-256 points, algorithms the deployment's algorithm policy doesn't admit, and ML-DSA-87 keys
+under which a signature can be forged from public data are refused. FIPS 204 defines no
+ML-DSA public-key validation; seaworthy's intake test refuses the known forgery classes (an
+all-zero `t1`, a single non-zero coefficient, every coefficient 512, other structured keys) and
+any key whose forgeability it can measure, but it is defense in depth, not a proof that a key
+is sound. Compile in only keys from your own `seaworthy keygen` or HSM, or received from their
+holder over an authenticated channel. The crypto policies are install-once process globals: a
+helper that sets them does so first thing in `main`, before it builds a release key or makes
+its first download.
 
 ## What an administrator controls
 

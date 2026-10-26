@@ -17,7 +17,7 @@ categories = ["cryptography", "parser-implementations"]
 # Lowercase-hex rendering and parsing of digests, key ids and signatures.
 hex.workspace = true
 # Digests, signature verification, release-key validation (the facade's
-# intake checks are the only defense against degenerate keys) and the
+# intake checks are the only defense against forgeable keys) and the
 # algorithm-admission gate.
 seaworthy-crypto.workspace = true
 # The subset of `seaworthy.toml` that names a product

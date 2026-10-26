@@ -27,7 +27,9 @@
 //! dependency: the parser of signed, network-delivered data sits in the
 //! smallest reviewable crate. Cryptography goes through `seaworthy-crypto`,
 //! whose key validation is the only defense against keyless ML-DSA
-//! forgeries and small-order Ed25519 keys. No index or arithmetic here can
+//! forgeries and small-order Ed25519 keys (defense in depth: embed only
+//! keys you generated, or received from their holder over an
+//! authenticated channel). No index or arithmetic here can
 //! panic, and the network-facing parsers are fuzzed (the repository's
 //! `fuzz/` crate, target `updater_manifest`).
 //!
@@ -279,10 +281,11 @@ pub enum SignatureAlgorithm {
 impl SignatureAlgorithm {
     /// The intake checks for an embedded release public key: admitted by
     /// `seaworthy-crypto`'s algorithm gate (the `fips` feature and the
-    /// installed policy), and a well-formed, NON-DEGENERATE key, checked by
-    /// the facade (never by the backend directly: only the facade refuses
-    /// the all-zero ML-DSA `t1` and the small-order Ed25519 points, which
-    /// verify signatures anyone can compute).
+    /// installed policy), and a well-formed key no one can forge under,
+    /// checked by the facade (never by the backend directly: only the
+    /// facade runs the ML-DSA-87 intake test, which refuses all-zero,
+    /// low-weight and structured `t1` halves, and refuses small-order
+    /// Ed25519 points; each verifies signatures anyone can compute).
     fn validate_public_key(self, public_key: &[u8]) -> Result<(), FormatError> {
         let invalid = |reason: String| FormatError::InvalidReleaseKey {
             algorithm: self,
@@ -302,8 +305,9 @@ impl SignatureAlgorithm {
         }
         .map_err(|_| {
             invalid(format!(
-                "a {}-byte key that is malformed or degenerate for this algorithm \
-                 (a zero-t1 / small-order / off-curve key)",
+                "a {}-byte key that is malformed or forgeable for this algorithm (an \
+                 ML-DSA-87 key the intake test refuses, a small-order Ed25519 point, an \
+                 off-curve P-256 point)",
                 public_key.len()
             ))
         })

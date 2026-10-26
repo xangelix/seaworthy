@@ -222,14 +222,21 @@ impl ReleaseKey {
     /// hashes the encoding, so every spelling of one key would have its own
     /// id.
     ///
-    /// The key is validated HERE, through `seaworthy-crypto`: a degenerate
-    /// key (an ML-DSA-87 all-zero `t1`, an Ed25519 small-order point, both
-    /// of which verify signatures anyone can compute), an off-curve P-256
-    /// point, or an algorithm the crypto gate doesn't admit (under
+    /// The key is validated HERE, through `seaworthy-crypto`: a forgeable
+    /// key (an ML-DSA-87 key the facade's intake test refuses, such as an
+    /// all-zero, low-weight or structured `t1`; an Ed25519 small-order
+    /// point: each verifies signatures anyone can compute), an off-curve
+    /// P-256 point, or an algorithm the crypto gate doesn't admit (under
     /// `seaworthy-crypto/fips`, or the process's installed algorithm
     /// policy) is a loud startup error, never a release channel that
     /// silently accepts forgeries. Install the algorithm policy, if any,
     /// before the first key is built: it freezes at its first read.
+    ///
+    /// The ML-DSA-87 intake test refuses the known forgery classes and
+    /// keys whose forgeability is measurable; FIPS 204 itself defines no
+    /// public-key validation. It is defense in depth: embed only keys from
+    /// your own `seaworthy keygen` or HSM, or received from their holder
+    /// over an authenticated channel.
     ///
     /// # Errors
     /// [`FormatError::InvalidReleaseKey`] naming the problem.
@@ -1419,6 +1426,107 @@ mod tests {
                 .channel("../beta")
                 .is_err()
         );
+    }
+
+    /// The canonical statement of the forged-manifest regression below.
+    const FORGED_STATEMENT: &str = "seaworthy-release-manifest:1\nproduct=10:acme-agent\n\
+        channel=0:\nversion=5:2.0.0\nbuild=0:\nsequence=1\ntarget=24:x86_64-unknown-linux-gnu\n\
+        format=deb\nsize=42\ndigest=sha256:\
+        abababababababababababababababababababababababababababababababab\n";
+
+    /// `c̃ = H(μ ‖ w1Encode(0))` for [`FORGED_STATEMENT`] under the
+    /// reviewer's key. seaworthy-crypto's `tests/mldsa.rs`
+    /// (`the_formats_regression_vector_is_a_real_forgery`) recomputes it
+    /// and shows AWS-LC alone ACCEPTS the signature below.
+    const FORGED_CTILDE: &str = "6f15478fdefe55ed4b1fc87ead42df0cc5d475fce152c6a843e33f77ad5a73e7\
+        69de9789f14faeb787109997a0408f6fec8fc468ab70c1d7db6a3ff8af6b9f5c";
+
+    /// `ρ = 5a 00 … ‖ t1` from 8 × 256 coefficients in `[0, 1023]`.
+    fn mldsa_key(t1: impl Fn(usize, usize) -> u64) -> Vec<u8> {
+        let mut key = vec![0x5a];
+        key.resize(32, 0);
+        for row in 0..8 {
+            for group in 0..64 {
+                let bits = (0..4).fold(0u64, |bits, j| bits | (t1(row, group * 4 + j) << (10 * j)));
+                key.extend_from_slice(&bits.to_le_bytes()[..5]);
+            }
+        }
+        key
+    }
+
+    /// The keyless-forgery keys of the security review, through the whole
+    /// manifest path: no release key can be built from one, the manifest
+    /// verifier refuses the forged signature on its own (the key is
+    /// checked on every verification), and a forged manifest naming the
+    /// key verifies on no device.
+    #[test]
+    fn a_forgeable_release_key_never_verifies_a_forged_manifest() {
+        let manifest = ReleaseManifest {
+            product: "acme-agent".into(),
+            channel: None,
+            version: "2.0.0".into(),
+            build: String::new(),
+            sequence: 1,
+            target: "x86_64-unknown-linux-gnu".into(),
+            format: ArtifactFormat::Deb,
+            size: 42,
+            digest_algorithm: DigestAlgorithm::Sha256,
+            digest: vec![0xab; 32],
+        };
+        let statement = manifest.statement().unwrap();
+        assert_eq!(statement, FORGED_STATEMENT.as_bytes());
+        // The reviewer's key: t1 all zero but its first coefficient, 1.
+        let reviewer = mldsa_key(|row, i| u64::from(row == 0 && i == 0));
+        let mut signature = hex::decode(FORGED_CTILDE).unwrap();
+        for _ in 0..(7 * 640 / 5) {
+            signature.extend_from_slice(&[0x00, 0x00, 0x08, 0x00, 0x80]);
+        }
+        signature.extend_from_slice(&[0; 83]);
+        assert_eq!(signature.len(), seaworthy_crypto::mldsa::SIGNATURE_LEN);
+
+        assert!(!SignatureAlgorithm::MlDsa87.verify(&reviewer, &statement, &signature));
+        let forged = manifest
+            .encode_signed(&[ManifestSignature {
+                algorithm: SignatureAlgorithm::MlDsa87,
+                key_id: release_key_id(SignatureAlgorithm::MlDsa87, &reviewer),
+                signature,
+            }])
+            .unwrap();
+        let real = SigningKey::generate(SignatureAlgorithm::MlDsa87);
+        assert!(matches!(
+            verify_manifest(
+                &forged,
+                &trust(&[&real]),
+                "2.0.0",
+                ArtifactFormat::Deb,
+                u64::MAX
+            ),
+            Err(FormatError::SignatureMismatch)
+        ));
+        // Every forgeable shape is refused where a key enters.
+        for (name, key) in [
+            ("the reviewer's key", reviewer),
+            ("t1 = 0", mldsa_key(|_, _| 0)),
+            (
+                "one coefficient per polynomial",
+                mldsa_key(|_, i| u64::from(i == 3)),
+            ),
+            ("every coefficient 512", mldsa_key(|_, _| 512)),
+            ("every coefficient 1023", mldsa_key(|_, _| 1023)),
+            (
+                "512 on even positions",
+                mldsa_key(|_, i| if i % 2 == 0 { 512 } else { 0 }),
+            ),
+        ] {
+            assert_eq!(key.len(), seaworthy_crypto::mldsa::PUBLIC_KEY_LEN);
+            assert!(
+                matches!(
+                    ReleaseKey::new(key, SignatureAlgorithm::MlDsa87),
+                    Err(FormatError::InvalidReleaseKey { .. })
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]

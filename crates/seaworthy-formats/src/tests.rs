@@ -59,9 +59,19 @@ fn signature_keys_are_validated_at_construction() {
     // A non-zero rho with an all-zero t1: the keyless-forgery shape.
     let mut zero_t1 = vec![0u8; 2592];
     zero_t1[..32].fill(0x5a);
+    // One non-zero t1 coefficient, and every coefficient 512: forgeable
+    // too (seaworthy-crypto's intake test).
+    let mut one_coefficient = zero_t1.clone();
+    one_coefficient[32] = 1;
+    let mut all_512 = zero_t1.clone();
+    for group in all_512[32..].chunks_mut(5) {
+        group.copy_from_slice(&[0x00, 0x02, 0x08, 0x20, 0x80]);
+    }
     for (key, algorithm) in [
         (vec![0u8; 2592], SignatureAlgorithm::MlDsa87),
         (zero_t1, SignatureAlgorithm::MlDsa87),
+        (one_coefficient, SignatureAlgorithm::MlDsa87),
+        (all_512, SignatureAlgorithm::MlDsa87),
         (identity, SignatureAlgorithm::Ed25519),
         (off_curve, SignatureAlgorithm::EcdsaP256),
         (vec![1, 2, 3], SignatureAlgorithm::Ed25519),

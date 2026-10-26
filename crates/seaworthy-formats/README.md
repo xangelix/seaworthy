@@ -27,10 +27,14 @@ network-facing parsers are fuzzed (`fuzz/`, target `updater_manifest`).
    target, format, size and digest, and a helper verifies it before it fetches any package byte.
 2. **One spelling.** The statement is canonical (length-prefixed text fields, fixed order, the
    verifier re-encodes and requires byte equality), and so is the signature block.
-3. **Keys are validated at intake.** `ReleaseKey::new` refuses degenerate keys (an all-zero
-   ML-DSA `t1`, small-order Ed25519 points, off-curve P-256 points), compressed P-256 spellings,
-   and algorithms `seaworthy-crypto`'s gate doesn't admit. Install `seaworthy-crypto`'s
-   algorithm policy, if you install one, before the first key is built.
+3. **Keys are validated at intake.** `ReleaseKey::new` refuses forgeable keys (ML-DSA-87 keys
+   `seaworthy-crypto`'s intake test refuses, such as an all-zero, low-weight or structured
+   `t1`; small-order Ed25519 points), off-curve P-256 points, compressed P-256 spellings, and
+   algorithms `seaworthy-crypto`'s gate doesn't admit. FIPS 204 defines no public-key
+   validation, so the ML-DSA test is defense in depth: embed only keys from your own
+   `seaworthy keygen` or HSM, or received from their holder over an authenticated channel.
+   Install `seaworthy-crypto`'s algorithm policy, if you install one, before the first key is
+   built.
 4. **Verify first, compare second.** `ManifestTrust::verify` checks the signature before it
    looks at any field, so mismatch errors only ever describe authenticated content.
 
