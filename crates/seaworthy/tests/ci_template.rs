@@ -3083,7 +3083,7 @@ fn azure_sign_keeps_the_secret_and_the_token_off_every_command_line() {
     script_at(
         &bin.join("curl"),
         &format!(
-            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {dir}/curl.args\nif [[ \"$*\" == *login.microsoftonline.com* ]]; then cat > {dir}/curl.stdin; echo '{{\"token_type\":\"Bearer\",\"access_token\":\"tok-123\"}}'; else printf 'download secret=%s\\n' \"${{AZURE_CLIENT_SECRET:-unset}}\" >> {dir}/curl.env; while [ $# -gt 0 ]; do [ \"$1\" = -o ] && echo 'not jsign' > \"$2\"; shift; done; fi\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {dir}/curl.args\nif [[ \"$*\" == *audience=* ]]; then cat > {dir}/oidc.stdin; echo '{{\"count\":1,\"value\":\"aGVhZGVy.cGF5bG9hZA.c2ln\"}}'; elif [[ \"$*\" == *login.microsoftonline.com* ]]; then cat > {dir}/curl.stdin; echo '{{\"token_type\":\"Bearer\",\"access_token\":\"tok-123\"}}'; else printf 'download secret=%s\\n' \"${{AZURE_CLIENT_SECRET:-unset}}\" >> {dir}/curl.env; while [ $# -gt 0 ]; do [ \"$1\" = -o ] && echo 'not jsign' > \"$2\"; shift; done; fi\n",
             dir = dir.display()
         ),
     );
@@ -3108,7 +3108,10 @@ fn azure_sign_keeps_the_secret_and_the_token_off_every_command_line() {
             .env("SEAWORTHY_AZURE_SIGN_RETRY_SECONDS", "0")
             .env("AZURE_TENANT_ID", "11111111-2222-4333-8444-555555555555")
             .env("AZURE_CLIENT_ID", "66666666-7777-4888-9999-000000000000")
-            .env("AZURE_CLIENT_SECRET", "s3cr3t-value");
+            .env("AZURE_CLIENT_SECRET", "s3cr3t-value")
+            .env_remove("AZURE_FEDERATED_TOKEN_FILE")
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+            .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
         for (key, value) in extra {
             command.env(key, value);
         }
@@ -3188,6 +3191,71 @@ fn azure_sign_keeps_the_secret_and_the_token_off_every_command_line() {
             "{text}"
         );
     }
+    // No stored secret: GitHub Actions' OIDC, a fresh token for Entra's
+    // audience per signature, its request token in curl's config on stdin
+    // and the token as the client assertion, neither on a command line.
+    std::fs::remove_file(dir.join("curl.args")).unwrap();
+    let out = sign(
+        &[
+            ("AZURE_CLIENT_SECRET", ""),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_URL",
+                "https://token.example/oidc?api-version=2.0",
+            ),
+            ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "req-tok-456"),
+        ],
+        &good,
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let curl = std::fs::read_to_string(dir.join("curl.args")).unwrap();
+    assert!(
+        curl.contains("--config - https://token.example/oidc?api-version=2.0&audience=api%3A%2F%2FAzureADTokenExchange"),
+        "{curl}"
+    );
+    assert!(
+        curl.contains(
+            "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        ) && curl.contains("client_assertion@-")
+            && !curl.contains("client_secret"),
+        "{curl}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("oidc.stdin")).unwrap(),
+        "header = \"Authorization: bearer req-tok-456\"\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("curl.stdin")).unwrap(),
+        "aGVhZGVy.cGF5bG9hZA.c2ln"
+    );
+    assert!(
+        !curl.contains("req-tok-456") && !curl.contains("aGVhZGVy"),
+        "{curl}"
+    );
+    // A federated token in a file (workload identity federation).
+    let token = dir.join("federated.jwt");
+    std::fs::write(&token, "ZmlsZQ.dG9rZW4.c2ln\n").unwrap();
+    let out = sign(
+        &[
+            ("AZURE_CLIENT_SECRET", ""),
+            ("AZURE_FEDERATED_TOKEN_FILE", token.to_str().unwrap()),
+        ],
+        &good,
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("curl.stdin")).unwrap(),
+        "ZmlsZQ.dG9rZW4.c2ln"
+    );
+    std::fs::write(&token, "not a token").unwrap();
+    let out = sign(
+        &[
+            ("AZURE_CLIENT_SECRET", ""),
+            ("AZURE_FEDERATED_TOKEN_FILE", token.to_str().unwrap()),
+        ],
+        &good,
+    );
+    assert!(!out.status.success());
+    assert!(said(&out).contains("isn't a JWT"), "{}", said(&out));
     // Three failures in a row fail the signing.
     std::fs::write(dir.join("fail"), "3").unwrap();
     let out = sign(&[], &good);

@@ -276,7 +276,10 @@ command = ["bash", "seaworthy/scripts/azure-sign.sh",
 Nothing defaults the endpoint, account or profile. `package-secrets` gives it `AZURE_TENANT_ID`,
 `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` (an app registration with the "Trusted Signing
 Certificate Profile Signer" role on the profile) on a release: the secret reaches Microsoft Entra on
-curl's standard input and the access token jsign through `env:`, never a command line. It needs a
+curl's standard input and the access token jsign through `env:`, never a command line. Instead of a
+stored secret, `AZURE_FEDERATED_TOKEN_FILE` can name a federated identity token the registration
+trusts (workload identity federation, such as GitLab's `id_tokens` written to a file); on GitHub
+Actions, a job with `id-token: write` needs neither ([ci-github.md](ci-github.md#authenticode)). It needs a
 Java 11+ runtime (the package step installs `jre-openjdk-headless` on an Arch tools image when
 `signing.toml` names the script). Every signature is then checked against `seaworthy.toml`'s
 `[defaults.authenticode]` pins, as with any signer; with Artifact Signing both the signer's chain
