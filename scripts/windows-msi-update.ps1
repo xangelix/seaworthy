@@ -89,7 +89,7 @@ param(
     [string]$HelperExe = 'scm_helper',
     # What the lane's gate answers (no build metadata: the releases carry none).
     [string]$Token = '1.0.0',
-    # The helper's compiled-in gate and release server (scm_helper's STUB).
+    # The helper's compiled-in gate and release server (scm_helper/build.rs's default URLs).
     [int]$Port = 8470,
     [int]$UpdateSeconds = 300,
     [string]$JUnitDir = $(if ($env:SEAWORTHY_JUNIT_DIR) { $env:SEAWORTHY_JUNIT_DIR } else { 'target\junit\windows-msi-update' }),

@@ -1020,8 +1020,8 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "seaworthy-crypto",
+ "seaworthy-lab",
  "seaworthy-updater",
- "tokio",
  "tracing",
 ]
 

@@ -4,11 +4,13 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
-# The update lane's helper (scripts/windows-msi-update.ps1):
-# seaworthy-updater's real helper (`helper::main`, under the Service Control
-# Manager as `<service>-update`), with the lane's seaworthy.toml and release
-# key compiled in by build.rs, learning the server's version from the lane's
-# loopback stub. Built without them, it refuses to run.
+# The Windows update lanes' helper (scripts/windows-msi-update.ps1,
+# scripts/windows-upgrade.ps1): seaworthy-updater's real helper
+# (`helper::main`, under the Service Control Manager as `<service>-update`),
+# with a lane's seaworthy.toml, release key and URLs compiled in by build.rs,
+# learning the server's version through the lab's required-version client
+# (the update lane's loopback stub, or the upgrade lane's lab server over
+# TLS). Built without them, it refuses to run.
 
 [features]
 # A FIPS product's helper runs on the FIPS module too.
@@ -17,6 +19,7 @@ fips = ["seaworthy-crypto/fips"]
 [dependencies]
 hex = "0.4"
 seaworthy-crypto = { path = "../../../seaworthy-crypto" }
+# The version source: the required-version client alone.
+seaworthy-lab = { path = "../../../seaworthy-lab", default-features = false, features = ["client"] }
 seaworthy-updater = { path = "../../../seaworthy-updater", features = ["helper"] }
-tokio = { version = "1", features = ["io-util", "net", "time"] }
 tracing = "0.1"

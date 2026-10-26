@@ -1,11 +1,23 @@
 # The Windows lab's products (docs/testing-windows.md), packaged by the
 # seaworthy CLI on a Windows runner (scripts/windows-lab-build.ps1): the
-# `scm` launcher, its `scm_core` cores and, for the update lane, its
+# `scm` launcher, its `scm_core` cores and, for the update lanes, its
 # `scm_helper`. The build copies this file into its work directory and
 # generates the throwaway keys it names beside it (keys/): an ML-DSA-87
 # release key and a self-signed code-signing certificate, both made fresh
 # in the job and never uploaded. Crate paths are relative to the e2e
 # workspace (the build plan's manifest).
+#
+# The upgrade-from-previous lane (scripts/windows-upgrade.ps1) needs one key
+# across runs: its builds are non-release builds signed with the CI test
+# key (`--ci-test-signing`), which that lane's helper is built to trust.
+# `keys/ci-test.key` is a PUBLIC test key, committed on purpose so that
+# every run, and the next run's previous build, signs with it; the build
+# copies `keys/ci-test.pub` beside this file's copy. Anyone can sign with
+# it, so nothing but this fixture may ever trust it, and the helper built
+# to trust it only reaches names under `.invalid` (scm_helper/build.rs;
+# docs/threat-model.md, the CI test-key mechanism). Each such build writes
+# its version token into `lab/build.txt`, so an upgrade shows in the
+# installed files.
 
 [defaults]
 vendor = "AcmeE2E"
@@ -22,6 +34,10 @@ homepage = "https://example.com/acme/e2e"
 [defaults.authenticode]
 subject = "CN=AcmeE2E Test Code Signing"
 trust = "keys/codesign.pem"
+
+# The upgrade lane's test key (above): never among the release keys.
+[defaults.ci-test-keys]
+release-keys = [{ algorithm = "ml-dsa-87", public-key = "keys/ci-test.pub" }]
 
 # The SCM suite's service (scripts/windows-scm-e2e.ps1): a virtual account,
 # one restart action, no update helper (a version rejection's request must
@@ -43,10 +59,10 @@ arguments = ["run", "--name", "acme-e2e"]
 restart-delays = ["8s"]
 sandbox = { user = "acmee2e-scm" }
 
-# The update lane's service (scripts/windows-msi-update.ps1): the same
-# service with its update helper, upgraded by that helper through Windows
-# Installer. A display name outside one Windows code page checks the MSI's
-# UTF-8 database end to end.
+# The update lanes' service (scripts/windows-msi-update.ps1 and
+# scripts/windows-upgrade.ps1): the same service with its update helper,
+# upgraded by that helper through Windows Installer. A display name outside
+# one Windows code page checks the MSI's UTF-8 database end to end.
 [product.agent]
 display-name = "Acme E2E Agent (Prüfung, 試験)"
 description = "The Windows update lane's service, updated through its helper."
@@ -66,3 +82,8 @@ arguments = ["run", "--name", "AcmeAgent"]
 restart-delays = ["15s"]
 state-directory = "acmee2e/agent"
 sandbox = { user = "acmee2e-agent" }
+
+# The build's version token (`unreleased` outside the upgrade lane's builds).
+[[product.agent.files]]
+source = "lab"
+destination = "lab"

@@ -7,7 +7,8 @@ publish.workspace = true
 # The Windows lab's service, as a product's core (one per CPU target, beside
 # the `scm` launcher): seaworthy-service's run loop under the real Service
 # Control Manager (scripts/windows-scm-e2e.ps1), and the service the update
-# lane's helper upgrades (scripts/windows-msi-update.ps1).
+# lanes' helper upgrades (scripts/windows-msi-update.ps1,
+# scripts/windows-upgrade.ps1).
 
 [lib]
 crate-type = ["cdylib"]
