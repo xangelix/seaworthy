@@ -154,6 +154,12 @@ jobs:
           prefix-key: v1-lab-launcher-macos
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # The FIPS section builds the AWS-LC FIPS module, whose build needs Go;
+      # the macOS image has none on PATH (Ubuntu's does).
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: false
       - name: bash 4.4+ (macOS ships 3.2)
         run: |
           brew list bash >/dev/null 2>&1 || brew install bash

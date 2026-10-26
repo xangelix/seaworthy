@@ -520,6 +520,13 @@ jobs:
             # what it names only when asked).
             rustup toolchain install
           fi
+      # A product built with seaworthy-crypto's `fips` feature compiles the
+      # AWS-LC FIPS module, whose build needs Go; the macOS image has none
+      # on PATH (Ubuntu's and Windows' do).
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+          cache: false
       - name: The build environment
         env:
           SEAWORTHY_BUILD_ENV: ${{ inputs.build-env }}
