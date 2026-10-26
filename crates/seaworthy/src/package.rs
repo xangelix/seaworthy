@@ -1090,6 +1090,10 @@ fn check_tables(
     upgrade_code: &str,
     tools: &MsiTools,
 ) -> Result<(), DistError> {
+    // msiinfo runs in the scratch directory: its paths must not depend on
+    // the caller's.
+    let msi = &std::path::absolute(msi).map_err(|e| DistError::io(msi, e))?;
+    let msiinfo = &from_anywhere(&tools.msiinfo)?;
     let wxs = listing
         .artifacts
         .iter()
@@ -1110,7 +1114,7 @@ fn check_tables(
     let scratch = work.join("tables");
     std::fs::create_dir_all(&scratch).map_err(|e| DistError::io(&scratch, e))?;
     let listed = crate::process::run_ok(
-        msi_tool(&tools.msiinfo)
+        msi_tool(msiinfo)
             .current_dir(&scratch)
             .arg("tables")
             .arg(msi),
@@ -1123,7 +1127,7 @@ fn check_tables(
             continue;
         }
         let export = crate::process::run(
-            msi_tool(&tools.msiinfo)
+            msi_tool(msiinfo)
                 .current_dir(&scratch)
                 .args(["export", "-s"])
                 .arg(msi)
@@ -1181,6 +1185,16 @@ fn check_tables(
 /// of the MSI.
 fn msi_tool(program: &Path) -> Command {
     crate::process::tool(program)
+}
+
+/// `program` for a tool run from another directory: a path made absolute (a
+/// bare name stays, for `PATH` to find).
+fn from_anywhere(program: &Path) -> Result<PathBuf, DistError> {
+    if program.components().count() > 1 {
+        std::path::absolute(program).map_err(|e| DistError::io(program, e))
+    } else {
+        Ok(program.to_owned())
+    }
 }
 
 /// Every regular file under `dir`, by its `/`-separated path relative to
@@ -1684,6 +1698,16 @@ fn tree_entries(layout: &Layout, top: &str) -> Result<Vec<Entry>, DistError> {
 /// `tree` (the `.wxs` names every file through it), run from the tree, and
 /// the debug database kept out of `packages/`.
 fn build_msi(wix: &Path, wxs: &Path, tree: &Path, msi: &Path, pdb: &Path) -> Result<(), DistError> {
+    // wix runs from the tree: its paths must not depend on the caller's
+    // directory.
+    let wix = &from_anywhere(wix)?;
+    let absolute = |path: &Path| std::path::absolute(path).map_err(|e| DistError::io(path, e));
+    let (wxs, tree, msi, pdb) = (
+        &absolute(wxs)?,
+        &absolute(tree)?,
+        &absolute(msi)?,
+        &absolute(pdb)?,
+    );
     let mut bindpath = std::ffi::OsString::from("tree=");
     bindpath.push(tree);
     let output = crate::process::tool(wix)

@@ -1177,6 +1177,20 @@ fn packaged(config: &Config, out: &Path) -> Option<(String, String)> {
     Some((version, upgrade))
 }
 
+/// `path` relative to the test's working directory, by their common
+/// ancestor, as a CI job hands its paths to the CLI (`seaworthy-work/...`).
+fn from_cwd(path: &Path) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let common = cwd
+        .components()
+        .zip(path.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut relative: std::path::PathBuf = cwd.components().skip(common).map(|_| "..").collect();
+    relative.extend(path.components().skip(common));
+    relative
+}
+
 fn adopt(
     config: &Config,
     out: &Path,
@@ -1199,7 +1213,9 @@ fn an_msi_of_exactly_the_signed_tree_is_adopted_and_listed() {
         return;
     }
     let (_project, config) = project(CONFIG);
-    let out = tempfile::tempdir().unwrap();
+    // Beside the working directory, so the relative paths below resolve
+    // from it alone (one into /tmp climbs to / and resolves from anywhere).
+    let out = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let Some((version, upgrade)) = packaged(&config, out.path()) else {
         return;
     };
@@ -1226,11 +1242,13 @@ fn an_msi_of_exactly_the_signed_tree_is_adopted_and_listed() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     };
+    // Relative paths: msitools run in scratch directories, and must still
+    // find the MSI.
     let adopted = seaworthy::package::adopt_msi(
         &config,
         "viewer",
-        &out.path().join("dist"),
-        &msi,
+        &from_cwd(&out.path().join("dist")),
+        &from_cwd(&msi),
         1_700_000_000,
         &seaworthy::package::Signing::default(),
         &seaworthy::package::MsiTools {
