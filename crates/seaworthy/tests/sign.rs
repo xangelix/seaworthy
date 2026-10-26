@@ -1517,7 +1517,8 @@ fn a_key_from_the_environment_signs_and_never_reaches_a_tool() {
             .arg(tmp.path().join("signing.toml"))
             .env("SOURCE_DATE_EPOCH", "1700000000")
             .env("STRIP", &strip)
-            .env("SEAWORTHY_TEST_MARKER", "visible")
+            .env("ACME_TEST_MARKER", "visible")
+            .env("SEAWORTHY_TOOL_ENV", "ACME_TEST_MARKER")
             .env_remove("SEAWORTHY_RELEASE_KEY_HEX");
         if let Some(key) = key {
             command.env("SEAWORTHY_RELEASE_KEY_HEX", key);
@@ -1543,7 +1544,7 @@ fn a_key_from_the_environment_signs_and_never_reaches_a_tool() {
     );
     let env = std::fs::read_to_string(&seen).unwrap();
     assert!(
-        env.contains("SEAWORTHY_TEST_MARKER=visible"),
+        env.contains("ACME_TEST_MARKER=visible"),
         "the tool ran: {env}"
     );
     assert!(
