@@ -440,8 +440,25 @@ fn the_apple_m1_baseline_is_exactly_what_apple_m1_enables() {
     }
 }
 
+/// Whether [`PROBE_TARGET`]'s `core` is installed: the host's on Linux, a
+/// cross target elsewhere (`rustup target add`).
+fn probe_target_installed() -> bool {
+    let out = rustc()
+        .args(["--print", "target-libdir", "--target", PROBE_TARGET])
+        .output()
+        .expect("rustc runs");
+    out.status.success() && Path::new(String::from_utf8_lossy(&out.stdout).trim()).is_dir()
+}
+
 #[test]
 fn code_the_cfg_does_not_report_is_accounted_for() {
+    if !probe_target_installed() {
+        // Code generation depends on the CPU alone: a Linux host covers it.
+        eprintln!(
+            "SKIPPED: {PROBE_TARGET}'s core isn't installed (rustup target add {PROBE_TARGET})"
+        );
+        return;
+    }
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("seaworthy-levels-probe");
     std::fs::create_dir_all(&dir).expect("probe dir");
     let source = dir.join("probe.rs");

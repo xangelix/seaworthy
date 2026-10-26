@@ -824,27 +824,30 @@ fn an_external_command_signs_and_a_wrong_key_is_caught() {
         "killed at the deadline"
     );
     // A signer that exits while its child still holds the pipes: the
-    // deadline covers draining them, and the child is killed with it.
-    let marker = tmp.path().join("grandchild-alive");
-    let script = format!("(sleep 3; touch '{}') & echo 00", marker.display());
-    let orphaning = CommandSigner::new(
-        SignatureAlgorithm::MlDsa87,
-        vec![1; 2592],
-        vec!["sh".into(), "-c".into(), script],
-        Output::Hex,
-        Duration::from_secs(1),
-    )
-    .unwrap();
-    let started = std::time::Instant::now();
-    let err = orphaning.sign(b"x").unwrap_err().to_string();
-    assert!(err.contains("didn't finish within 1 s"), "{err}");
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
-    );
-    std::thread::sleep(Duration::from_secs(4));
-    assert!(!marker.exists(), "the signer's process group was killed");
+    // deadline covers draining them, and on Unix the child is killed with
+    // it (the runner kills the process group; on Windows, the program alone).
+    if cfg!(unix) {
+        let marker = tmp.path().join("grandchild-alive");
+        let script = format!("(sleep 3; touch '{}') & echo 00", marker.display());
+        let orphaning = CommandSigner::new(
+            SignatureAlgorithm::MlDsa87,
+            vec![1; 2592],
+            vec!["sh".into(), "-c".into(), script],
+            Output::Hex,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let err = orphaning.sign(b"x").unwrap_err().to_string();
+        assert!(err.contains("didn't finish within 1 s"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(!marker.exists(), "the signer's process group was killed");
+    }
     // A failing signer's stderr is shown, but only so much of it.
     let noisy = CommandSigner::new(
         SignatureAlgorithm::MlDsa87,

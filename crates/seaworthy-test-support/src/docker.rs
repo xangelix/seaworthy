@@ -549,8 +549,15 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "seaworthy-tc-probe-{tag}-{}-{:?}",
+        // A socket's path must fit sockaddr_un (104 bytes on macOS), which
+        // macOS's per-user temporary directory alone nearly fills.
+        let base = if cfg!(target_os = "macos") {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base.join(format!(
+            "sw-tc-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
