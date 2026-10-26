@@ -307,6 +307,14 @@ pub fn write_config(
     if !recommends.is_empty() {
         nfpm["recommends"] = json!(recommends);
     }
+    // The packages this product supersedes (`linux.replaces`): nFPM's
+    // `conflicts` and `replaces` (rpm: `Obsoletes:`), so the package
+    // manager removes them on install rather than refusing the files both
+    // own.
+    if !product.linux.replaces.is_empty() {
+        nfpm["conflicts"] = json!(product.linux.replaces);
+        nfpm["replaces"] = json!(product.linux.replaces);
+    }
     if let Some(object) = nfpm.as_object_mut() {
         if let Some(homepage) = &d.homepage {
             object.insert("homepage".to_owned(), Value::String(homepage.clone()));

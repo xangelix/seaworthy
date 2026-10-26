@@ -689,6 +689,16 @@ fn desktop_entries_data_files_and_commands_are_validated() {
     // Every platform by default: Linux, Windows and macOS.
     assert_eq!(viewer.files[0].platforms.len(), 3);
     assert_eq!(viewer.linux.command.as_deref(), Some("acme-viewer"));
+    assert!(viewer.linux.replaces.is_empty());
+    let replacing = Config::parse(&desktop_edit(
+        "linux.command = \"acme-viewer\"",
+        "linux.command = \"acme-viewer\"\nlinux.replaces = [\"viewer-bin\", \"acme-viewer-legacy\"]",
+    ))
+    .unwrap();
+    assert_eq!(
+        replacing.products["viewer"].linux.replaces,
+        ["viewer-bin", "acme-viewer-legacy"]
+    );
     // Defaults: a Start-menu shortcut, Utility, the source's own name.
     let minimal = Config::parse(&desktop_edit("categories = [\"Office\"]\n", "").replacen(
         "destination = \"share/assets\"\n",
@@ -781,6 +791,26 @@ fn desktop_entries_data_files_and_commands_are_validated() {
             "outputs = [\"msi\", \"deb\", \"tar\"]",
             "outputs = [\"msi\", \"tar\"]",
             "only a Linux package (deb, rpm, pacman) installs /usr/bin links",
+        ),
+        (
+            "linux.command = \"acme-viewer\"",
+            "linux.replaces = [\"Acme-Viewer\"]",
+            "product.viewer.linux.replaces: \"Acme-Viewer\" isn't a package name",
+        ),
+        (
+            "linux.command = \"acme-viewer\"",
+            "linux.replaces = [\"viewer-bin\", \"viewer-bin\"]",
+            "product.viewer.linux.replaces: \"viewer-bin\" is listed twice",
+        ),
+        (
+            "linux.command = \"acme-viewer\"",
+            "linux.replaces = [\"acme-viewer\"]",
+            "product.viewer.linux.replaces: \"acme-viewer\" is a package this seaworthy.toml builds",
+        ),
+        (
+            "outputs = [\"msi\", \"deb\", \"tar\"]\nupdates.default = \"off\"\nlinux.command = \"acme-viewer\"",
+            "outputs = [\"msi\", \"tar\"]\nupdates.default = \"off\"\nlinux.replaces = [\"viewer-bin\"]",
+            "product.viewer.linux.replaces: only a Linux package",
         ),
         (
             "source = \"assets\"",

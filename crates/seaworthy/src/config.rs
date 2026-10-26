@@ -40,7 +40,7 @@
 //! every service through `seaworthy_service::render` for both platforms, so a
 //! `seaworthy.toml` that loads is one every generator can package.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -394,6 +394,16 @@ pub struct Linux {
     /// through the link: it resolves its own path (`/proc/self/exe`).
     #[serde(default)]
     pub command: Option<String>,
+    /// Packages this product's Linux packages replace: packages of the same
+    /// program another tool built under other names (`acme-tool`, built
+    /// before the product took its `<vendor>-<id>` name). Every format
+    /// conflicts with them and replaces them (deb `Conflicts:` and
+    /// `Replaces:`, rpm `Conflicts:` and `Obsoletes:`, pacman `conflicts`
+    /// and `replaces`), so installing or upgrading to this product removes
+    /// them instead of failing on the files both install (a `/usr/bin`
+    /// link, a menu entry).
+    #[serde(default)]
+    pub replaces: Vec<String>,
 }
 
 /// The default glibc floor: 2.34, RHEL 9's (and so Rocky's and Alma's),
@@ -2003,6 +2013,39 @@ impl Config {
                 return Err(at(
                     "linux.command",
                     "only a Linux package (deb, rpm, pacman) installs /usr/bin links",
+                ));
+            }
+        }
+        if !p.linux.replaces.is_empty() && !linux_package {
+            return Err(at(
+                "linux.replaces",
+                "only a Linux package (deb, rpm, pacman) replaces packages",
+            ));
+        }
+        let mut replaced = BTreeSet::new();
+        for name in &p.linux.replaces {
+            if !is_package_name(name) || name.len() > 64 {
+                return Err(at(
+                    "linux.replaces",
+                    &format!(
+                        "{name:?} isn't a package name every format accepts ([a-z0-9][a-z0-9.-]+, at most 64 characters)"
+                    ),
+                ));
+            }
+            if !replaced.insert(name.as_str()) {
+                return Err(at("linux.replaces", &format!("{name:?} is listed twice")));
+            }
+            // A package this seaworthy.toml builds: replacing it would
+            // remove a sibling (or the product itself) on every install.
+            let built = self
+                .products
+                .keys()
+                .map(|other| crate::linux::package_name(self, other))
+                .chain(self.repository_package());
+            if built.into_iter().any(|package| package == *name) {
+                return Err(at(
+                    "linux.replaces",
+                    &format!("{name:?} is a package this seaworthy.toml builds"),
                 ));
             }
         }

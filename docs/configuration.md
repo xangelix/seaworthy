@@ -155,6 +155,7 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `needed` | Shared libraries the binaries may need beyond the base system's; every Linux format in `outputs` must then declare the packages that provide them. |
 | `glibc` | The oldest glibc the Linux binaries must run on, `2.N` (default `2.34`). |
 | `command` | `/usr/bin/<command>`, a link to the launcher in the Linux packages (`[a-z0-9][a-z0-9._+-]*`). dpkg and rpm replace an unowned file there without asking: pick a name nothing else uses. |
+| `replaces` | Packages this product supersedes: the same program packaged under other names before it took `<vendor>-<id>`. Every format conflicts with and replaces them (deb `Conflicts:` and `Replaces:`, rpm `Conflicts:` and `Obsoletes:`, pacman `conflicts` and `replaces`), so an install removes them instead of failing on files both ship (a `/usr/bin` link, a menu entry). Never a package this `seaworthy.toml` builds. |
 
 `[product.<id>.service]` (`kind = "service"` only):
 

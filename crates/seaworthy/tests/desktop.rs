@@ -434,6 +434,63 @@ fn a_deb_installs_the_link_the_entry_and_the_icons() {
     }
 }
 
+/// `linux.replaces`: every format conflicts with and replaces the packages
+/// the product supersedes (deb `Conflicts`/`Replaces`, rpm
+/// `Conflicts`/`Obsoletes`, pacman `conflict`/`replaces`), so an install
+/// removes them instead of failing on the link both ship.
+#[test]
+fn the_linux_packages_replace_what_the_product_supersedes() {
+    let Some(nfpm) = nfpm() else { return };
+    let text = CONFIG.replacen(
+        "linux.command = \"acme-viewer\"\n",
+        "linux.command = \"acme-viewer\"\nlinux.replaces = [\"acme-viewer-legacy\", \"viewer-bin\"]\n",
+        1,
+    );
+    assert_ne!(text, CONFIG);
+    let (_project, config) = project(&text);
+    let out = tempfile::tempdir().unwrap();
+    let artifacts = common::build(&config, "viewer", out.path(), &nfpm, None);
+    if have("dpkg-deb", &["--version"]) {
+        let deb = artifact(&artifacts, Kind::Deb);
+        for field in ["Conflicts", "Replaces"] {
+            let value = run(Command::new("dpkg-deb").arg("-f").arg(&deb).arg(field));
+            assert_eq!(value.trim(), "acme-viewer-legacy, viewer-bin", "{field}");
+        }
+    } else {
+        assert!(!required(), "dpkg-deb is required");
+    }
+    if have("rpm", &["--version"]) {
+        let rpm = artifact(&artifacts, Kind::Rpm);
+        for query in ["--conflicts", "--obsoletes"] {
+            let value = run(Command::new("rpm").arg("-qp").arg(query).arg(&rpm));
+            let names: Vec<&str> = value.lines().map(str::trim).collect();
+            assert_eq!(names, ["acme-viewer-legacy", "viewer-bin"], "{query}");
+        }
+    } else {
+        assert!(!required(), "rpm is required");
+    }
+    if have("bsdtar", &["--version"]) {
+        let pacman = artifact(&artifacts, Kind::Pacman);
+        let info = run(Command::new("bsdtar")
+            .arg("-xOf")
+            .arg(&pacman)
+            .arg(".PKGINFO"));
+        for key in ["conflict", "replaces"] {
+            let values: Vec<&str> = info
+                .lines()
+                .filter_map(|l| l.strip_prefix(&format!("{key} = ")))
+                .collect();
+            assert_eq!(
+                values,
+                ["acme-viewer-legacy", "viewer-bin"],
+                "{key}\n{info}"
+            );
+        }
+    } else {
+        assert!(!required(), "bsdtar is required");
+    }
+}
+
 #[test]
 fn the_packages_are_reproducible_with_data_files_and_the_link() {
     let Some(nfpm) = nfpm() else { return };
