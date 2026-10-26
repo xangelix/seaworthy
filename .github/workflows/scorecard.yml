@@ -32,10 +32,12 @@ jobs:
       security-events: write # upload the SARIF results to code scanning
       id-token: write # sign the results published to the Scorecard API (OIDC)
     steps:
+      # Sudo off, but not containers: scorecard-action is a Docker container
+      # action, so `disable-sudo-and-containers` keeps it from starting.
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
-          disable-sudo-and-containers: true
+          disable-sudo: true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
