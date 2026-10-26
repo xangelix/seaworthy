@@ -5,13 +5,15 @@
 # with WiX and adopted), the macOS disk image, and the verified packages
 # artifact. It grants contents: read alone, as every caller that doesn't
 # sign through Azure does (dist.yml refuses id-token: write without the
-# azure-* inputs). Not on pull requests: the full pipeline is long, and the
-# push to main and the weekly run cover it.
+# azure-* inputs). On pull requests too (unsigned, read-only, no secrets):
+# a change reaches main only after every pipeline a push to main runs has
+# passed on it, Dependabot's updates included.
 name: dist (self-test)
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
   schedule:
     # Weekly, against the moving runner images.
