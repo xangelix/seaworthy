@@ -155,7 +155,17 @@ function Get-PinnedFile {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $file = Join-Path $dir $Name
     Say "downloading $Url"
-    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $file
+    # Windows' own curl.exe (Windows 10 1803 and Server 2019 on), as
+    # scripts/ci/seaworthy-msi.ps1 does: Invoke-WebRequest bounds neither the
+    # size nor the whole transfer. https only, redirects included; the pin
+    # below decides.
+    if (-not $Url.StartsWith('https://', [StringComparison]::Ordinal)) { Fail "$Name must come from an https URL, not $Url" }
+    $curlExe = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path -LiteralPath $curlExe -PathType Leaf)) { Fail "no $curlExe to download $Name with" }
+    if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+    & $curlExe --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 `
+        --connect-timeout 30 --max-time 600 --max-filesize 268435456 --output $file $Url
+    if ($LASTEXITCODE -ne 0) { Fail "downloading $Url failed (curl.exe exit $LASTEXITCODE)" }
     $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
     if ($hash -ne $Sha256.ToUpperInvariant()) {
         Remove-Item -LiteralPath $file -Force
