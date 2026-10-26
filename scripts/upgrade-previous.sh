@@ -69,9 +69,11 @@ trap 'rm -rf "$tmp"' EXIT
 # other processes can read). curl sends it to the API host only: a
 # redirect to the artifact storage drops it.
 ( umask 077; printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" > "$tmp/auth" )
+# https only (redirects too), bounded in time and size.
 get() { # <url> <out file>
-    curl -fsS --proto '=https' --proto-redir '=https' --retry 3 --max-time 120 -o "$2" \
-        -H @"$tmp/auth" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$1"
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error \
+        --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 120 --max-filesize $((16 * 1024 * 1024)) \
+        -o "$2" -H @"$tmp/auth" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$1"
 }
 
 get "$api/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=$branch&status=success&exclude_pull_requests=true&per_page=100" \
@@ -101,7 +103,8 @@ read -r artifact_id expired size digest <<<"$artifact"
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "run $run_number's $name artifact has no recorded SHA-256 digest (${digest@Q})"
 
 # The zip, by its id; GitHub answers with a redirect to its storage.
-curl -fsS --proto '=https' --proto-redir '=https' --retry 3 --max-time 600 -L --max-filesize $((1024 * 1024 * 1024)) \
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location \
+    --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 600 --max-filesize $((1024 * 1024 * 1024)) \
     -o "$tmp/artifact.zip" -H @"$tmp/auth" -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$api/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" ||
