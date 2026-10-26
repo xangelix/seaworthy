@@ -162,6 +162,14 @@ fn the_reusable_workflow_follows_the_actions_baseline() {
     // The seaworthy checkout is the workflow's own commit.
     assert!(text.contains("repository: ${{ job.workflow_repository }}"));
     assert!(text.contains("ref: ${{ job.workflow_sha }}"));
+    // The MSI jobs get the signed Windows tree and its layout.json, which
+    // adopt-msi checks each MSI's payload against.
+    for path in [
+        "seaworthy-work/dist/*/x86_64-pc-windows-msvc/tree/",
+        "seaworthy-work/dist/*/x86_64-pc-windows-msvc/layout.json",
+    ] {
+        assert!(text.contains(path), "{path}");
+    }
     // A release's tool is compiled, never restored from a cache.
     assert!(
         text.contains("cache: ${{ (inputs.release || inputs.dev-sign) && 'false' || 'true' }}")

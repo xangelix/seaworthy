@@ -548,7 +548,9 @@ jobs:
           # entry validation, and osslsigncode's build (Authenticode).
           sudo apt-get install --yes --no-install-recommends \
             rpm libarchive-tools desktop-file-utils cmake build-essential libssl-dev zlib1g-dev
-          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy"
+          # Artifacts keep no file modes: the tool and the scripts seaworthy.sh
+          # runs directly (install-nfpm.sh, install-osslsigncode.sh).
+          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy" "$SEAWORTHY_WORK"/scripts/*.sh
       - name: The signing configuration
         if: inputs.release || inputs.dev-sign
         env:
@@ -594,10 +596,14 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact-prefix }}-dist
+          # The listings and packages, and for the MSI jobs the signed
+          # Windows tree with its layout.json (adopt-msi checks each MSI's
+          # payload against it).
           path: |
             seaworthy-work/dist/*/packages.json
             seaworthy-work/dist/*/packages/
             seaworthy-work/dist/*/x86_64-pc-windows-msvc/tree/
+            seaworthy-work/dist/*/x86_64-pc-windows-msvc/layout.json
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
 
@@ -666,7 +672,9 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install --yes --no-install-recommends msitools cmake build-essential libssl-dev zlib1g-dev
-          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy"
+          # Artifacts keep no file modes: the tool and the scripts seaworthy.sh
+          # runs directly (install-nfpm.sh, install-osslsigncode.sh).
+          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy" "$SEAWORTHY_WORK"/scripts/*.sh
       - name: The signing configuration
         if: inputs.release || inputs.dev-sign
         env:
@@ -753,6 +761,8 @@ jobs:
         run: |
           brew list bash >/dev/null 2>&1 || brew install bash
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          # Artifacts keep no file modes.
+          chmod 0755 "$SEAWORTHY_WORK"/scripts/*.sh
       # On a release with the Apple secrets: a throwaway keychain with the
       # Developer ID identities and the notary profile, and signing.toml's
       # [apple]; the outputs are then signed, notarized and released.
@@ -896,7 +906,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install --yes --no-install-recommends \
             dpkg-dev createrepo-c pacman-package-manager libarchive-tools rpm
-          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy"
+          # Artifacts keep no file modes: the tool and the scripts seaworthy.sh
+          # runs directly (install-nfpm.sh, install-osslsigncode.sh).
+          chmod 0755 "$SEAWORTHY_WORK/bin/seaworthy" "$SEAWORTHY_WORK"/scripts/*.sh
       - name: The signing configuration (the repositories' OpenPGP key)
         env:
           SIGNING_TOML: ${{ inputs.signing-toml }}
