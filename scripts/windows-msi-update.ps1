@@ -644,7 +644,8 @@ function Assert-Signed([string]$Path) {
 # major.minor.patch.sequence, ProductVersion the release as written, the product's name)
 # and a valid signature.
 function Assert-InstalledBinaries([string]$FileVersion, [string]$ProductVersion, [bool]$PreRelease) {
-    $binaries = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -File -Include '*.exe', '*.dll')
+    # By extension, not -Include: Windows PowerShell 5.1 ignores -Include beside -LiteralPath.
+    $binaries = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' })
     Assert-True ($binaries.Count -ge 3) "the launcher, the helper and the cores are installed under $InstallDir (found $($binaries.Count))"
     foreach ($binary in $binaries) {
         $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($binary.FullName)

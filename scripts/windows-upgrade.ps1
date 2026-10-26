@@ -325,7 +325,8 @@ function Assert-Untouched([string]$Case) {
 
 # Every installed binary's fixed FileVersion.
 function Assert-InstalledVersion([string]$FileVersion, [string]$When) {
-    $binaries = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -File -Include '*.exe', '*.dll')
+    # By extension, not -Include: Windows PowerShell 5.1 ignores -Include beside -LiteralPath.
+    $binaries = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' })
     Assert-True ($binaries.Count -ge 3) "$When, the launcher, the helper and the cores are installed under $InstallDir (found $($binaries.Count))"
     foreach ($binary in $binaries) {
         $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($binary.FullName)
