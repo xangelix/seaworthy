@@ -60,7 +60,9 @@ a throwaway CA, and the client the fixture helper's version source uses.
   (`lab-upgrade-linux`, `lab-upgrade-macos`, 30 days; the Windows lab's build job keeps
   `lab-upgrade-windows`). A later run picks the latest successful run of the workflow on
   `main` (from a push, the schedule or a dispatch, never a pull request's; the repository's own;
-  a lower run number, so an older release), downloads its artifact with the job's token
+  its commit on `main`, reachable from the branch's tip as the branches API reports it, so a run
+  of a tag named `main` never counts; a lower run number, so an older release), downloads its
+  artifact with the job's token
   (`actions: read`, nothing else), checks the zip against the SHA-256 digest GitHub recorded at
   upload and every file against the build's own listing. When there is none
   (the lane's first run on `main`, an expired artifact, or a build trusting a rotated test key),

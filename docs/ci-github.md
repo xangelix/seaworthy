@@ -54,9 +54,11 @@ jobs:
       - run: cd packages && sha256sum --check SHA256SUMS
 ```
 
-Without any signing secret the run builds every package unsigned, on a release too (versioned from
-its tag; the repositories refuse unsigned releases, so nothing is published). Each signer below is
-used only when its secrets or inputs are given.
+Each signer below is used only when its secrets or inputs are given. Outside a release (or a dev
+build) the packages are unsigned, or signed by the CI test keys (`ci-signing-toml`). A release or a
+dev build that is handed no signer at all fails, so a misnamed secret can't quietly ship unsigned
+packages; pass `allow-unsigned: true` to build one unsigned on purpose (a warning; the repositories
+refuse it, so nothing is published).
 
 **The packages artifact** (`<artifact-prefix>-packages`, the `packages-artifact` output) holds
 `packages/<product>/` (the Linux and Windows packages, with every MSI adopted) and
@@ -68,27 +70,57 @@ checks its SHA-256 against the listing; nothing unlisted is in it.
 
 | Job | Runner | What | Permissions |
 |---|---|---|---|
-| `prepare` | Linux | seaworthy built at the workflow's commit (`setup-seaworthy`, cached by the SHA; compiled from source on a release), `seaworthy check`, the release named (version, sequence, build metadata), the build plans and the build matrix | `contents: read` |
+| `prepare` | Linux | seaworthy built at the workflow's commit (`setup-seaworthy`, cached by the SHA; compiled from source on a release or a dev build), `seaworthy check`, the release named (version, sequence, build metadata: the one job that runs the `build-metadata` command), the build plans and the build matrix | `contents: read` |
 | `build-linux` | Linux | one job per target directory: the launcher and helper (`base`), each CPU's core; inside `linux-build-image`, whose glibc is the products' floor or older | `contents: read` |
 | `build-windows` | Windows | the same, natively with MSVC (`seaworthy-build.ps1`) | `contents: read` |
 | `build-macos` | macOS | the same, on Apple Silicon | `contents: read` |
 | `package` | Linux | `seaworthy package --platforms linux,windows`: verify, layout, version resources, Authenticode, packages, manifests, SBOMs; signed on a release | `contents: read`, `id-token: write` |
 | `msi` | Windows | WiX v5.0.2 (pinned, checksum-verified) builds and validates each MSI from package's `.wxs` | `contents: read` |
-| `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI checked against the signed tree, signed, listed | `contents: read`, `id-token: write` |
+| `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI's payload checked against the signed tree and its security-relevant tables against the `.wxs`, signed, listed | `contents: read`, `id-token: write` |
 | `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (desktop) or pkg (service), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed | `contents: read` |
 | `verify` | Linux | every listed artifact against its listing; the packages artifact with `SHA256SUMS` | `contents: read` |
 | `publish` | Linux | on a release with `publish-toml`: `seaworthy repo` after the last published plan, then `seaworthy publish` (one at a time) | `contents: read` |
 
 Every job declares its own permissions; the workflow's default is none. Linux jobs run
 step-security's harden-runner in audit mode; every action is pinned by commit SHA; no checkout keeps
-credentials. The build jobs never see a secret. On a release, the tool that signs is compiled from
-source, never restored from a cache.
+credentials. The build jobs never see a secret.
+
+### What the signing jobs trust
+
+The jobs that hold secrets (`package`, `adopt-msi`, `package-macos`, `publish`) run no product code
+and take nothing from the jobs that do but data:
+
+- **The tool and its scripts are their own.** Each checks seaworthy out at the workflow's commit and
+  builds it there with `setup-seaworthy` (from source on a release or a dev build, never a cache),
+  and runs `scripts/ci/seaworthy.sh` and `github.sh` from that checkout. The prepare job's
+  artifact, which the product's `build-metadata` command could have touched, contributes only
+  `release.env` (read strictly, never sourced) and the plans; its `bin/` and `scripts/` serve the
+  build jobs alone. The `msi` and `verify` jobs run the checkout's scripts too.
+- **The tool's own build sees nothing of the product's.** `setup-seaworthy` compiles a `git archive`
+  of the commit under `RUNNER_TEMP`, outside the workspace (so no product `.cargo/config.toml` or
+  `rust-toolchain.toml` applies), refuses a cargo configuration above it, and runs cargo with the
+  system's basics alone in its environment: no `RUSTC_WRAPPER`, `CARGO_*` override, `RUSTFLAGS`,
+  `RUSTUP_TOOLCHAIN` or `CC`.
+- **Tools first, secrets after.** The packaging tools (apt packages, nFPM, osslsigncode built from
+  its pinned source) install in a step that holds no secret. The secrets reach one step,
+  `github.sh signed <step>`, whose signing material (`signing.toml`, the Authenticode PEM files, the
+  Developer ID keychain) lives in a private directory under `RUNNER_TEMP` that is shredded (the
+  keychain deleted) when that step ends, however it ends; an always-run step removes anything a
+  cancelled run left. `seaworthy.sh` takes every credential out of its environment as it starts and
+  hands it to the `seaworthy` call alone, and `seaworthy` gives its child tools (nFPM, strip, gpg,
+  rpmsign, WiX, the macOS tools) an allowlisted environment, so only signing commands see a
+  credential.
+- **No secret in a file a later step reads,** and nothing through `GITHUB_ENV` but tool paths.
 
 **Why the calling job grants `id-token: write`:** GitHub checks the permissions a called workflow's
 jobs request against the caller's grant before it evaluates any condition, so the `package` and
 `adopt-msi` jobs' `id-token: write` (for Azure Artifact Signing through OIDC) must be granted even
-when no Azure input is set. The token is requested only by `azure-sign.sh`, in those two jobs, when
-the `azure-*` inputs are given; nothing else in them asks for one.
+when no Azure input is set. The runner then puts the token-request variables
+(`ACTIONS_ID_TOKEN_REQUEST_*`) in every step of those jobs: the tools steps unset them,
+`seaworthy.sh` holds them back from everything but `seaworthy`, and `seaworthy` passes them to its
+Authenticode signing command alone (`azure-sign.sh`, when the `azure-*` inputs are given). The
+pinned actions those jobs use (checkout, the artifact actions, harden-runner) see them too: that is
+GitHub's design, and why those jobs run no product code.
 
 ## Inputs
 
@@ -100,6 +132,8 @@ the `azure-*` inputs are given; nothing else in them asks for one.
 | `platforms` | `linux,windows,macos` | the platforms to build |
 | `release` | `false` | a release: versioned from the tag (or `version`, `version-file`), signed with the secrets given, published with `publish-toml` |
 | `dev-sign` | `false` | outside a release: the Windows binaries and MSIs Authenticode-signed alone (never published) |
+| `allow-unsigned` | `false` | let a release or a dev build that was handed no signer go on, unsigned, with a warning (otherwise it fails) |
+| `ci-test-keys` | `false` | outside a release, build with seaworthy-formats' CI test-key switch (`SEAWORTHY_ALLOW_CI_TEST_KEYS=1`), so the product's helper trusts its CI test keys; package with `ci-signing-toml`. Refused on a release, by every step |
 | `version`, `version-file`, `sequence`, `build-metadata` | the tag; none; `github.run_number`; the commit's first 8 characters | the release's name, as [ci-gitlab.md](ci-gitlab.md) describes `version-file` and `build-metadata` (a command) |
 | `environment` | (none) | the GitHub environment `package`, `adopt-msi`, `package-macos` and `publish` run in on a release (or a dev build) |
 | `signing-toml` | (generated) | your own `signing.toml` instead of the one generated from the secrets: command signers (a KMS), several manifest algorithms |
@@ -119,9 +153,10 @@ Outputs: `version` (the release version) and `packages-artifact` (the packages a
 ## Secrets and signers
 
 The workflow generates `signing.toml` (names only, [configuration.md](configuration.md#signingtoml))
-from whichever of these it is handed, in the jobs that sign and only on a release (Authenticode also
-on a dev build). Secrets reach seaworthy through its environment (`key-env`, `secret-key-env`), files
-only in a private directory (umask 077) removed when the job ends, and are never printed.
+from whichever of these it is handed, in the step that signs and only on a release (Authenticode
+also on a dev build). Secrets reach seaworthy through its environment (`key-env`, `secret-key-env`),
+files only in a private directory (umask 077) shredded when the step ends, and are never printed or
+put on a command line.
 
 | Signer | Secrets | Inputs | Pins in seaworthy.toml |
 |---|---|---|---|
@@ -166,8 +201,10 @@ for osslsigncode, built from its pinned source.
 Export the Developer ID Application identity (and, for a service's pkg, the Developer ID Installer
 identity) with their keys as one PKCS#12, store it base64-encoded as `APPLE_CERTIFICATE_P12` with
 its password; create an App Store Connect API key with the Developer role and store the `.p8` file,
-its key id and issuer id. On a release the macOS job imports the identities into a keychain of its
-own (deleted when the job ends), stores the API key there as a `notarytool` profile, and
+its key id and issuer id. On a release the macOS packaging step imports the identities into a
+keychain of its own (locked after two hours, deleted when the step ends; the PKCS#12's password
+reaches `openssl` alone, through its environment, and each identity is re-wrapped under a throwaway
+password for `security import`), stores the API key there as a `notarytool` profile, and
 `seaworthy package --platforms macos` signs with the hardened runtime and a secure timestamp,
 checks each signature against `defaults.apple.team-id`, notarizes, staples and asks Gatekeeper.
 Without these secrets the macOS outputs stay ad hoc-signed (Gatekeeper refuses a downloaded copy).
@@ -184,7 +221,8 @@ The cores build with `-C target-cpu=<cpu>` per job; your flags join after them:
 
 `RUSTFLAGS` itself is refused (it would replace the per-CPU flags); put permanent flags in
 `.cargo/config.toml`'s `target.<triple>.rustflags`. A compiler cache (`RUSTC_WRAPPER`) is yours to
-set through `build-env`; a release should build without one.
+set through `build-env` for the product's builds (never seaworthy's own, which ignores it); a
+release should build without one: what ships must not depend on what another run left in a cache.
 
 ## Pinning and updates
 

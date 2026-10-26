@@ -136,7 +136,8 @@ rules and checks as the Linux and macOS lanes:
 
 1. **The previous build.** `scripts/windows-upgrade-previous.ps1` (`scripts/upgrade-previous.sh`
    ported, its rules unchanged) picks the latest successful run of `lab-windows.yml` on `main`
-   (a push, the schedule or a dispatch, the repository's own head, a lower run number), downloads
+   (a push, the schedule or a dispatch, the repository's own head, its commit on `main`, a lower
+   run number), downloads
    its `lab-upgrade-windows` artifact with the job's token (`actions: read` only; Windows' own
    `curl.exe` reads it from a header file in a directory only the job's account can open, never
    from its command line) and checks the zip against the SHA-256 digest GitHub recorded at

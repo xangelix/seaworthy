@@ -126,19 +126,20 @@ Every job runs one step of `scripts/ci/seaworthy.sh` (Windows: `seaworthy-build.
 `seaworthy-msi.ps1`); the YAML only wires them. Artifacts live under `seaworthy/`. On a release the
 step installs its tools first, then runs its `seaworthy` call alone under the `*-secrets` prefix: the
 credentials never reach a tool install, and outside a release the prefix isn't used, so a protected
-secrets role never sees a branch pipeline.
+secrets role never sees a branch pipeline. What a release's signing jobs trust is
+[below](#what-a-release-trusts).
 
 | Job | Stage | Runs | What |
 |---|---|---|---|
-| `seaworthy-prepare` | `.pre` | every pipeline | fetches the seaworthy checkout if `seaworthy-dir` lacks it, checks it's the included template's revision (a marker both carry), builds `seaworthy` from it (cached outside the checkout, keyed by the ref's protection, so an unprotected pipeline never leaves a compiled tool for a release), checks `seaworthy.toml` and the release version, writes each target triple's build plan, runs the release-ordering lint, and hands on `seaworthy` and the scripts |
+| `seaworthy-prepare` | `.pre` | every pipeline | fetches the seaworthy checkout if `seaworthy-dir` lacks it, checks it's the included template's revision (a marker both carry), builds `seaworthy` from it (outside the product's tree, with none of its build settings; its target directory cached for pipelines that aren't releases, while a release restores no cache and compiles afresh), checks `seaworthy.toml` and the release version, runs the `build-metadata` command (the only job that does), writes each target triple's build plan, runs the release-ordering lint, and hands on `seaworthy` and the scripts (for the build jobs and the pipelines that don't sign) |
 | `seaworthy-build-linux` | `build-stage` | every pipeline | the Linux build plan in `build-image`: the launcher and helper once, each core once per CPU target in its own target directory, `strip = false` |
 | `seaworthy-build-windows` | `build-stage` | when included | the Windows build plan on the Windows runner, natively, in the x64 MSVC developer environment it enters itself (vswhere, then `vcvarsall.bat x64`). Every build links the C runtime statically. The cores' sidecars come from the first CPU target's build and go beside every core |
-| `seaworthy-package` | `package-stage` | every pipeline | `seaworthy package --platforms linux,windows`: signed on a release (the version from the tag or `version-file`, the sequence `CI_PIPELINE_IID`, the build metadata the `build-metadata` command's or `CI_COMMIT_SHORT_SHA`); on a dev build, its Windows binaries Authenticode-signed alone; unsigned otherwise (the `version-file`'s version, or `0.0.0-alpha`) |
+| `seaworthy-package` | `package-stage` | every pipeline | `seaworthy package --platforms linux,windows`: signed on a release (the version from the tag or `version-file`, the sequence `CI_PIPELINE_IID`, the build metadata prepare recorded in `release.env`); on a dev build, its Windows binaries Authenticode-signed alone; unsigned otherwise (the `version-file`'s version, or `0.0.0-alpha`). On a release or a dev build it runs from seaworthy's own checkout, fetched afresh, and builds the tool itself |
 | `seaworthy-msi` | `package-stage` | when included | WiX v5.0.2 on the Windows runner (installed from its pinned, hash-checked MSI unless the image has it): each product's `.wxs` built against the package job's signed tree, then `wix msi validate` (every ICE error fails the job). Unsigned |
-| `seaworthy-msi-adopt` | `package-stage` | when included | `seaworthy adopt-msi` per MSI, on Linux with `tools-image`: its payload must be exactly the signed tree; then signed with the package job's signers on a release, or `[authenticode]` alone on a dev build, all listed in `seaworthy/adopted/` |
+| `seaworthy-msi-adopt` | `package-stage` | when included | `seaworthy adopt-msi` per MSI, on Linux with `tools-image`: its payload must be exactly the signed tree, and its security-relevant tables exactly what the `.wxs` declares; then signed with the package job's signers on a release, or `[authenticode]` alone on a dev build, all listed in `seaworthy/adopted/`. On a release or a dev build it runs from seaworthy's own checkout, as the package job does |
 | `seaworthy-macos` | `build-stage` | when included | on the Mac runner, one at a time in `macos-resource-group`: fetches the checkout as prepare does, carries out the aarch64-apple-darwin build plan, builds `seaworthy` there and runs `seaworthy package --platforms macos`. Its packages land in `seaworthy/dist-macos/`, a pipeline artifact no later job takes: never signed and given no secrets, on a release too |
-| `seaworthy-repo` | `publish-stage` | release | from `seaworthy/adopted/` when the MSI jobs ran, else the package job's packages: `seaworthy repo` with `--previous` = the plan at `public-url` (a 404 is the first publication; any other failure stops the job) |
-| `seaworthy-publish` | `publish-stage` | release, one at a time | `seaworthy publish` to the bucket in `publish.toml`, credentials from `publish-secrets`. With `SEAWORTHY_PUBLISH_DRY_RUN=1` (a pipeline variable) it checks the files, the store and the public URL and uploads and deletes nothing; the product's deploy jobs run on the release rule regardless, so a dry run on a pipeline that deploys must skip them itself |
+| `seaworthy-repo` | `publish-stage` | release | from `seaworthy/adopted/` when the MSI jobs ran, else the package job's packages: `seaworthy repo` with `--previous` = the plan at `public-url` (a 404 is the first publication; any other failure stops the job), from seaworthy's own checkout |
+| `seaworthy-publish` | `publish-stage` | release, one at a time | `seaworthy publish` to the bucket in `publish.toml`, credentials from `publish-secrets`, from seaworthy's own checkout. With `SEAWORTHY_PUBLISH_DRY_RUN=1` (a pipeline variable) it checks the files, the store and the public URL and uploads and deletes nothing; the product's deploy jobs run on the release rule regardless, so a dry run on a pipeline that deploys must skip them itself |
 
 **The release's name reaches the build.** The prepare job records the release's version and build
 metadata in `seaworthy/release.env`: the tag without its `v`, else the `version-file`'s version,
@@ -165,11 +166,45 @@ build's helper updates to a later one and a release's never does. The keys are c
 directory first (git checks files out readable by everyone, and `seaworthy` signs only with key
 files no one else can read). `repo` refuses such a build; a release never uses it.
 
+**A release with no signer** (`SEAWORTHY_UNSIGNED=1`, as the GitHub workflow sets when it was handed
+no secret) fails, unless `SEAWORTHY_ALLOW_UNSIGNED=1` says an unsigned one is meant; then it goes on,
+with a warning, and the repositories refuse it.
+
+**The CI test-key switch.** A product's non-release lanes may build helpers that trust its CI test
+keys: seaworthy-formats' build switch, `SEAWORTHY_ALLOW_CI_TEST_KEYS=1`, set as a variable on the
+build jobs. Every step of a release (the Windows build and MSI scripts too) fails when it's set to
+anything but empty or `0`, and a release's package job refuses any built binary carrying the
+switch's marker; `seaworthy verify` refuses them as well.
+
 **The checkout is trusted as the job's own.** An image may run as another user than the one owning
 the job's checkout, which git refuses as "dubious ownership". In GitLab CI the steps trust the job's
 own clone (`safe.directory` for `$CI_PROJECT_DIR`, in git's command scope through
 `GIT_CONFIG_COUNT`, for the step's processes only), so the tool installers and `SOURCE_DATE_EPOCH`
 can read it.
+
+## What a release trusts
+
+The jobs that sign on a release (`seaworthy-package`, `seaworthy-msi-adopt`, `seaworthy-repo`,
+`seaworthy-publish`; the package and adopt jobs on a dev build too) run no product code and trust
+nothing earlier jobs left them but data:
+
+- **seaworthy and its scripts are their own.** Each runs `seaworthy-fetch` afresh (removing any
+  `seaworthy-dir` already there), checks the checkout is the included template's revision, runs that
+  checkout's `seaworthy.sh` and builds `seaworthy` from it. The prepare job's `bin/` and `scripts/`
+  (which the product's `build-metadata` command could have touched) serve the build jobs and the
+  pipelines that don't sign; from it a release takes only `release.env` (read strictly, never
+  sourced) and the plans.
+- **Nothing comes from a cache.** The signing jobs restore none (`cache: []`, whatever the product's
+  `default:` says), and seaworthy-prepare doesn't restore its own on a release: any pipeline can
+  write any cache key, protected branches' included. seaworthy compiles from a copy of its checkout
+  outside the product's tree (no product `.cargo/config.toml` or `rust-toolchain.toml`), with the
+  system's basics alone in its environment (no `RUSTC_WRAPPER`, `CARGO_*`, `RUSTFLAGS`,
+  `RUSTUP_TOOLCHAIN` or `CC`), into a new target directory.
+- **Credentials reach the `seaworthy` call alone.** The `*-secrets` prefix wraps that call only; and
+  credentials already in the job's environment (an `id_tokens` token, a cloud credential, the
+  job token, a `key-env` variable `signing.toml` names, any name in `SEAWORTHY_HELD_ENV`) are taken
+  out of it as the step starts and handed to that call alone. `seaworthy` itself gives its child
+  tools an allowlisted environment, so only signing commands see a credential.
 
 ## Inputs
 
@@ -186,7 +221,7 @@ can read it.
 | `manifest` | `Cargo.toml` | the workspace the products build from; `seaworthy.toml`'s crate paths (`launcher`, `helper-crate`) are relative to its directory |
 | `cargo-args` | (none) | more cargo arguments for every build (`--features fips`) |
 | `version-file` | (none) | a `Cargo.toml` whose `[package]` version (read as TOML; a workspace-inherited one resolved) names a release that has no tag and every pipeline outside a release; a release tag must name the same version. A `SEAWORTHY_VERSION` pipeline variable overrides both |
-| `build-metadata` | (none) | a command (`bash -eo pipefail`, in the checkout) printing the release's build metadata (SemVer's: dot-separated `[0-9A-Za-z-]` identifiers, at most 64 characters), for a product that composes its own version token. It runs in prepare and again in package, which refuses a different answer: it must depend on the commit alone. Without it, the commit's short SHA |
+| `build-metadata` | (none) | a command (`bash -eo pipefail`, in the checkout) printing the release's build metadata (SemVer's: dot-separated `[0-9A-Za-z-]` identifiers, at most 64 characters), for a product that composes its own version token. It runs in prepare alone, before anything is staged: the build and package jobs read what it printed from `release.env`, so product code never shares a job with the signers. Without it, the commit's short SHA |
 | `release-if` | a `vX.Y.Z[-alpha\|beta\|rc[.N]]` tag | the rules expression for a release; the server deploy needs the same |
 | `dev-sign-if`, `dev-sign-secrets` | never, (none) | a dev build (above); pass the same values to `seaworthy-windows.yml` |
 | `build-stage`, `package-stage`, `publish-stage` | `build`, `build`, `deploy` | stages the product's `stages:` has |
@@ -215,8 +250,11 @@ can read it.
 | `seaworthy-dir`, `seaworthy-fetch`, `manifest`, `cargo-args`, `release-if`, `build-stage` | as `seaworthy.yml`'s | the Mac job builds `seaworthy` from the checkout too, so it fetches it the same way; on a release it names the release's version (its packages still stay out of the release) |
 
 **A compiler cache** is the product's own: set `RUSTC_WRAPPER` (and whatever credentials the cache
-needs) as CI/CD variables for the build jobs. A release should compile without it, from source: what
-ships must not depend on what another pipeline left in a cache.
+needs) as CI/CD variables for the build jobs. seaworthy's own build ignores it, whatever its scope
+(the tool compiles with the system's basics alone in its environment, outside the product's tree,
+so neither a project-wide `RUSTC_WRAPPER` nor the product's `.cargo/config.toml` reaches it). A
+release should compile the product without it too, from source: what ships must not depend on what
+another pipeline left in a cache.
 
 **Product flags** belong in `.cargo/config.toml`'s `target.<triple>.rustflags` (or
 `target.'cfg(…)'.rustflags`), which join the per-CPU flags. Cargo ignores `build.rustflags` once any
@@ -291,10 +329,11 @@ executables are what SmartScreen, AppLocker and WDAC block. Non-release pipeline
 unsigned (or Authenticode-signed alone, on a dev build).
 
 The Windows runner is trusted for a release: `seaworthy-build-windows` builds the binaries the
-package job signs (natively, for the FIPS module), and `seaworthy-msi` builds the MSI whose tables
-(custom actions, services, registry values, ACLs) the adopt job signs as WiX built them. The adopt
-job's payload check catches an MSI that isn't the release's; give release pipelines a Windows runner
-you'd trust with the binaries.
+package job signs (natively, for the FIPS module). The MSI it builds is checked before it's signed:
+its payload must be exactly the signed tree, and its security-relevant tables (custom actions,
+services, registry values, ACLs, shortcuts, the sequences, upgrades) exactly what the `.wxs` declares,
+with none of the tables that run code at install time (`Binary`, `SelfReg`, COM registration,
+embedded UI or chainers). Give release pipelines a Windows runner you'd trust with the binaries.
 
 ## FIPS products
 

@@ -159,10 +159,11 @@ git ls-remote https://github.com/actions/checkout 'refs/tags/v7.0.1*'
 ```
 
 **CI tools** (cargo-deny, cargo-fuzz, actionlint, zizmor, shellcheck) are pinned release binaries
-in `scripts/ci/install-tool.sh`. To bump one, change its version, URLs and SHA-256 digests
-together, taking each digest from the release's published checksums and confirming it with
-`sha256sum` on the downloaded file; for cargo-fuzz, also change `CARGO_FUZZ_VERSION` in
-`scripts/fuzz.sh`.
+in `scripts/ci/install-tool.sh`, each by its archive's SHA-256 and the SHA-256 of the binary inside
+it (an installed tool is reused only when its bytes match). To bump one, change its version, URLs
+and both digests together, taking the archive's from the release's published checksums and
+confirming it with `sha256sum` on the downloaded file, then hashing the unpacked binary; for
+cargo-fuzz, also change `CARGO_FUZZ_VERSION` in `scripts/fuzz.sh`.
 
 **Runner images** are pinned by label (`ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2025`,
 `macos-15`), never `-latest`. Move to a newer image deliberately, before GitHub retires the old
