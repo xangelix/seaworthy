@@ -17,9 +17,12 @@
 # Linux because the version resource is stamped into each binary before it's
 # signed; a cloud signing service reaches it through a command signer (such
 # as scripts/ci/azure-sign.sh for Azure Artifact Signing). The check catches
-# an MSI that isn't this release's; it isn't a boundary against the Windows
-# runner, which builds the binaries the package job signs and so is trusted
-# for a release (its MSI's tables are taken as WiX built them).
+# an MSI that isn't this release's: its payload must be the signed tree, and
+# its security-relevant tables (custom actions, services, registry values,
+# ACLs, shortcuts, the sequences, upgrades) exactly what the .wxs declares,
+# with none of the tables that run code (Binary, SelfReg, COM registration,
+# embedded UI or chainers). The Windows runner still builds the binaries
+# the package job signs, so it's trusted for a release.
 #
 #   seaworthy-build-windows  build    the Windows build plan, natively
 #   seaworthy-msi            package  WiX: each .wxs into an MSI, validated
@@ -66,6 +69,13 @@ seaworthy-build-windows:
   tags: $[[ inputs.windows-tags ]]
   needs:
     - seaworthy-prepare
+  # Every pipeline; a release's refuses the CI test-key switch.
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+    - when: on_success
   variables:
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_MANIFEST: $[[ inputs.manifest ]]
@@ -132,10 +142,21 @@ seaworthy-msi-adopt:
       variables:
         SEAWORTHY_DEV_SIGN: "1"
     - when: on_success
+  # Nothing restored into a job that signs, whatever the product's default.
+  cache: []
   script:
     # The script runs seaworthy under SEAWORTHY_SECRETS on a release, and
-    # SEAWORTHY_DEV_SECRETS on a dev build.
-    - bash seaworthy/scripts/seaworthy.sh adopt-msi
+    # SEAWORTHY_DEV_SECRETS on a dev build, from seaworthy's own checkout
+    # (fetched afresh; seaworthy.yml's seaworthy-dir and seaworthy-fetch),
+    # never the prepare job's copies.
+    - |
+      if [ "${SEAWORTHY_RELEASE:-0}" = 1 ] || [ "${SEAWORTHY_DEV_SIGN:-0}" = 1 ]; then
+        case "$SEAWORTHY_CHECKOUT" in "" | . | .. | /* | ../* | */.. | */../*) echo "seaworthy-dir must be a directory below the project"; exit 1 ;; esac
+        if [ -n "$SEAWORTHY_FETCH" ]; then rm -rf "./$SEAWORTHY_CHECKOUT" && eval "$SEAWORTHY_FETCH"; fi
+        bash "./$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" adopt-msi
+      else
+        bash seaworthy/scripts/seaworthy.sh adopt-msi
+      fi
   artifacts:
     paths:
       - seaworthy/adopted/

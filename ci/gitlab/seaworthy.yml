@@ -33,9 +33,11 @@
 #         macos-tags: [<your Mac runner's tags>]
 #         seaworthy-fetch: <as above>
 #
-# Jobs (every one runs one step of scripts/ci/seaworthy.sh, which the
-# prepare job hands on with the seaworthy binary itself, so one seaworthy
-# revision serves the whole pipeline):
+# Jobs (every one runs one step of scripts/ci/seaworthy.sh, at the seaworthy
+# revision the pipeline includes; the prepare job hands it on with the
+# seaworthy binary for the build jobs and the unsigned pipelines, and on a
+# release or a dev build the signing jobs fetch seaworthy's checkout and
+# build it themselves, trusting nothing of prepare's but its data):
 #
 #   seaworthy-prepare      .pre      seaworthy built from the seaworthy
 #                                    checkout; seaworthy.toml checked; the
@@ -64,7 +66,20 @@
 # under a command prefix on a release only (the *-secrets inputs: a wrapper
 # that fetches the step's credentials from your secret store and runs the
 # command with them), never the tool installs; add any `id_tokens` the
-# wrapper needs to those jobs in the product's CI (keys merge).
+# wrapper needs to those jobs in the product's CI (keys merge): the script
+# holds them (and any credential in the job's environment) back from
+# everything but that call.
+#
+# A release's tools never come from a cache: seaworthy-prepare doesn't
+# restore its cache on a release (any pipeline can write a cache key), and
+# every step that signs builds seaworthy afresh from seaworthy's own
+# checkout, outside the product's tree, with none of the product's build
+# settings (its .cargo/config.toml, rust-toolchain.toml, RUSTC_WRAPPER or
+# CARGO_* variables). The signing jobs restore no cache at all (`cache: []`,
+# whatever the product's `default:` says), never run the build-metadata
+# command (they read prepare's release.env), and fail a release whose
+# environment sets SEAWORTHY_ALLOW_CI_TEST_KEYS (seaworthy-formats' test-key
+# switch) or whose binaries carry its marker.
 #
 # A dev build: outside a release, a pipeline dev-sign-if matches (protected
 # refs alone, such as protected branches other than the default) signs its
@@ -169,7 +184,7 @@ spec:
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "e307478d6132a47e"
+    SEAWORTHY_TEMPLATE: "9d5d9b3af2b2774f"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
@@ -181,6 +196,11 @@ spec:
       value: >-
         $[[ inputs.build-metadata ]]
       expand: false
+    SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
+    SEAWORTHY_FETCH:
+      value: >-
+        $[[ inputs.seaworthy-fetch ]]
+      expand: false
 
 seaworthy-prepare:
   extends: .seaworthy
@@ -190,14 +210,11 @@ seaworthy-prepare:
         $[[ inputs.release-if ]]
       variables:
         SEAWORTHY_RELEASE: "1"
+        SEAWORTHY_TOOL_CACHE_POLICY: push
     - when: on_success
   variables:
-    SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
     SEAWORTHY_TOOL_TARGET: seaworthy/tool-target
-    SEAWORTHY_FETCH:
-      value: >-
-        $[[ inputs.seaworthy-fetch ]]
-      expand: false
+    SEAWORTHY_TOOL_CACHE_POLICY: pull-push
     SEAWORTHY_SERVER_JOBS: $[[ inputs.server-deploy-jobs ]]
     SEAWORTHY_CLIENT_JOBS: $[[ inputs.client-deploy-jobs ]]
   script:
@@ -206,13 +223,14 @@ seaworthy-prepare:
         eval "$SEAWORTHY_FETCH"
       fi
     - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" prepare
-  # Outside the checkout: restored before the fetch, it must not make
-  # seaworthy-dir exist. Keyed by the ref's protection: a merge request's
-  # pipeline can't leave a compiled tool for a release to sign, whether or
-  # not the project keeps GitLab's separate caches for protected branches
-  # on.
+  # The tool's cargo target directory, for the pipelines that aren't
+  # releases: any pipeline can write any cache key (protected branches'
+  # included), so a release never restores it (policy push) and compiles
+  # seaworthy in a new directory of its own anyway. Outside the checkout,
+  # so a restored cache can't make seaworthy-dir exist.
   cache:
     key: seaworthy-tool-$CI_COMMIT_REF_PROTECTED
+    policy: $SEAWORTHY_TOOL_CACHE_POLICY
     paths:
       - seaworthy/tool-target/
   artifacts:
@@ -231,6 +249,13 @@ seaworthy-build-linux:
   image: $[[ inputs.build-image ]]
   needs:
     - seaworthy-prepare
+  # Every pipeline; a release's refuses the CI test-key switch.
+  rules:
+    - if: >-
+        $[[ inputs.release-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+    - when: on_success
   variables:
     SEAWORTHY_CARGO_ARGS:
       value: >-
@@ -270,10 +295,20 @@ seaworthy-package:
       variables:
         SEAWORTHY_DEV_SIGN: "1"
     - when: on_success
+  # Nothing restored into a job that signs, whatever the product's default.
+  cache: []
   script:
     # The script runs seaworthy under SEAWORTHY_SECRETS on a release, and
-    # SEAWORTHY_DEV_SECRETS on a dev build.
-    - bash seaworthy/scripts/seaworthy.sh package
+    # SEAWORTHY_DEV_SECRETS on a dev build, from seaworthy's own checkout
+    # (fetched afresh), never the prepare job's copies.
+    - |
+      if [ "${SEAWORTHY_RELEASE:-0}" = 1 ] || [ "${SEAWORTHY_DEV_SIGN:-0}" = 1 ]; then
+        case "$SEAWORTHY_CHECKOUT" in "" | . | .. | /* | ../* | */.. | */../*) echo "seaworthy-dir must be a directory below the project"; exit 1 ;; esac
+        if [ -n "$SEAWORTHY_FETCH" ]; then rm -rf "./$SEAWORTHY_CHECKOUT" && eval "$SEAWORTHY_FETCH"; fi
+        bash "./$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" package
+      else
+        bash seaworthy/scripts/seaworthy.sh package
+      fi
   artifacts:
     paths:
       - seaworthy/dist/
@@ -299,9 +334,15 @@ seaworthy-repo:
         $[[ inputs.release-if ]]
       variables:
         SEAWORTHY_RELEASE: "1"
+  cache: []
   script:
-    # The script runs seaworthy under SEAWORTHY_SECRETS, on a release only.
-    - bash seaworthy/scripts/seaworthy.sh repo
+    # The script runs seaworthy under SEAWORTHY_SECRETS, on a release only,
+    # from seaworthy's own checkout (fetched afresh), never the prepare
+    # job's copies.
+    - |
+      case "$SEAWORTHY_CHECKOUT" in "" | . | .. | /* | ../* | */.. | */../*) echo "seaworthy-dir must be a directory below the project"; exit 1 ;; esac
+      if [ -n "$SEAWORTHY_FETCH" ]; then rm -rf "./$SEAWORTHY_CHECKOUT" && eval "$SEAWORTHY_FETCH"; fi
+      bash "./$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" repo
   artifacts:
     paths:
       - seaworthy/repo/
@@ -324,6 +365,12 @@ seaworthy-publish:
       variables:
         SEAWORTHY_RELEASE: "1"
   resource_group: seaworthy-publish
+  cache: []
   script:
-    # The script runs seaworthy under SEAWORTHY_SECRETS, on a release only.
-    - bash seaworthy/scripts/seaworthy.sh publish
+    # The script runs seaworthy under SEAWORTHY_SECRETS, on a release only,
+    # from seaworthy's own checkout (fetched afresh), never the prepare
+    # job's copies.
+    - |
+      case "$SEAWORTHY_CHECKOUT" in "" | . | .. | /* | ../* | */.. | */../*) echo "seaworthy-dir must be a directory below the project"; exit 1 ;; esac
+      if [ -n "$SEAWORTHY_FETCH" ]; then rm -rf "./$SEAWORTHY_CHECKOUT" && eval "$SEAWORTHY_FETCH"; fi
+      bash "./$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" publish

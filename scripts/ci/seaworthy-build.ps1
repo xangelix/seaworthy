@@ -64,6 +64,13 @@ function Say([string]$What) {
     Write-Host "seaworthy: $What"
 }
 
+# A release never builds binaries that trust the product's CI test keys:
+# seaworthy-formats' switch (1 turns it on) must be off on a release
+# (SEAWORTHY_RELEASE=1, the templates' release rule).
+if ($env:SEAWORTHY_RELEASE -eq '1' -and $env:SEAWORTHY_ALLOW_CI_TEST_KEYS -and $env:SEAWORTHY_ALLOW_CI_TEST_KEYS -ne '0') {
+    Fail "SEAWORTHY_ALLOW_CI_TEST_KEYS is '$($env:SEAWORTHY_ALLOW_CI_TEST_KEYS)' on a release: a release never trusts the CI test keys (unset it, or set it to 0)"
+}
+
 # The x64 MSVC developer environment, imported into this process so cargo
 # and every build script inherit it, unless the job already runs in one
 # (VCToolsInstallDir and INCLUDE set). Without it a FIPS core's

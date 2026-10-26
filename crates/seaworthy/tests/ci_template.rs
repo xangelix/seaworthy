@@ -343,6 +343,24 @@ fn only_a_release_signs_and_publishes() {
         assert_eq!(text(&rules[2], "when"), Some("on_success"), "{name}");
         assert!(rules[2].get("variables").is_none(), "{name}");
     }
+    // The build jobs know a release (whose steps refuse the CI test-key
+    // switch), and run on every pipeline.
+    for name in ["seaworthy-build-linux", "seaworthy-build-windows"] {
+        let Some(Node::Seq(rules)) = job(&pipeline, name).get("rules") else {
+            panic!("{name} has no rules")
+        };
+        assert_eq!(rules.len(), 2, "{name}");
+        assert_eq!(text(&rules[0], "if"), Some(release), "{name}");
+        assert_eq!(
+            rules[0]
+                .get("variables")
+                .and_then(|v| v.get("SEAWORTHY_RELEASE"))
+                .and_then(Node::text),
+            Some("1"),
+            "{name}"
+        );
+        assert_eq!(text(&rules[1], "when"), Some("on_success"), "{name}");
+    }
     // The Mac's job names a release's version on a release (and no more:
     // its dmg stays out of the release), and has no dev build.
     let Some(Node::Seq(rules)) = job(&pipeline, "seaworthy-macos").get("rules") else {
@@ -578,17 +596,76 @@ fn the_jobs_run_steps_the_script_has() {
         ("seaworthy-publish", "publish"),
     ] {
         let lines = list(job(&pipeline, name).get("script"));
-        let last = lines.last().unwrap();
-        assert!(
-            last.contains("seaworthy.sh") && last.ends_with(&format!(" {step}")),
-            "{name}: {last}"
-        );
+        let last = lines.last().unwrap().trim_end();
         let verb = step.split(' ').next().unwrap();
         assert!(
             source.contains(&format!("\n    {verb}) ")),
             "the script has {verb}"
         );
+        if matches!(verb, "prepare" | "build") {
+            assert!(
+                last.contains("seaworthy.sh") && last.ends_with(&format!(" {step}")),
+                "{name}: {last}"
+            );
+            continue;
+        }
+        // A signing job: on a release (or a dev build) seaworthy's own
+        // checkout, fetched afresh, runs the step — never the prepare job's
+        // copies — and nothing is restored from a cache into it.
+        assert!(
+            last.contains(&format!(
+                "bash \"./$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh\" {step}\n"
+            )) || last.ends_with(&format!(
+                "bash \"./$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh\" {step}"
+            )),
+            "{name}: {last}"
+        );
+        assert!(
+            last.contains("rm -rf \"./$SEAWORTHY_CHECKOUT\" && eval \"$SEAWORTHY_FETCH\""),
+            "{name}: fetched afresh: {last}"
+        );
+        if matches!(verb, "package" | "adopt-msi") {
+            assert!(
+                last.starts_with(
+                    "if [ \"${SEAWORTHY_RELEASE:-0}\" = 1 ] || [ \"${SEAWORTHY_DEV_SIGN:-0}\" = 1 ]; then"
+                ) && last.contains(&format!("else\n  bash seaworthy/scripts/seaworthy.sh {step}\nfi")),
+                "{name}: the prepare job's copies outside a release or a dev build: {last}"
+            );
+        } else {
+            assert!(
+                !last.contains("seaworthy/scripts/seaworthy.sh"),
+                "{name}: {last}"
+            );
+        }
+        assert!(
+            matches!(job(&pipeline, name).get("cache"), Some(Node::Seq(items)) if items.is_empty()),
+            "{name}: cache: []"
+        );
     }
+    // The prepare job's cache: never restored on a release.
+    let prepare = job(&pipeline, "seaworthy-prepare");
+    assert_eq!(
+        text(prepare.get("cache").unwrap(), "policy"),
+        Some("$SEAWORTHY_TOOL_CACHE_POLICY")
+    );
+    assert_eq!(
+        prepare
+            .get("variables")
+            .and_then(|v| v.get("SEAWORTHY_TOOL_CACHE_POLICY"))
+            .and_then(Node::text),
+        Some("pull-push")
+    );
+    let Some(Node::Seq(rules)) = prepare.get("rules") else {
+        panic!("prepare has no rules")
+    };
+    assert_eq!(
+        rules[0]
+            .get("variables")
+            .and_then(|v| v.get("SEAWORTHY_TOOL_CACHE_POLICY"))
+            .and_then(Node::text),
+        Some("push"),
+        "a release never pulls the tool's cache"
+    );
     // What prepare hands on is what the later jobs run.
     for file in [
         "seaworthy.sh",
@@ -618,12 +695,15 @@ fn the_jobs_run_steps_the_script_has() {
     // The Mac's job: the macOS plan, then the Mac's own packaging.
     let mac = list(job(&pipeline, "seaworthy-macos").get("script"));
     assert!(
-        mac.contains(&"bash seaworthy/scripts/seaworthy.sh build aarch64-apple-darwin".to_owned()),
+        mac.contains(
+            &"bash \"$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh\" build aarch64-apple-darwin"
+                .to_owned()
+        ),
         "{mac:?}"
     );
     assert_eq!(
         mac.last().map(String::as_str),
-        Some("bash seaworthy/scripts/seaworthy.sh package-macos")
+        Some("bash \"$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh\" package-macos")
     );
     assert!(
         source.contains("\n    package-macos) "),
@@ -634,12 +714,36 @@ fn the_jobs_run_steps_the_script_has() {
 // ---------------------------------------------------------------------------
 // The script's steps, carried out
 
+/// A signing step of a release or a dev build runs from seaworthy's own
+/// checkout: this one, whose script `step` runs.
+const TRUSTED_CHECKOUT: (&str, &str) = (
+    "SEAWORTHY_CHECKOUT",
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
+);
+/// ...with the seaworthy a job built for itself: this build's, standing in
+/// for the one the step would compile from the checkout.
+const TRUSTED_TOOL: (&str, &str) = ("SEAWORTHY_TOOL_BIN", env!("CARGO_BIN_EXE_seaworthy"));
+
 /// Runs `seaworthy.sh <args>` in `dir` with `env`, never installing tools.
 fn step(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    run_script(&repo_root().join("scripts/ci/seaworthy.sh"), dir, args, env)
+}
+
+/// Runs a copy of `seaworthy.sh` staged where the prepare job leaves it
+/// (`<dir>/seaworthy/scripts/`), so the tool installers beside it are the
+/// ones it runs.
+fn staged_step(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let staged = dir.join("seaworthy/scripts/seaworthy.sh");
+    std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    std::fs::copy(repo_root().join("scripts/ci/seaworthy.sh"), &staged).unwrap();
+    run_script(&staged, dir, args, env)
+}
+
+fn run_script(script: &Path, dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new("bash");
     command
         .current_dir(dir)
-        .arg(repo_root().join("scripts/ci/seaworthy.sh"))
+        .arg(script)
         .args(args)
         .env("SEAWORTHY_NO_INSTALL", "1")
         .env_remove("RUSTFLAGS")
@@ -657,6 +761,9 @@ fn step(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
             || key.starts_with("GITLAB_")
             || key.starts_with("SEAWORTHY_")
             || key.starts_with("GIT_CONFIG_")
+            || key.starts_with("GITHUB_")
+            || key.starts_with("ACTIONS_")
+            || key == "RUNNER_TEMP"
             || key == "RUSTC_WRAPPER"
         {
             command.env_remove(&*key);
@@ -887,6 +994,40 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     // signing.toml.
     let mut release = env.to_vec();
     release.extend([("SEAWORTHY_RELEASE", "1"), ("CI_COMMIT_TAG", "v2.1.0")]);
+    // A release runs seaworthy's own checkout's script and seaworthy built
+    // in the job, never the prepare job's copies.
+    let out = step(dir.path(), &["package"], &release);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("the seaworthy checkout (the template's seaworthy-dir"),
+        "{}",
+        said(&out)
+    );
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("scripts/ci")).unwrap();
+    std::fs::write(elsewhere.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let mut another = release.clone();
+    another.push(("SEAWORTHY_CHECKOUT", elsewhere.to_str().unwrap()));
+    let out = step(dir.path(), &["package"], &another);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("runs package from seaworthy's own checkout"),
+        "{}",
+        said(&out)
+    );
+    let mut prepared_tool = release.clone();
+    prepared_tool.extend([
+        TRUSTED_CHECKOUT,
+        ("SEAWORTHY_TOOL_BIN", "seaworthy/bin/seaworthy"),
+    ]);
+    let out = step(dir.path(), &["package"], &prepared_tool);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("SEAWORTHY_TOOL_BIN is under seaworthy, the prepare job's artifacts"),
+        "{}",
+        said(&out)
+    );
+    release.extend([TRUSTED_CHECKOUT, TRUSTED_TOOL]);
     let out = step(dir.path(), &["package"], &release);
     assert!(!out.status.success());
     assert!(
@@ -896,6 +1037,39 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
         "{}",
         said(&out)
     );
+    // No signer handed over at all (the GitHub workflow's
+    // SEAWORTHY_UNSIGNED): refused, unless SEAWORTHY_ALLOW_UNSIGNED means it.
+    let mut unsigned = release.clone();
+    unsigned.retain(|(k, _)| *k != "SEAWORTHY_SECRETS");
+    unsigned.push(("SEAWORTHY_UNSIGNED", "1"));
+    let out = step(dir.path(), &["package"], &unsigned);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains(
+            "a release with no signer: no signing secret or signing.toml reached this job"
+        ),
+        "{}",
+        said(&out)
+    );
+    unsigned.push(("SEAWORTHY_ALLOW_UNSIGNED", "1"));
+    let out = step(dir.path(), &["package"], &unsigned);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(said(&out).contains("an UNSIGNED release"), "{}", said(&out));
+    // A release's binaries never carry the CI test-key marker (a build
+    // with seaworthy-formats' switch on).
+    let marked = dir
+        .path()
+        .join("seaworthy/artifacts/x86_64-unknown-linux-gnu/marked.so");
+    std::fs::create_dir_all(marked.parent().unwrap()).unwrap();
+    std::fs::write(&marked, b"\0\0seaworthy-ci-test-keys:trusted:1\0").unwrap();
+    let out = step(dir.path(), &["package"], &unsigned);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("built with the CI test-key switch"),
+        "{}",
+        said(&out)
+    );
+    std::fs::remove_file(&marked).unwrap();
     // A release without a tag or a version.
     let out = step(
         dir.path(),
@@ -905,6 +1079,8 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
             ("NFPM", nfpm.to_str().unwrap()),
             ("SOURCE_DATE_EPOCH", "1700000000"),
             ("CI_PIPELINE_IID", "41"),
+            TRUSTED_CHECKOUT,
+            TRUSTED_TOOL,
         ],
     );
     assert!(!out.status.success());
@@ -942,7 +1118,9 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     let out = step(dir.path(), &["package"], &env);
     assert!(!out.status.success());
     assert!(
-        said(&out).contains("the build jobs built release 9.9.9 0a1b2c3 (prepare's), but this is 0.0.0-alpha 0a1b2c3"),
+        said(&out).contains(
+            "the build jobs built release 9.9.9 (prepare's release.env), but this is 0.0.0-alpha"
+        ),
         "{}",
         said(&out)
     );
@@ -954,14 +1132,15 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     let out = step(dir.path(), &["package"], &env);
     assert!(out.status.success(), "{}", said(&out));
     std::fs::remove_file(work.join("release.env")).unwrap();
-    // nFPM that can't be installed stops the step.
+    // nFPM that can't be installed stops the step (the installer beside
+    // the script, as the prepare job stages them).
     let scripts = dir.path().join("seaworthy/scripts");
     std::fs::create_dir_all(&scripts).unwrap();
     script_at(&scripts.join("install-nfpm.sh"), "#!/bin/sh\nexit 7\n");
     let mut without_nfpm: Vec<(&str, &str)> =
         env.iter().filter(|(k, _)| *k != "NFPM").copied().collect();
     without_nfpm.push(("NFPM", ""));
-    let out = step(dir.path(), &["package"], &without_nfpm);
+    let out = staged_step(dir.path(), &["package"], &without_nfpm);
     assert!(!out.status.success());
     assert!(
         said(&out).contains("installing nFPM failed"),
@@ -1155,6 +1334,8 @@ fn the_package_step_signs_a_release_versioned_from_its_tag() {
         ("CI_COMMIT_TAG", "v2.1.0-rc.1"),
         ("SEAWORTHY_SECRETS", wrapper.as_str()),
         ("GITLAB_CI", "true"),
+        TRUSTED_CHECKOUT,
+        TRUSTED_TOOL,
     ];
     // In GitLab, a release on an unprotected ref is refused.
     let mut unprotected = env.to_vec();
@@ -1170,11 +1351,13 @@ fn the_package_step_signs_a_release_versioned_from_its_tag() {
     protected.push(("CI_COMMIT_REF_PROTECTED", "true"));
     let out = step(dir, &["package"], &protected);
     assert!(out.status.success(), "{}", said(&out));
-    // The seaworthy call ran under the prefix (nothing else did).
+    // The seaworthy call ran under the prefix (nothing else did), with the
+    // seaworthy this job installed, never the prepare job's.
     let wrapped = std::fs::read_to_string(dir.join("wrapped.log")).unwrap();
     assert_eq!(wrapped.lines().count(), 1, "{wrapped}");
     assert!(
-        wrapped.contains("seaworthy/bin/seaworthy package --config seaworthy.toml"),
+        wrapped.contains("/seaworthy package --config seaworthy.toml")
+            && !wrapped.contains("seaworthy/bin/seaworthy"),
         "{wrapped}"
     );
     let listing: serde_json::Value = serde_json::from_slice(
@@ -1193,34 +1376,45 @@ fn the_package_step_signs_a_release_versioned_from_its_tag() {
         "signed: manifests beside the packages"
     );
     // A product composing its own token (build-metadata): the release is
-    // named with prepare's build, and its manifests carry it.
+    // named with prepare's build (release.env), and its manifests carry it.
+    // The command itself never runs in a signing step: product code never
+    // shares a job with the signers.
     std::fs::write(
         dir.join("seaworthy/release.env"),
         "SEAWORTHY_RELEASE_VERSION=2.1.0-rc.1\nSEAWORTHY_RELEASE_BUILD=cafe12345678.lib-0a1b2c3d4e5f\n",
     )
     .unwrap();
+    let ran = dir.join("build-metadata-ran");
+    let command = format!("touch {}; echo another", ran.display());
     let mut composed = protected.clone();
-    composed.push((
-        "SEAWORTHY_BUILD_COMMAND",
-        "echo cafe12345678.lib-0a1b2c3d4e5f",
-    ));
+    composed.push(("SEAWORTHY_BUILD_COMMAND", command.as_str()));
     let out = step(dir, &["package"], &composed);
     assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        !ran.exists(),
+        "the build-metadata command ran in a signing step"
+    );
     let listing: serde_json::Value = serde_json::from_slice(
         &std::fs::read(dir.join("seaworthy/dist/agent/packages.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(listing["token"], "2.1.0-rc.1+cafe12345678.lib-0a1b2c3d4e5f");
-    // A command naming another build than prepare's: refused.
-    let mut drifted = protected.clone();
-    drifted.push(("SEAWORTHY_BUILD_COMMAND", "echo another"));
-    let out = step(dir, &["package"], &drifted);
+    // Without prepare's record, a product that composes its token can't be
+    // packaged: refused, the command not run.
+    std::fs::remove_file(dir.join("seaworthy/release.env")).unwrap();
+    let out = step(dir, &["package"], &composed);
     assert!(!out.status.success());
     assert!(
-        said(&out).contains("the build jobs built release"),
+        said(&out).contains("the build-metadata command runs in prepare alone"),
         "{}",
         said(&out)
     );
+    assert!(!ran.exists());
+    std::fs::write(
+        dir.join("seaworthy/release.env"),
+        "SEAWORTHY_RELEASE_VERSION=2.1.0-rc.1\nSEAWORTHY_RELEASE_BUILD=cafe12345678.lib-0a1b2c3d4e5f\n",
+    )
+    .unwrap();
     // A signed release with a Windows output and no Authenticode signer is
     // refused before anything is packaged: never an MSI or zip of unsigned
     // executables under signed manifests.
@@ -1313,7 +1507,12 @@ fn the_repo_step_publishes_after_the_last_plan_or_as_the_first() {
         )
         .unwrap();
     };
-    let env = [("SEAWORTHY_RELEASE", "1"), ("CI_PIPELINE_IID", "9")];
+    let env = [
+        ("SEAWORTHY_RELEASE", "1"),
+        ("CI_PIPELINE_IID", "9"),
+        TRUSTED_CHECKOUT,
+        TRUSTED_TOOL,
+    ];
     // A first publication: nothing at the public URL yet (here written in
     // single quotes, which TOML allows too).
     let url = serve(404, Vec::new());
@@ -1387,7 +1586,11 @@ fn the_repo_step_publishes_after_the_last_plan_or_as_the_first() {
 fn the_publish_step_needs_a_release_a_repository_and_its_credentials() {
     let dir = tempfile::tempdir().unwrap();
     tool_into(dir.path());
-    let out = step(dir.path(), &["publish"], &[("SEAWORTHY_RELEASE", "1")]);
+    let out = step(
+        dir.path(),
+        &["publish"],
+        &[("SEAWORTHY_RELEASE", "1"), TRUSTED_CHECKOUT, TRUSTED_TOOL],
+    );
     assert!(
         said(&out).contains("no seaworthy/repo (from the repo job)"),
         "{}",
@@ -1408,6 +1611,8 @@ fn the_publish_step_needs_a_release_a_repository_and_its_credentials() {
             ("SEAWORTHY_RELEASE", "1"),
             ("GITLAB_CI", "true"),
             ("CI_COMMIT_REF_PROTECTED", "false"),
+            TRUSTED_CHECKOUT,
+            TRUSTED_TOOL,
         ],
     );
     assert!(
@@ -1422,6 +1627,8 @@ fn the_publish_step_needs_a_release_a_repository_and_its_credentials() {
         &[
             ("SEAWORTHY_RELEASE", "1"),
             ("SEAWORTHY_S3_ACCESS_KEY_ID", "AKID"),
+            TRUSTED_CHECKOUT,
+            TRUSTED_TOOL,
         ],
     );
     assert!(
@@ -1443,6 +1650,8 @@ fn the_publish_step_needs_a_release_a_repository_and_its_credentials() {
         &[
             ("SEAWORTHY_RELEASE", "1"),
             ("SEAWORTHY_SECRETS", wrapper.to_str().unwrap()),
+            TRUSTED_CHECKOUT,
+            TRUSTED_TOOL,
         ],
     );
     assert!(!out.status.success());
@@ -1873,14 +2082,34 @@ fn the_prepare_step_builds_the_tool_plans_and_lints() {
     std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
     let bin = dir.path().join("stub-bin");
     std::fs::create_dir_all(&bin).unwrap();
+    // The stub notes where it ran, in what environment, and its target
+    // directory.
+    let seen = dir.path().join("cargo-seen");
     script_at(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/bash\nwhile [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && dir=\"$2\"; shift; done\n\
+            "#!/bin/bash\n{{ echo \"pwd=$(pwd -P)\"; env | LC_ALL=C sort; }} > {seen}\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && dir=\"$2\"; shift; done\n\
+             echo \"target=$dir\" >> {seen}\n\
              mkdir -p \"$dir/release\" && cp {} \"$dir/release/seaworthy\"\n",
-            env!("CARGO_BIN_EXE_seaworthy")
+            env!("CARGO_BIN_EXE_seaworthy"),
+            seen = seen.display()
         ),
     );
+    // The product's own build settings, which must never reach seaworthy's
+    // build: its cargo configuration, toolchain file, compiler wrapper,
+    // cargo and compiler overrides.
+    std::fs::create_dir_all(dir.path().join(".cargo")).unwrap();
+    std::fs::write(
+        dir.path().join(".cargo/config.toml"),
+        "[build]\nrustc-wrapper = \"/nonexistent/wrapper\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("seaworthy.toml"), WINDOWS_PRODUCT).unwrap();
     std::fs::write(
         dir.path().join(".gitlab-ci.yml"),
@@ -1908,8 +2137,47 @@ fn the_prepare_step_builds_the_tool_plans_and_lints() {
         env.extend_from_slice(extra);
         step(dir.path(), &["prepare"], &env)
     };
-    let out = prepare(&[]);
+    let out = prepare(&[
+        ("RUSTC_WRAPPER", "/nonexistent/sccache"),
+        ("CARGO_BUILD_RUSTC_WRAPPER", "/nonexistent/sccache"),
+        ("CARGO_TARGET_DIR", "/nonexistent/target"),
+        ("RUSTUP_TOOLCHAIN", "nightly"),
+        ("RUSTFLAGS", "-Cevil"),
+        ("CC", "/nonexistent/cc"),
+        ("CMAKE_C_COMPILER_LAUNCHER", "/nonexistent/ccache"),
+        ("SEAWORTHY_ALLOW_CI_TEST_KEYS", "1"),
+    ]);
     assert!(out.status.success(), "{}", said(&out));
+    let cargo_saw = std::fs::read_to_string(&seen).unwrap();
+    let project = std::fs::canonicalize(dir.path()).unwrap();
+    let ran_in = cargo_saw
+        .lines()
+        .find_map(|l| l.strip_prefix("pwd="))
+        .unwrap();
+    assert!(
+        !Path::new(ran_in).starts_with(&project),
+        "seaworthy builds outside the product's tree ({ran_in}): its .cargo/config.toml and rust-toolchain.toml stay out"
+    );
+    assert!(
+        std::fs::read_dir(ran_in).is_err(),
+        "the private copy it built from is removed afterwards"
+    );
+    for name in [
+        "RUSTC_WRAPPER=",
+        "CARGO_BUILD_RUSTC_WRAPPER=",
+        "CARGO_TARGET_DIR=",
+        "RUSTUP_TOOLCHAIN=",
+        "RUSTFLAGS=",
+        "CC=",
+        "CMAKE_C_COMPILER_LAUNCHER=",
+        "SEAWORTHY_",
+        "CI_PROJECT_DIR=",
+    ] {
+        assert!(
+            !cargo_saw.lines().any(|l| l.starts_with(name)),
+            "{name} reached seaworthy's build:\n{cargo_saw}"
+        );
+    }
     for file in [
         "bin/seaworthy",
         "scripts/seaworthy.sh",
@@ -1959,6 +2227,71 @@ fn the_prepare_step_builds_the_tool_plans_and_lints() {
     let out = prepare(&[("SEAWORTHY_TOOL_TARGET", elsewhere.to_str().unwrap())]);
     assert!(out.status.success(), "{}", said(&out));
     assert!(elsewhere.join("release/seaworthy").is_file());
+    // A cargo configuration above the private copy (TMPDIR's tree) would
+    // join seaworthy's build: refused.
+    let tmpdir = dir.path().join("tmp/inner");
+    std::fs::create_dir_all(&tmpdir).unwrap();
+    std::fs::create_dir_all(dir.path().join("tmp/.cargo")).unwrap();
+    std::fs::write(dir.path().join("tmp/.cargo/config.toml"), "").unwrap();
+    let out = prepare(&[("TMPDIR", tmpdir.to_str().unwrap())]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("would join seaworthy's own build"),
+        "{}",
+        said(&out)
+    );
+    // The product's build-metadata command runs before anything is staged:
+    // what it does to the checkout never reaches the scripts handed on.
+    let tamper = format!(
+        "echo '# changed by product code' >> {}; echo cafe12",
+        checkout.join("scripts/ci/seaworthy.sh").display()
+    );
+    let out = prepare(&[("SEAWORTHY_BUILD_COMMAND", tamper.as_str())]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read(dir.path().join("seaworthy/scripts/seaworthy.sh")).unwrap(),
+        std::fs::read(repo_root().join("scripts/ci/seaworthy.sh")).unwrap(),
+        "staged from the copy made before the command ran"
+    );
+    std::fs::copy(
+        repo_root().join("scripts/ci/seaworthy.sh"),
+        checkout.join("scripts/ci/seaworthy.sh"),
+    )
+    .unwrap();
+    // A release compiles seaworthy in a new directory of its own, never the
+    // cached one, and refuses the CI test-key switch.
+    let out = prepare(&[
+        ("SEAWORTHY_RELEASE", "1"),
+        ("CI_COMMIT_TAG", "v1.2.3"),
+        ("CI_PIPELINE_IID", "5"),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    let target = std::fs::read_to_string(&seen)
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("target=").map(str::to_owned))
+        .unwrap();
+    assert!(
+        !Path::new(&target).starts_with(&project),
+        "a release's tool never builds in the cached target directory: {target}"
+    );
+    assert!(
+        said(&out).contains("never comes from a cache"),
+        "{}",
+        said(&out)
+    );
+    let out = prepare(&[
+        ("SEAWORTHY_RELEASE", "1"),
+        ("CI_COMMIT_TAG", "v1.2.3"),
+        ("CI_PIPELINE_IID", "5"),
+        ("SEAWORTHY_ALLOW_CI_TEST_KEYS", "1"),
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("a release never trusts the CI test keys"),
+        "{}",
+        said(&out)
+    );
     // The release-ordering lint: a server that needs the publication
     // passes (the template's include read through --include, not warned
     // about); one that doesn't fails the job.
@@ -2214,15 +2547,60 @@ fn the_build_step_names_the_release_for_the_product_s_build_scripts() {
         std::fs::read_to_string(&seen).unwrap(),
         "SEAWORTHY_RELEASE_BUILD=deadbee\nSEAWORTHY_RELEASE_VERSION=2.0.0\n"
     );
-    // A record without a version is refused.
-    std::fs::write(work.join("release.env"), "SEAWORTHY_RELEASE_BUILD=x\n").unwrap();
-    let out = build(&[]);
-    assert!(!out.status.success());
-    assert!(
-        said(&out).contains("names no SEAWORTHY_RELEASE_VERSION"),
-        "{}",
-        said(&out)
-    );
+    // A record without a version, with a value twice, or with values the
+    // steps don't take, is refused: it's data, read strictly.
+    for (record, why) in [
+        (
+            "SEAWORTHY_RELEASE_BUILD=x\n",
+            "must name SEAWORTHY_RELEASE_VERSION once",
+        ),
+        (
+            "SEAWORTHY_RELEASE_VERSION=2.0.0\nSEAWORTHY_RELEASE_VERSION=3.0.0\n",
+            "must name SEAWORTHY_RELEASE_VERSION once",
+        ),
+        (
+            "SEAWORTHY_RELEASE_VERSION=2.0.0 $(id)\nSEAWORTHY_RELEASE_BUILD=x\n",
+            "isn't one",
+        ),
+        (
+            "SEAWORTHY_RELEASE_VERSION=2.0.0\nSEAWORTHY_RELEASE_BUILD=a..b\n",
+            "isn't build metadata",
+        ),
+    ] {
+        std::fs::write(work.join("release.env"), record).unwrap();
+        let out = build(&[]);
+        assert!(!out.status.success(), "{record}");
+        assert!(said(&out).contains(why), "{record}: {}", said(&out));
+    }
+    // seaworthy-formats' CI test-key switch reaches a build outside a
+    // release (a test lane's helper trusts the test keys), and fails every
+    // step of a release, whatever its value but empty or 0.
+    std::fs::write(
+        work.join("release.env"),
+        "SEAWORTHY_RELEASE_VERSION=2.0.0\nSEAWORTHY_RELEASE_BUILD=deadbee\n",
+    )
+    .unwrap();
+    let out = build(&[("SEAWORTHY_ALLOW_CI_TEST_KEYS", "1")]);
+    assert!(out.status.success(), "{}", said(&out));
+    for value in ["1", "yes"] {
+        let out = build(&[
+            ("SEAWORTHY_RELEASE", "1"),
+            ("SEAWORTHY_ALLOW_CI_TEST_KEYS", value),
+        ]);
+        assert!(!out.status.success(), "{value}");
+        assert!(
+            said(&out).contains("on a release: a release never trusts the CI test keys"),
+            "{}",
+            said(&out)
+        );
+    }
+    for value in ["", "0"] {
+        let out = build(&[
+            ("SEAWORTHY_RELEASE", "1"),
+            ("SEAWORTHY_ALLOW_CI_TEST_KEYS", value),
+        ]);
+        assert!(out.status.success(), "{value:?}: {}", said(&out));
+    }
 }
 
 /// Off GitLab the release is named by SEAWORTHY_TAG, SEAWORTHY_SEQUENCE
@@ -2927,7 +3305,8 @@ fn the_adopt_step_adopts_each_msi_into_a_copy_the_repo_step_publishes() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let log = dir.join("calls.log");
-    let bin = dir.join("seaworthy/bin");
+    // A stand-in seaworthy, as a job builds it for itself (SEAWORTHY_TOOL_BIN).
+    let bin = dir.join("stub-tool");
     std::fs::create_dir_all(&bin).unwrap();
     script_at(
         &bin.join("seaworthy"),
@@ -2965,7 +3344,12 @@ fn the_adopt_step_adopts_each_msi_into_a_copy_the_repo_step_publishes() {
     );
     std::fs::write(dir.join("seaworthy.toml"), "").unwrap();
     let calls = || std::fs::read_to_string(&log).unwrap_or_default();
-    let env = [("PATH", path.as_str()), ("SOURCE_DATE_EPOCH", "1700000000")];
+    let stub_tool = bin.join("seaworthy");
+    let env = [
+        ("PATH", path.as_str()),
+        ("SOURCE_DATE_EPOCH", "1700000000"),
+        ("SEAWORTHY_TOOL_BIN", stub_tool.to_str().unwrap()),
+    ];
 
     // The MSI job left none for the product with a .wxs, or two.
     let out = step(dir, &["adopt-msi"], &env);
@@ -3008,6 +3392,8 @@ fn the_adopt_step_adopts_each_msi_into_a_copy_the_repo_step_publishes() {
         ("SOURCE_DATE_EPOCH", "1700000000"),
         ("SEAWORTHY_RELEASE", "1"),
         ("CI_PIPELINE_IID", "9"),
+        ("SEAWORTHY_TOOL_BIN", stub_tool.to_str().unwrap()),
+        TRUSTED_CHECKOUT,
     ];
     let out = step(dir, &["adopt-msi"], &release);
     assert!(out.status.success(), "{}", said(&out));
@@ -3087,7 +3473,8 @@ fn a_dev_build_signs_with_authenticode_alone_on_a_protected_ref() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let log = dir.join("calls.log");
-    let bin = dir.join("seaworthy/bin");
+    // A stand-in seaworthy, as a job builds it for itself (SEAWORTHY_TOOL_BIN).
+    let bin = dir.join("stub-tool");
     std::fs::create_dir_all(&bin).unwrap();
     script_at(
         &bin.join("seaworthy"),
@@ -3096,14 +3483,11 @@ fn a_dev_build_signs_with_authenticode_alone_on_a_protected_ref() {
             log.display()
         ),
     );
-    // [authenticode] has the step build osslsigncode: a stand-in.
-    let scripts = dir.join("seaworthy/scripts");
-    std::fs::create_dir_all(&scripts).unwrap();
+    let stub_tool = bin.join("seaworthy");
+    // [authenticode] needs osslsigncode: a stand-in, as the tools step
+    // builds it before any secret is around (SEAWORTHY_OSSLSIGNCODE).
     script_at(&dir.join("osslsigncode"), "#!/bin/sh\nexit 0\n");
-    script_at(
-        &scripts.join("install-osslsigncode.sh"),
-        &format!("#!/bin/sh\necho {}\n", dir.join("osslsigncode").display()),
-    );
+    let osslsigncode = dir.join("osslsigncode");
     // Each secrets prefix notes which one ran.
     let prefix = |name: &str| {
         let path = dir.join(name);
@@ -3163,6 +3547,9 @@ fn a_dev_build_signs_with_authenticode_alone_on_a_protected_ref() {
         ("SEAWORTHY_SECRETS", release_secrets.as_str()),
         ("SEAWORTHY_DEV_SECRETS", dev_secrets.as_str()),
         ("GITLAB_CI", "true"),
+        ("SEAWORTHY_TOOL_BIN", stub_tool.to_str().unwrap()),
+        ("SEAWORTHY_OSSLSIGNCODE", osslsigncode.to_str().unwrap()),
+        TRUSTED_CHECKOUT,
     ];
 
     // In GitLab, a dev build on an unprotected ref is refused, before any
@@ -3606,4 +3993,89 @@ fn azure_sign_keeps_the_secret_and_the_token_off_every_command_line() {
         assert!(!out.status.success());
         assert!(said(&out).contains(mentions), "{mentions}: {}", said(&out));
     }
+}
+
+/// Credentials in the job's environment — the GitHub workflow's store and
+/// signing secrets, the runner's OIDC request variables, cloud
+/// credentials, GitLab's job token, an id token under any name, the
+/// key-env variables signing.toml names, SEAWORTHY_HELD_ENV's — reach the
+/// seaworthy call alone: git (and every other program the step runs) sees
+/// none of them.
+#[test]
+fn credentials_reach_the_seaworthy_call_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let seen_git = dir.join("git.env");
+    let seen_tool = dir.join("tool.env");
+    let path = stub_tools(
+        dir,
+        &[
+            "dpkg-deb",
+            "rpmsign",
+            "gpg",
+            "bsdtar",
+            "curl",
+            "desktop-file-validate",
+            "nfpm",
+        ],
+    );
+    script_at(
+        &dir.join("stubs/git"),
+        &format!(
+            "#!/usr/bin/env bash\nenv > {}\n[ \"$1\" = log ] && echo 1700000000\nexit 0\n",
+            seen_git.display()
+        ),
+    );
+    let tool = dir.join("stub-tool/seaworthy");
+    std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    script_at(
+        &tool,
+        &format!("#!/usr/bin/env bash\nenv > {}\n", seen_tool.display()),
+    );
+    std::fs::write(dir.join("seaworthy.toml"), "").unwrap();
+    std::fs::write(
+        dir.join("signing.toml"),
+        "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey-env = \"ACME_RELEASE_KEY_HEX\"\n\n[openpgp]\nsecret-key-env = 'ACME_REPO_KEY_ASC'\nkey = \"0123456789ABCDEF0123456789ABCDEF01234567\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("seaworthy/artifacts")).unwrap();
+    let nfpm = dir.join("stubs/nfpm");
+    let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJwcm9qZWN0In0.c2lnbmF0dXJl";
+    let credentials = [
+        ("SEAWORTHY_S3_SECRET_ACCESS_KEY", "s3-secret"),
+        ("SEAWORTHY_RELEASE_MANIFEST_KEY", "manifest-key"),
+        ("SEAWORTHY_GH_AUTHENTICODE_PASSWORD", "pfx-password"),
+        ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "oidc-request"),
+        ("ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.example.com"),
+        ("AZURE_CLIENT_SECRET", "azure-secret"),
+        ("AWS_SECRET_ACCESS_KEY", "aws-secret"),
+        ("CI_JOB_TOKEN", "job-token"),
+        ("SECRET_STORE_ID_TOKEN", jwt),
+        ("ACME_RELEASE_KEY_HEX", "acme-manifest"),
+        ("ACME_REPO_KEY_ASC", "acme-openpgp"),
+        ("ACME_VAULT_TOKEN", "acme-vault"),
+    ];
+    let mut env = vec![
+        ("PATH", path.as_str()),
+        ("NFPM", nfpm.to_str().unwrap()),
+        ("CI_PIPELINE_IID", "3"),
+        ("CI_COMMIT_SHORT_SHA", "0a1b2c3"),
+        ("SEAWORTHY_TOOL_BIN", tool.to_str().unwrap()),
+        ("SEAWORTHY_HELD_ENV", "ACME_VAULT_TOKEN"),
+        ("ACME_PLAIN", "not-a-secret"),
+    ];
+    env.extend(credentials);
+    let out = step(dir, &["package"], &env);
+    assert!(out.status.success(), "{}", said(&out));
+    let git = std::fs::read_to_string(&seen_git).unwrap();
+    let tool = std::fs::read_to_string(&seen_tool).unwrap();
+    for (name, value) in credentials {
+        assert!(!git.contains(value), "git was given {name}:\n{git}");
+        assert!(
+            tool.contains(&format!("{name}={value}\n")),
+            "seaworthy wasn't given {name}:\n{tool}"
+        );
+    }
+    assert!(git.contains("ACME_PLAIN=not-a-secret"), "{git}");
+    assert!(!said(&out).contains("s3-secret"), "never printed");
 }

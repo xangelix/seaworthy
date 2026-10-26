@@ -31,12 +31,28 @@
 #   seaworthy.sh repo              seaworthy repo after the published plan
 #                                   (from adopted/ when the MSI jobs ran)
 #   seaworthy.sh publish           seaworthy publish
+#   seaworthy.sh tools <step> [<env file>]
+#                                  the third-party tools <step> (package,
+#                                   adopt-msi) runs, installed ahead of it
+#                                   in a step that holds no secret: their
+#                                   paths as NFPM= and SEAWORTHY_OSSLSIGNCODE=
+#                                   lines appended to <env file> (GitHub's
+#                                   $GITHUB_ENV), else printed
+#
+# On a release or a dev build the signing steps (package, adopt-msi,
+# package-macos, repo, publish) trust nothing the prepare job handed on but
+# data: this script must run from seaworthy's own checkout
+# ($SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh), which builds seaworthy
+# afresh (or installs SEAWORTHY_TOOL_BIN, built in the same job), and the
+# tool installers run from beside it. The prepare job ran the product's
+# build-metadata command, so its bin/ and scripts/ could hold anything.
 #
 # Everything lives under $SEAWORTHY_WORK (default seaworthy), which the
 # template passes from job to job as artifacts:
 #
-#   bin/seaworthy         the tool, built once (prepare)
-#   scripts/              this script and the tool scripts the later jobs run
+#   bin/seaworthy         the tool, built once (prepare), for the build jobs
+#                         and the steps outside a release or a dev build
+#   scripts/              this script and the tool scripts those jobs run
 #   plan-<triple>.tsv     each target triple's build plan (seaworthy build-plan)
 #   artifacts/<triple>/   the built binaries (build), seaworthy's input layout
 #   dist/                 the packages (package)
@@ -56,12 +72,16 @@
 #                             package-macos sign with it (--ci-test-signing),
 #                             which repo refuses
 #   SEAWORTHY_PUBLISH         publish.toml: repo (its public-url), publish
-#   SEAWORTHY_CHECKOUT        prepare, package-macos: a seaworthy checkout
-#                             (default .seaworthy)
+#   SEAWORTHY_CHECKOUT        prepare, package-macos, and every signing step
+#                             of a release or a dev build: a seaworthy
+#                             checkout (default .seaworthy)
 #   SEAWORTHY_TARGET_DIR      build: the cargo target directories' root
 #                             (default $SEAWORTHY_WORK/target)
-#   SEAWORTHY_TOOL_TARGET     prepare, package-macos: seaworthy's target
-#                             directory (default $SEAWORTHY_WORK/tool-target)
+#   SEAWORTHY_TOOL_TARGET     prepare, package-macos outside a release or a
+#                             dev build: seaworthy's target directory
+#                             (default $SEAWORTHY_WORK/tool-target; the
+#                             template caches it). A release or a dev build
+#                             compiles in a new, private directory instead
 #   SEAWORTHY_MACOS_SCRATCH   package-macos: where seaworthy lays out and
 #                             signs the bundle (default
 #                             $SEAWORTHY_WORK/macos; the Mac template puts
@@ -102,25 +122,39 @@
 #                             to build and package, comma-separated
 #                             (default every product); the repository
 #                             package is built only for every product
-#   SEAWORTHY_TOOL_BIN        prepare, package-macos: a seaworthy binary
-#                             already built from the checkout (the GitHub
-#                             workflow's setup-seaworthy action), installed
-#                             instead of building one
+#   SEAWORTHY_TOOL_BIN        a seaworthy binary already built from the
+#                             checkout in this job (the GitHub workflow's
+#                             setup-seaworthy action), installed instead of
+#                             building one; never one under the work
+#                             directory (the prepare job's artifacts)
+#   SEAWORTHY_OSSLSIGNCODE    an osslsigncode the tools step built from its
+#                             pinned source, used instead of building it
 #   SEAWORTHY_UNSIGNED        1: no signer was given (the GitHub workflow
 #                             without signing secrets): package and
-#                             adopt-msi sign nothing, on a release (still
-#                             versioned from its tag; repo refuses it) or a
-#                             dev build
+#                             adopt-msi sign nothing — refused on a release
+#                             or a dev build unless SEAWORTHY_ALLOW_UNSIGNED
+#                             is 1 too (still versioned from its tag; repo
+#                             refuses it)
+#   SEAWORTHY_ALLOW_UNSIGNED  1: let a release or a dev build without a
+#                             signer go on, unsigned, with a warning
+#   SEAWORTHY_ALLOW_CI_TEST_KEYS
+#                             seaworthy-formats' build switch (1: the build
+#                             trusts the product's CI test keys): any value
+#                             but empty or 0 fails every step of a release,
+#                             and a release's package step refuses a built
+#                             binary carrying the test-key marker
 #   SEAWORTHY_MACOS_SIGN      1: on a release, package-macos signs with
 #                             SEAWORTHY_SIGNING (its [apple] Developer ID,
 #                             then notarization), and its listing is the
 #                             release's; else the macOS outputs stay ad
 #                             hoc-signed, outside the release
-#   SEAWORTHY_BUILD_COMMAND   a command (run with bash in the checkout)
-#                             printing the release's build metadata — the
-#                             build part of the product's version token,
-#                             [A-Za-z0-9.-], at most 64 characters (default:
-#                             CI_COMMIT_SHORT_SHA)
+#   SEAWORTHY_BUILD_COMMAND   prepare: a command (run with bash in the
+#                             checkout) printing the release's build
+#                             metadata — the build part of the product's
+#                             version token, [A-Za-z0-9.-], at most 64
+#                             characters (default: CI_COMMIT_SHORT_SHA). It
+#                             runs in prepare alone, before anything is
+#                             staged; the later steps read release.env
 #   SEAWORTHY_VERSION_FILE    a Cargo.toml whose literal [package] version
 #                             names a release that has no tag (one from a
 #                             branch) and every pipeline outside a release;
@@ -130,6 +164,10 @@
 #                             credentials it gives never reach tool installs
 #   SEAWORTHY_DEV_SECRETS     the same, on a dev build: the Authenticode
 #                             signer's credentials alone
+#   SEAWORTHY_HELD_ENV        more names of credentials in the job's
+#                             environment (comma or space separated) that
+#                             only the seaworthy call receives, beside
+#                             those held anyway (below)
 #   SEAWORTHY_PUBLISH_DRY_RUN
 #                             1: publish checks everything (the files, the
 #                             store, the public URL) and uploads nothing
@@ -144,6 +182,14 @@
 # The publish job's credentials (SEAWORTHY_S3_ACCESS_KEY_ID,
 # SEAWORTHY_S3_SECRET_ACCESS_KEY) come from the template's secrets wrapper,
 # never a file; this script never prints them.
+#
+# Credentials in the job's own environment (the GitHub workflow's signing
+# and store secrets, the runner's OIDC request variables, cloud
+# credentials, an id token, the key-env variables signing.toml names) are
+# taken out of the environment as the script starts and handed back to the
+# seaworthy call alone (and through it to signing commands alone), so
+# nothing else it runs — git, curl, the tool installers, pacman — inherits
+# them.
 set -euo pipefail
 # A command substitution inherits -e: a failing step inside one (a version,
 # the build metadata) stops the step instead of yielding an empty value.
@@ -161,9 +207,97 @@ tool="$work/bin/seaworthy"
 linux=x86_64-unknown-linux-gnu
 windows=x86_64-pc-windows-msvc
 macos=aarch64-apple-darwin
+# This script's own directory: the tool installers beside it are the ones
+# run (prepare's staged copies, or on a release seaworthy's checkout's).
+scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 fail() { echo "seaworthy: FAIL: $*" >&2; exit 1; }
 say() { echo "seaworthy: $*"; }
+# A warning a CI log shows as one (GitHub's annotation, else plain).
+warn() {
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        echo "::warning::seaworthy: $*"
+    else
+        echo "seaworthy: WARNING: $*" >&2
+    fi
+}
+
+# Private directories this run made (a fresh tool build, its source copy),
+# removed when it ends, however it ends.
+private_dirs=()
+cleanup() {
+    local dir
+    for dir in "${private_dirs[@]}"; do
+        [ -n "$dir" ] && rm -rf "$dir"
+    done
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+private_dir() { # sets `made` to a new private directory
+    made="$(umask 077 && mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/seaworthy.XXXXXXXX")"
+    private_dirs+=("$made")
+}
+
+# A release: the version from the tag, the signing configuration required.
+release() { [ "${SEAWORTHY_RELEASE:-0}" = 1 ]; }
+
+# The credentials this script holds back from everything but the seaworthy
+# call (with_secrets): taken out of the environment here, before anything
+# runs. By name: the GitHub workflow's signing and store secrets and its
+# PKCS#12 inputs, any SEAWORTHY_*_KEY, the runner's OIDC request and
+# runtime tokens, cloud credentials (AZURE_*, AWS_*, GOOGLE_*), GitLab's
+# job token, the key-env and secret-key-env variables signing.toml names,
+# SEAWORTHY_HELD_ENV's; by value: an id token (a JWT, as GitLab's id_tokens
+# hand them over under any name).
+declare -A held=()
+hold_credentials() {
+    local names=() name extra=() signing="${SEAWORTHY_SIGNING:-signing.toml}"
+    mapfile -t names < <(compgen -e)
+    local held_env="${SEAWORTHY_HELD_ENV:-}"
+    read -r -a extra <<<"${held_env//,/ }"
+    if [ -f "$signing" ]; then
+        # signing.toml's key-env = "NAME" and secret-key-env = "NAME" lines.
+        while IFS= read -r name; do extra+=("$name"); done < <(sed -n \
+            's/^[[:space:]]*\(secret-\)\{0,1\}key-env[[:space:]]*=[[:space:]]*["'\'']\([A-Za-z_][A-Za-z0-9_]*\)["'\''].*/\2/p' \
+            "$signing")
+    fi
+    for name in "${names[@]}"; do
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        local hold=0 wanted
+        case "$name" in
+            SEAWORTHY_RELEASE_MANIFEST_KEY | SEAWORTHY_OPENPGP_SECRET_KEY | SEAWORTHY_S3_* | \
+                SEAWORTHY_GH_AUTHENTICODE_PFX | SEAWORTHY_GH_AUTHENTICODE_PASSWORD | \
+                SEAWORTHY_GH_APPLE_P12 | SEAWORTHY_GH_APPLE_P12_PASSWORD | SEAWORTHY_GH_APPLE_NOTARY_KEY | \
+                SEAWORTHY_*_KEY | ACTIONS_ID_TOKEN_REQUEST_* | ACTIONS_RUNTIME_TOKEN | \
+                AZURE_* | AWS_* | GOOGLE_* | CI_JOB_TOKEN | CI_JOB_JWT* | GITHUB_TOKEN | GH_TOKEN)
+                hold=1 ;;
+        esac
+        for wanted in "${extra[@]}"; do
+            [ "$name" = "$wanted" ] && hold=1
+        done
+        if [ "$hold" = 0 ] && [[ "${!name}" =~ ^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$ ]]; then
+            hold=1
+        fi
+        if [ "$hold" = 1 ]; then
+            held[$name]="${!name}"
+            unset "$name"
+        fi
+    done
+}
+hold_credentials
+
+# A release never builds or packages binaries that trust the product's CI
+# test keys: seaworthy-formats' switch (1 turns it on) must be off, in
+# every step of a release.
+check_test_keys_switch() {
+    release || return 0
+    case "${SEAWORTHY_ALLOW_CI_TEST_KEYS:-}" in
+        "" | 0) ;;
+        *) fail "SEAWORTHY_ALLOW_CI_TEST_KEYS is ${SEAWORTHY_ALLOW_CI_TEST_KEYS@Q} on a release: a release never trusts the CI test keys (unset it, or set it to 0)" ;;
+    esac
+}
+check_test_keys_switch
 
 # A job's image may run as another user than the one owning its checkout,
 # and git then refuses the checkout as "dubious ownership": install-nfpm.sh
@@ -206,9 +340,6 @@ need_file() { # <path> <what>
     [ -f "$1" ] || fail "$2: $1 doesn't exist"
 }
 
-# A release: the version from the tag, the signing configuration required.
-release() { [ "${SEAWORTHY_RELEASE:-0}" = 1 ]; }
-
 # Whether product <id> has outputs for any of <triple>s (its build plan
 # there isn't refused as having none).
 product_has() { # <id> <triple>...
@@ -238,8 +369,19 @@ selected_products() {
     done
 }
 
-# No signer at all, on a release too (SEAWORTHY_UNSIGNED=1).
-unsigned() { [ "${SEAWORTHY_UNSIGNED:-0}" = 1 ]; }
+# No signer at all (SEAWORTHY_UNSIGNED=1). On a release or a dev build
+# that's refused unless SEAWORTHY_ALLOW_UNSIGNED=1 says it's meant, and then
+# said loudly: a misnamed secret must not quietly ship unsigned packages.
+unsigned() {
+    [ "${SEAWORTHY_UNSIGNED:-0}" = 1 ] || return 1
+    if release || dev_sign; then
+        local what=release
+        release || what="dev build"
+        [ "${SEAWORTHY_ALLOW_UNSIGNED:-0}" = 1 ] ||
+            fail "a $what with no signer: no signing secret or signing.toml reached this job (allow an unsigned $what on purpose with SEAWORTHY_ALLOW_UNSIGNED=1, the GitHub workflow's allow-unsigned input)"
+        warn "an UNSIGNED $what (SEAWORTHY_ALLOW_UNSIGNED=1): no manifests, no signatures; the repositories refuse it and no update helper installs it"
+    fi
+}
 
 # A dev build: not a release, but its Windows binaries and MSIs
 # carry the release's Authenticode signature (nothing else is signed, and
@@ -258,11 +400,11 @@ ci_test_sign() {
     # git checks the test keys out 0644, and seaworthy signs only with key
     # files no one else can read: the file's directory, keys beside it, goes
     # into a private copy first.
-    local private
-    private="$(mktemp -d)"
-    cp -R "$(dirname "$SEAWORTHY_CI_SIGNING")/." "$private/"
-    chmod -R go-rwx "$private"
-    ci_test_signing=(--ci-test-signing "$private/$(basename "$SEAWORTHY_CI_SIGNING")")
+    local made
+    private_dir
+    cp -R "$(dirname "$SEAWORTHY_CI_SIGNING")/." "$made/"
+    chmod -R go-rwx "$made"
+    ci_test_signing=(--ci-test-signing "$made/$(basename "$SEAWORTHY_CI_SIGNING")")
 }
 
 # In GitLab, a release or a dev build runs on a protected ref only: a
@@ -278,7 +420,10 @@ check_release_ref() {
 }
 
 # Runs a seaworthy command, under the secrets prefix on a release, or the
-# dev secrets prefix on a dev build (its words, never globbed or re-parsed).
+# dev secrets prefix on a dev build (its words, never globbed or re-parsed),
+# with the credentials held back at the start (hold_credentials) back in
+# its environment: exported in a subshell that becomes the command, so no
+# value is ever on a command line.
 with_secrets() {
     local prefix=()
     if release && [ -n "${SEAWORTHY_SECRETS:-}" ]; then
@@ -286,7 +431,13 @@ with_secrets() {
     elif dev_sign && [ -n "${SEAWORTHY_DEV_SECRETS:-}" ]; then
         read -r -a prefix <<<"$SEAWORTHY_DEV_SECRETS"
     fi
-    "${prefix[@]}" "$@"
+    (
+        local name
+        for name in "${!held[@]}"; do
+            export "$name=${held[$name]}"
+        done
+        exec "${prefix[@]}" "$@"
+    )
 }
 
 # The nFPM binary: $NFPM, else the pinned release (a failed download stops
@@ -297,7 +448,7 @@ nfpm_path() {
         return
     fi
     local path
-    path="$("$work/scripts/install-nfpm.sh")" || fail "installing nFPM failed"
+    path="$("$scripts/install-nfpm.sh")" || fail "installing nFPM failed"
     [ -x "$path" ] || fail "install-nfpm.sh left no nFPM at ${path@Q}"
     echo "$path"
 }
@@ -347,7 +498,7 @@ build_metadata() {
     built="$(bash -eo pipefail -c "$SEAWORTHY_BUILD_COMMAND")" ||
         fail "the build-metadata command failed: ${SEAWORTHY_BUILD_COMMAND@Q}"
     # SemVer build metadata (seaworthy's --build rule), whatever the locale.
-    if ! LC_ALL=C bash -c '[[ ${#1} -le 64 && $1 =~ ^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]]' _ "$built"; then
+    if ! build_ok "$built"; then
         fail "the build-metadata command printed ${built@Q}: build metadata is dot-separated, non-empty identifiers of A-Z a-z 0-9 -, at most 64 characters"
     fi
     echo "$built"
@@ -359,16 +510,38 @@ build_metadata() {
 # SEAWORTHY_RELEASE_VERSION and SEAWORTHY_RELEASE_BUILD), so the token its
 # gate names is the name the package step gives the release.
 release_identity() {
-    local file="$work/release.env" version build
-    if [ -f "$file" ]; then
-        version="$(sed -n 's/^SEAWORTHY_RELEASE_VERSION=//p' "$file")"
-        build="$(sed -n 's/^SEAWORTHY_RELEASE_BUILD=//p' "$file")"
-        [ -n "$version" ] || fail "$file names no SEAWORTHY_RELEASE_VERSION"
+    local version build
+    if read_release_env; then
+        version="$release_env_version" build="$release_env_build"
     else
         version="$(version)" || exit 1
         build="$(build_metadata)" || exit 1
     fi
     echo "$version $build"
+}
+
+# Build metadata as seaworthy's --build takes it (SemVer's), whatever the
+# locale.
+build_ok() { # <build>
+    LC_ALL=C bash -c '[[ ${#1} -le 64 && $1 =~ ^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]]' _ "$1"
+}
+
+# prepare's release.env, read strictly into release_env_version and
+# release_env_build (each named once, each as the steps take it); returns 1
+# when there is none. It's data: never sourced.
+release_env_version="" release_env_build=""
+read_release_env() {
+    local file="$work/release.env" versions=() builds=()
+    [ -f "$file" ] || return 1
+    mapfile -t versions < <(sed -n 's/^SEAWORTHY_RELEASE_VERSION=//p' "$file")
+    mapfile -t builds < <(sed -n 's/^SEAWORTHY_RELEASE_BUILD=//p' "$file")
+    [ "${#versions[@]}" -eq 1 ] && [ "${#builds[@]}" -le 1 ] ||
+        fail "$file must name SEAWORTHY_RELEASE_VERSION once and SEAWORTHY_RELEASE_BUILD at most once"
+    release_env_version="${versions[0]}" release_env_build="${builds[0]:-}"
+    [[ "$release_env_version" =~ ^[0-9A-Za-z.-]{1,128}$ ]] ||
+        fail "$file names the version ${release_env_version@Q}, which isn't one"
+    [ -z "$release_env_build" ] || build_ok "$release_env_build" ||
+        fail "$file names the build ${release_env_build@Q}, which isn't build metadata"
 }
 
 sequence() {
@@ -399,43 +572,178 @@ check_checkout() { # <checkout>
     fi
 }
 
-# seaworthy, built from the checkout into <path>. Its target directory sits
-# outside the checkout: a cache restored before the fetch must not make the
-# checkout's directory exist. SEAWORTHY_TOOL_BIN names one already built
-# from the checkout (the GitHub workflow's setup-seaworthy action, keyed by
-# the checkout's commit), installed as is.
+# A path under the work directory: the prepare job's artifacts, which
+# product code (its build-metadata command) could have changed.
+under_work() { # <path>
+    [ -d "$work" ] || return 1
+    local root path
+    root="$(cd "$work" && pwd -P)"
+    path="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+    case "$path" in "$root"/*) return 0 ;; esac
+    return 1
+}
+
+# Refuses a cargo configuration file in a directory above <dir>: cargo reads
+# every .cargo/config.toml from the directory it runs in upward, and one
+# there would join seaworthy's own build. CARGO_HOME's (the image's) is read
+# by every build, and allowed.
+cargo_configs_above() { # <dir>
+    local dir file cargo_home="${CARGO_HOME:-${HOME:-/nonexistent}/.cargo}"
+    [ ! -d "$cargo_home" ] || cargo_home="$(cd "$cargo_home" && pwd -P)"
+    dir="$(cd "$1" && pwd -P)"
+    while [ "$dir" != / ]; do
+        dir="$(dirname "$dir")"
+        for file in "$dir/.cargo/config" "$dir/.cargo/config.toml"; do
+            [ -e "$file" ] || continue
+            [ "$(cd "$dir/.cargo" && pwd -P)" != "$cargo_home" ] || continue
+            fail "$file would join seaworthy's own build (cargo reads every .cargo/config.toml above the directory it builds in): remove it, or point TMPDIR elsewhere"
+        done
+    done
+}
+
+# Runs <command> with the system's basics alone in its environment: no
+# RUSTC_WRAPPER or compiler cache, no CARGO_* or RUSTFLAGS override, no
+# RUSTUP_TOOLCHAIN, no CC or CFLAGS (which the crypto module's C build
+# reads), nothing a product sets for its own builds. Unset in a subshell that
+# becomes the command, so no value lands on a command line.
+tool_build_env() { # <command>...
+    (
+        local name
+        while IFS= read -r name; do
+            case "$name" in
+                PATH | HOME | USER | LOGNAME | LANG | TMPDIR | TZ | CARGO_HOME | RUSTUP_HOME | \
+                    RUSTUP_DIST_SERVER | RUSTUP_UPDATE_ROOT | RUSTUP_MAX_RETRIES | CARGO_NET_RETRY | \
+                    CARGO_TERM_COLOR | CARGO_HTTP_CAINFO | CARGO_HTTP_PROXY | CARGO_HTTP_TIMEOUT | \
+                    SSL_CERT_FILE | SSL_CERT_DIR | http_proxy | https_proxy | no_proxy | HTTP_PROXY | \
+                    HTTPS_PROXY | NO_PROXY | ALL_PROXY | all_proxy | DEVELOPER_DIR) ;;
+                *) unset "$name" 2>/dev/null || true ;;
+            esac
+        done < <(compgen -e)
+        export CARGO_INCREMENTAL=0
+        exec "$@"
+    )
+}
+
+# seaworthy, built from the checkout into <path> so that nothing of the
+# product's reaches it: from a copy of the checkout outside the product's
+# tree (cargo reads every .cargo/config.toml from the directory it runs in
+# upward, rustup the nearest rust-toolchain.toml: the copy's own, seaworthy's
+# pinned toolchain), in the environment tool_build_env leaves, and on a
+# release or a dev build into a new target directory, never a cached one.
+# Outside those, the target directory is SEAWORTHY_TOOL_TARGET (the
+# template caches it; outside the checkout, so a restored cache can't make
+# the checkout's directory exist). SEAWORTHY_TOOL_BIN names one already
+# built from the checkout in this job (the GitHub workflow's
+# setup-seaworthy action, which builds it the same way), installed as is.
 build_tool() { # <checkout> <path>
     if [ -n "${SEAWORTHY_TOOL_BIN:-}" ]; then
         need_file "$SEAWORTHY_TOOL_BIN" "seaworthy (SEAWORTHY_TOOL_BIN)"
+        ! under_work "$SEAWORTHY_TOOL_BIN" ||
+            fail "SEAWORTHY_TOOL_BIN is under $work, the prepare job's artifacts: never a seaworthy to run"
         say "seaworthy from $SEAWORTHY_TOOL_BIN"
         mkdir -p "$(dirname "$2")"
         install -m 0755 "$SEAWORTHY_TOOL_BIN" "$2"
         return
     fi
-    local tool_target="${SEAWORTHY_TOOL_TARGET:-$work/tool-target}"
-    say "building seaworthy from $1"
-    cargo build --quiet --release --locked --manifest-path "$1/Cargo.toml" -p seaworthy \
-        --target-dir "$tool_target"
+    local made src target
+    private_dir
+    src="$made"
+    # The checkout's files, without its target directory or git metadata.
+    (cd "$1" && tar --exclude=./target --exclude=./.git -cf - .) | (cd "$src" && tar -xf -)
+    cargo_configs_above "$src"
+    if release || dev_sign; then
+        private_dir
+        target="$made"
+        say "building seaworthy from $1, in a new target directory (a release's tool never comes from a cache)"
+    else
+        target="${SEAWORTHY_TOOL_TARGET:-$work/tool-target}"
+        mkdir -p "$target"
+        target="$(cd "$target" && pwd -P)"
+        say "building seaworthy from $1"
+    fi
+    (
+        cd "$src"
+        # seaworthy's pinned toolchain (rustup installs it only when asked).
+        if command -v rustup >/dev/null 2>&1 && { [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; }; then
+            tool_build_env rustup toolchain install >/dev/null 2>&1 || true
+        fi
+        tool_build_env cargo build --quiet --release --locked -p seaworthy --target-dir "$target"
+    )
     mkdir -p "$(dirname "$2")"
-    install -m 0755 "$tool_target/release/seaworthy" "$2"
+    install -m 0755 "$target/release/seaworthy" "$2"
 }
+
+# On a release or a dev build, a signing step must run from seaworthy's own
+# checkout (its script and the tool installers beside it), never from the
+# prepare job's copies.
+require_own_checkout() {
+    release || dev_sign || return 0
+    local checkout="${SEAWORTHY_CHECKOUT:-.seaworthy}" own
+    check_checkout "$checkout"
+    own="$(cd "$checkout/scripts/ci" && pwd -P)"
+    [ "$scripts" = "$own" ] ||
+        fail "a release or a dev build runs $step from seaworthy's own checkout ($checkout/scripts/ci/seaworthy.sh), not $scripts/seaworthy.sh: the prepare job's copies could have been changed by product code"
+}
+
+# A signing step's seaworthy: on a release or a dev build built afresh from
+# the checkout, never the prepare job's bin/seaworthy; on any build,
+# SEAWORTHY_TOOL_BIN when a job built one for itself (the GitHub workflow's
+# signing jobs).
+trusted_tool() {
+    if release || dev_sign; then
+        require_own_checkout
+    elif [ -z "${SEAWORTHY_TOOL_BIN:-}" ]; then
+        return 0
+    fi
+    local made
+    private_dir
+    tool="$made/seaworthy"
+    build_tool "${SEAWORTHY_CHECKOUT:-.seaworthy}" "$tool"
+}
+
+# A release's binaries never trust the CI test keys: none may carry the
+# marker a build with seaworthy-formats' switch leaves in it (seaworthy
+# verify refuses them too; this is the pipeline's own check).
+check_no_test_key_marker() { # <dir>
+    release || return 0
+    [ -d "$1" ] || return 0
+    local found
+    found="$(grep -rlaF -- 'seaworthy-ci-test-keys:trusted:1' "$1" | head -n 5 || true)"
+    [ -z "$found" ] ||
+        fail "a release's binaries were built with the CI test-key switch (SEAWORTHY_ALLOW_CI_TEST_KEYS=1): $(tr '\n' ' ' <<<"$found")"
+}
+
+# The files prepare hands on beside the tool: what the build jobs run, the
+# tool installers and the azure-sign.sh signer of the steps outside a
+# release, and the template (the release-ordering lint's --include).
+staged_scripts=(scripts/ci/seaworthy.sh scripts/ci/seaworthy-build.ps1 scripts/ci/install-nfpm.sh
+    scripts/ci/install-osslsigncode.sh scripts/ci/seaworthy-msi.ps1 scripts/ci/azure-sign.sh)
 
 prepare() {
     local checkout="${SEAWORTHY_CHECKOUT:-.seaworthy}"
     check_checkout "$checkout"
     need_file "$config" "seaworthy.toml (the template's seaworthy-toml)"
     check_release_ref
-    mkdir -p "$work/bin" "$work/scripts"
+    # The tool and the scripts, built and copied into a private directory
+    # first: the product's build-metadata command (below) runs in the
+    # checkout, and they're staged from those copies only after it. (The
+    # signing steps of a release or a dev build trust none of this job's
+    # artifacts anyway: they build seaworthy from its own checkout.)
+    local made staging file
+    private_dir
+    staging="$made"
+    tool="$staging/bin/seaworthy"
     build_tool "$checkout" "$tool"
-    install -m 0755 "$checkout/scripts/ci/seaworthy.sh" "$checkout/scripts/ci/seaworthy-build.ps1" \
-        "$checkout/scripts/ci/install-nfpm.sh" "$checkout/scripts/ci/install-osslsigncode.sh" \
-        "$checkout/scripts/ci/seaworthy-msi.ps1" "$checkout/scripts/ci/azure-sign.sh" \
-        "$work/scripts/"
-    install -m 0644 "$checkout/ci/gitlab/seaworthy.yml" "$work/scripts/"
+    mkdir -p "$staging/scripts"
+    for file in "${staged_scripts[@]}"; do
+        install -m 0755 "$checkout/$file" "$staging/scripts/"
+    done
+    install -m 0644 "$checkout/ci/gitlab/seaworthy.yml" "$staging/scripts/"
     "$tool" check --config "$config"
     local release_version release_build
     release_version="$(version)"
     release_build="$(build_metadata)"
+    mkdir -p "$work"
     printf 'SEAWORTHY_RELEASE_VERSION=%s\nSEAWORTHY_RELEASE_BUILD=%s\n' "$release_version" "$release_build" \
         > "$work/release.env"
     say "the release: $release_version${release_build:++$release_build}"
@@ -490,10 +798,15 @@ prepare() {
         local clients="seaworthy-publish"
         [ -z "${SEAWORTHY_CLIENT_JOBS:-}" ] || clients="$clients,$SEAWORTHY_CLIENT_JOBS"
         "$tool" ci-order --ci "${CI_CONFIG_PATH:-.gitlab-ci.yml}" --root "${CI_PROJECT_DIR:-.}" \
-            --include "$work/scripts/seaworthy.yml" --server "$servers" --client "$clients"
+            --include "$staging/scripts/seaworthy.yml" --server "$servers" --client "$clients"
     else
         say "no server deploy job named (server-deploy-jobs): nothing to order"
     fi
+    # Staged last, from the private copies.
+    rm -rf "${work:?}/bin" "${work:?}/scripts"
+    mkdir -p "$work/bin" "$work/scripts"
+    install -m 0755 "$tool" "$work/bin/seaworthy"
+    cp -p "$staging/scripts/"* "$work/scripts/"
 }
 
 build() { # <triple> [<target dir>]
@@ -649,16 +962,18 @@ packaging_release() {
     release_sequence="$(sequence)"
     check_release_ref
     # The binaries were built for the release prepare named (their version
-    # tokens): packaging them as another would ship a gate that never
-    # matches its manifests.
-    local identity current_build
-    identity="$(release_identity)"
-    release_build="${identity#* }"
-    # The product's build-metadata command runs again here, once: it must
-    # print what it printed in prepare (it names this commit).
-    current_build="$(build_metadata)"
-    if [ -f "$work/release.env" ] && [ "$identity" != "$release_version $current_build" ]; then
-        fail "the build jobs built release $identity (prepare's), but this is $release_version $current_build"
+    # tokens, release.env): packaging them as another would ship a gate that
+    # never matches its manifests. The product's build-metadata command
+    # never runs here: a signing step runs no product code, it reads what
+    # prepare recorded.
+    if read_release_env; then
+        [ "$release_env_version" = "$release_version" ] ||
+            fail "the build jobs built release $release_env_version (prepare's release.env), but this is $release_version"
+        release_build="$release_env_build"
+    else
+        [ -z "${SEAWORTHY_BUILD_COMMAND:-}" ] ||
+            fail "no $work/release.env (the prepare job's): the build-metadata command runs in prepare alone, and this step reads what it printed there"
+        release_build="$(build_metadata)"
     fi
 }
 
@@ -671,11 +986,17 @@ source_date_epoch() {
 }
 
 package() {
-    need_file "$tool" "seaworthy (from the prepare job)"
     need_file "$config" "seaworthy.toml (the template's seaworthy-toml)"
     [ -d "$work/artifacts" ] || fail "no $work/artifacts (from the build jobs)"
+    # A release or a dev build without a signer: refused here, before any
+    # work, unless SEAWORTHY_ALLOW_UNSIGNED=1.
+    local no_signer=0
+    if unsigned; then no_signer=1; fi
+    trusted_tool
+    need_file "$tool" "seaworthy (from the prepare job)"
     local release_version release_sequence release_build
     packaging_release
+    check_no_test_key_marker "$work/artifacts"
     # desktop-file-validate: package checks every desktop product's menu
     # entry with it.
     need_tools dpkg-deb:dpkg rpmsign:rpm-tools gpg:gnupg bsdtar:libarchive curl:curl git:git \
@@ -684,7 +1005,7 @@ package() {
     export NFPM
     source_date_epoch
     local signing=()
-    if unsigned && { release || dev_sign; }; then
+    if [ "$no_signer" = 1 ] && { release || dev_sign; }; then
         say "no signer was given: unsigned packages, version $release_version (the repositories refuse them)"
     elif release; then
         local file="${SEAWORTHY_SIGNING:-signing.toml}"
@@ -731,11 +1052,19 @@ package_macos() {
     check_checkout "$checkout"
     need_file "$config" "seaworthy.toml (the template's seaworthy-toml)"
     [ -d "$work/artifacts/$macos" ] || fail "no $work/artifacts/$macos (from the build step)"
-    # The Mac's own seaworthy: the prepare job's is a Linux binary.
-    tool="$work/macos-bin/seaworthy"
+    # A release that signs runs this script from seaworthy's own checkout.
+    if release && [ "${SEAWORTHY_MACOS_SIGN:-0}" = 1 ]; then
+        require_own_checkout
+    fi
+    # The Mac's own seaworthy (the prepare job's is a Linux binary), built
+    # from the checkout into a private directory.
+    local made
+    private_dir
+    tool="$made/seaworthy"
     build_tool "$checkout" "$tool"
     local release_version release_sequence release_build
     packaging_release
+    check_no_test_key_marker "$work/artifacts/$macos"
     local signing=()
     if release && [ "${SEAWORTHY_MACOS_SIGN:-0}" = 1 ]; then
         local file="${SEAWORTHY_SIGNING:-signing.toml}"
@@ -785,9 +1114,15 @@ signing_tools() { # <signing.toml>
     local file="$1"
     need_file "$file" "signing.toml (the template's signing-toml; a release or a dev build is signed)"
     if grep -q '^\[authenticode\]' "$file"; then
-        need_tools cmake:cmake
-        local osslsigncode
-        osslsigncode="$("$work/scripts/install-osslsigncode.sh")" || fail "building osslsigncode failed"
+        local osslsigncode="${SEAWORTHY_OSSLSIGNCODE:-}"
+        if [ -n "$osslsigncode" ]; then
+            # The tools step's (GitHub: built before any secret was here).
+            ! under_work "$osslsigncode" ||
+                fail "SEAWORTHY_OSSLSIGNCODE is under $work, the prepare job's artifacts"
+        else
+            need_tools cmake:cmake
+            osslsigncode="$("$scripts/install-osslsigncode.sh")" || fail "building osslsigncode failed"
+        fi
         [ -x "$osslsigncode" ] || fail "install-osslsigncode.sh left no osslsigncode at ${osslsigncode@Q}"
         PATH="$(dirname "$osslsigncode"):$PATH"
         export PATH
@@ -803,13 +1138,16 @@ signing_tools() { # <signing.toml>
 # its manifest and SBOM. Every product
 # with a .wxs must have exactly its one MSI.
 adopt_msi() {
-    need_file "$tool" "seaworthy (from the prepare job)"
     [ -d "$work/dist" ] || fail "no $work/dist (from the package job)"
     check_release_ref
+    local no_signer=0
+    if unsigned; then no_signer=1; fi
+    trusted_tool
+    need_file "$tool" "seaworthy (from the prepare job)"
     need_tools msiextract:msitools msiinfo:msitools
     source_date_epoch
     local signing=()
-    if unsigned && { release || dev_sign; }; then
+    if [ "$no_signer" = 1 ] && { release || dev_sign; }; then
         say "no signer was given: the MSIs stay unsigned"
     elif release; then
         local file="${SEAWORTHY_SIGNING:-signing.toml}"
@@ -857,13 +1195,14 @@ public_url() {
 }
 
 repo() {
-    need_file "$tool" "seaworthy (from the prepare job)"
     # The adopt job's copy when the Windows MSI jobs ran (it lists the MSIs).
     local packages_dir="$work/dist"
     [ -d "$work/adopted" ] && packages_dir="$work/adopted"
     [ -d "$packages_dir" ] || fail "no $work/dist (from the package job)"
     release || fail "repo runs on a release only (the template's rules)"
     check_release_ref
+    trusted_tool
+    need_file "$tool" "seaworthy (from the prepare job)"
     need_tools dpkg-scanpackages:dpkg dpkg-deb:dpkg createrepo_c:createrepo_c repo-add:pacman \
         bsdtar:libarchive rpmkeys:rpm-tools gpg:gnupg curl:curl
     local signing_file="${SEAWORTHY_SIGNING:-signing.toml}" url status previous=()
@@ -908,23 +1247,61 @@ repo() {
 }
 
 publish() {
-    need_file "$tool" "seaworthy (from the prepare job)"
     [ -f "$work/repo/publish-plan.json" ] || fail "no $work/repo (from the repo job)"
     release || fail "publish runs on a release only (the template's rules)"
     check_release_ref
-    need_tools curl:curl
     local target="${SEAWORTHY_PUBLISH:-publish.toml}"
     need_file "$target" "publish.toml (the template's publish-toml)"
+    # Held at the start (hold_credentials): the seaworthy call alone gets them.
     if [ -z "${SEAWORTHY_SECRETS:-}" ]; then
-        [ -n "${SEAWORTHY_S3_ACCESS_KEY_ID:-}" ] && [ -n "${SEAWORTHY_S3_SECRET_ACCESS_KEY:-}" ] ||
+        [ -n "${held[SEAWORTHY_S3_ACCESS_KEY_ID]:-}" ] && [ -n "${held[SEAWORTHY_S3_SECRET_ACCESS_KEY]:-}" ] ||
             fail "the store's credentials (SEAWORTHY_S3_ACCESS_KEY_ID, SEAWORTHY_S3_SECRET_ACCESS_KEY) aren't set: the template's publish-secrets provides them"
     fi
+    trusted_tool
+    need_file "$tool" "seaworthy (from the prepare job)"
+    need_tools curl:curl
     local dry_run=()
     if [ "${SEAWORTHY_PUBLISH_DRY_RUN:-0}" = 1 ]; then
         dry_run=(--dry-run)
         say "a dry run (SEAWORTHY_PUBLISH_DRY_RUN=1): everything is checked, nothing uploaded or deleted"
     fi
     with_secrets "$tool" publish --repo "$work/repo" --target "$target" "${dry_run[@]}"
+}
+
+# The third-party tools <step> runs, installed ahead of it: on GitHub by a
+# step of its own that holds no secret (nothing the signing step later holds
+# is in their environment, or their parent's). nFPM for package (the pinned
+# release, hash-checked); osslsigncode (built from its pinned source) for a
+# release's or a dev build's Authenticode: adopt-msi's, and package's when a
+# Windows plan exists. Their paths go to <env file> as NFPM= and
+# SEAWORTHY_OSSLSIGNCODE= lines, or are printed.
+tools_step() { # <step> [<env file>]
+    local for="${1:-}" file="${2:-}" lines=() line
+    case "$for" in
+        package | adopt-msi) ;;
+        *) fail "tools: package or adopt-msi, not ${for@Q}" ;;
+    esac
+    require_own_checkout
+    if [ "$for" = package ]; then
+        NFPM="$(nfpm_path)"
+        lines+=("NFPM=$NFPM")
+    fi
+    if { release || dev_sign; } && { [ "$for" = adopt-msi ] || [ -f "$work/plan-$windows.tsv" ]; }; then
+        need_tools cmake:cmake
+        local osslsigncode
+        osslsigncode="$("$scripts/install-osslsigncode.sh")" || fail "building osslsigncode failed"
+        [ -x "$osslsigncode" ] || fail "install-osslsigncode.sh left no osslsigncode at ${osslsigncode@Q}"
+        lines+=("SEAWORTHY_OSSLSIGNCODE=$osslsigncode")
+    fi
+    for line in "${lines[@]}"; do
+        [[ "$line" != *[[:cntrl:]]* ]] || fail "a tool's path holds a control character: ${line@Q}"
+        if [ -n "$file" ]; then
+            printf '%s\n' "$line" >> "$file"
+        else
+            printf '%s\n' "$line"
+        fi
+        say "tools: $line"
+    done
 }
 
 step="${1:-}"
@@ -937,5 +1314,6 @@ case "$step" in
     adopt-msi) adopt_msi ;;
     repo) repo ;;
     publish) publish ;;
-    *) echo "usage: $0 prepare|build <triple>|package|package-macos|adopt-msi|repo|publish" >&2; exit 2 ;;
+    tools) tools_step "$@" ;;
+    *) echo "usage: $0 prepare|build <triple>|package|package-macos|adopt-msi|repo|publish|tools <step> [<env file>]" >&2; exit 2 ;;
 esac

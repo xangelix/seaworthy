@@ -90,8 +90,10 @@ seaworthy-macos:
     - rustup toolchain install 2>/dev/null || true
     - (cd "$SEAWORTHY_CHECKOUT" && rustup toolchain install 2>/dev/null) || true
     - sw_vers && uname -m && bash --version | head -1 && cargo --version
-    - bash seaworthy/scripts/seaworthy.sh build aarch64-apple-darwin
-    - bash seaworthy/scripts/seaworthy.sh package-macos
+    # The checkout's script, which builds seaworthy here (the prepare job's
+    # is a Linux binary).
+    - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" build aarch64-apple-darwin
+    - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" package-macos
   artifacts:
     paths:
       - seaworthy/dist-macos/
