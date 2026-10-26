@@ -753,7 +753,7 @@ impl Loader {
     /// file under the root (no directory links followed, `.git` skipped).
     fn files(&mut self) -> Result<&[String], DistError> {
         if self.files.is_none() {
-            let tracked = std::process::Command::new("git")
+            let tracked = crate::process::tool("git")
                 .arg("-C")
                 .arg(&self.root)
                 .args(["ls-files", "-z", "--cached"])

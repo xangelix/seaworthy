@@ -33,6 +33,15 @@
 //! `layout` and `package` run the strip tool named by `$STRIP`, else
 //! `strip`.
 //!
+//! Every packaging and checking program `seaworthy` runs (nFPM, strip,
+//! WiX, msitools, gpg, rpmsign, rpmkeys, osslsigncode, the repository and
+//! macOS tools, git) starts with an allowlisted environment
+//! (`seaworthy::process::tool`: the system's variables, never a
+//! `SEAWORTHY_*`, `ACTIONS_*`, `AZURE_*` or `AWS_*` one or a CI token;
+//! `SEAWORTHY_TOOL_ENV` names more). Signing commands `signing.toml` names
+//! inherit the environment, less the keys it hands over, plus the runner's
+//! and clouds' credentials, which no other program sees.
+//!
 //! `package` runs `verify` and `layout`, then builds every output in
 //! `seaworthy.toml` (`seaworthy::package`). With `[defaults.repository]`, a
 //! run without `--product` also builds the repository package
@@ -1392,8 +1401,11 @@ fn glibc_check(args: &[String]) -> ExitCode {
 /// The secrets `--signing`'s file names (`key-env`, `secret-key-env`: a
 /// key a custody system's wrapper hands over in the environment), read and
 /// then removed from this process's environment before anything runs, so
-/// no tool `seaworthy` starts (nFPM, strip, gpg, rpmsign, a signing
-/// command, the checks' gpg and rpmkeys) inherits them. Every variable the
+/// no program `seaworthy` starts (nFPM, strip, gpg, rpmsign, a signing
+/// command, the checks' gpg and rpmkeys) inherits them. Beyond these, a
+/// tool gets only an allowlisted environment ([`seaworthy::process::tool`]),
+/// and the runner's and clouds' credentials are set aside for signing
+/// commands alone ([`withhold_signer_credentials`]). Every variable the
 /// file names is removed; those `command` uses (`repo`: the OpenPGP key
 /// alone; `package`: all) are required, and a required one that's unset,
 /// empty, not UTF-8 or oversized is refused (after its removal). Removing
@@ -1447,6 +1459,36 @@ fn take_secrets(command: &str, args: &Args) -> Result<seaworthy::sign::EnvSecret
         }
     }
     Ok(secrets)
+}
+
+/// Takes the runner's and clouds' credentials (GitHub's OIDC request token
+/// and URL, `AZURE_*`, `AWS_*`, CI job tokens:
+/// [`seaworthy::process::is_signer_credential`]) out of this process's
+/// environment and sets them aside for signing commands alone
+/// ([`seaworthy::process::signer`]): a cloud signer's client needs them; no
+/// tool, and no check a library runs (the OpenPGP checks' gpg and
+/// rpmkeys), ever sees them. Runs after [`take_secrets`], which may read a
+/// key under such a name first.
+fn withhold_signer_credentials() {
+    let mut withheld = Vec::new();
+    // allow-std-env: the credentials set aside for signing commands
+    for (name, value) in std::env::vars_os() {
+        if name
+            .to_str()
+            .is_some_and(seaworthy::process::is_signer_credential)
+        {
+            // SAFETY: called from `main` before any command runs: nothing
+            // but argument parsing and reading signing.toml has happened,
+            // and seaworthy starts no thread before this returns, so
+            // nothing reads or writes the environment concurrently.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::remove_var(&name);
+            }
+            withheld.push((name, value));
+        }
+    }
+    seaworthy::process::set_signer_environment(withheld);
 }
 
 /// Makes this process non-dumpable (Linux), first thing: its
@@ -1518,6 +1560,7 @@ fn main() -> ExitCode {
         .map_err(Failure::from)
         .and_then(|mut args| {
             args.secrets = take_secrets(command, &args)?;
+            withhold_signer_credentials();
             run(command, &args)
         });
     match result {

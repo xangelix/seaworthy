@@ -392,6 +392,81 @@ fn package_refuses_a_bad_epoch_a_bad_version_and_a_missing_nfpm() {
     );
 }
 
+/// Every tool runs with an allowlisted environment: none of the
+/// credentials a release's environment holds (the store's keys, GitHub's
+/// OIDC request token, a cloud's secrets) reaches nFPM, here a stub that
+/// records what it was given.
+#[cfg(unix)]
+#[test]
+fn tools_never_see_the_credentials() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = setup(&DESKTOP.replace("outputs = [\"tar\", \"zip\"]", "outputs = [\"deb\"]"));
+    let seen = dir.path().join("nfpm.env");
+    let stub = dir.path().join("nfpm");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nenv >> '{}'\necho 'GitVersion:    2.47.0'\nexit 1\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+        .args(["package", "--no-strip", "--config"])
+        .arg(dir.path().join("seaworthy.toml"))
+        .arg("--artifacts")
+        .arg(dir.path().join("artifacts"))
+        .arg("--out")
+        .arg(dir.path().join("out"))
+        .args(["--release", "2.1.0", "--sequence", "7"])
+        .env("NFPM", &stub)
+        .env("SEAWORTHY_S3_SECRET_ACCESS_KEY", "s3-secret")
+        .env("SEAWORTHY_RELEASE_MANIFEST_KEY", "manifest-key")
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "oidc-token")
+        .env("ACTIONS_ID_TOKEN_REQUEST_URL", "https://example.com/token")
+        .env("AZURE_CLIENT_SECRET", "azure-secret")
+        .env("AWS_SECRET_ACCESS_KEY", "aws-secret")
+        .env("GITHUB_TOKEN", "gh-token")
+        .env("ACME_SITE_VARIABLE", "site")
+        .env(
+            "SEAWORTHY_TOOL_ENV",
+            "ACME_SITE_VARIABLE,AWS_SECRET_ACCESS_KEY",
+        )
+        .output()
+        .unwrap();
+    let env = std::fs::read_to_string(&seen).unwrap_or_else(|_| panic!("{}", text(&out)));
+    let names: std::collections::BTreeSet<&str> = env
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(n, _)| n)
+        .collect();
+    assert!(names.contains("PATH"), "{env}");
+    assert!(
+        names.contains("ACME_SITE_VARIABLE"),
+        "the site's addition: {env}"
+    );
+    for secret in [
+        "s3-secret",
+        "manifest-key",
+        "oidc-token",
+        "azure-secret",
+        "aws-secret",
+        "gh-token",
+    ] {
+        assert!(!env.contains(secret), "nFPM saw {secret}: {env}");
+    }
+    for name in names {
+        assert!(
+            !name.starts_with("SEAWORTHY_")
+                && !name.starts_with("ACTIONS_")
+                && !name.starts_with("AZURE_")
+                && !name.starts_with("AWS_"),
+            "nFPM was given {name}"
+        );
+    }
+}
+
 #[test]
 fn package_builds_the_repository_package_with_every_product_but_not_with_one() {
     // With [defaults.repository], a run without --product builds the

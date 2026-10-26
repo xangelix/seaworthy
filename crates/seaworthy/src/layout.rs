@@ -42,7 +42,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
@@ -645,7 +644,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), DistError> {
 
 /// `<tool> --strip-all` on a staged copy.
 fn strip(tool: &Path, path: &Path) -> Result<(), DistError> {
-    let output = Command::new(tool)
+    let output = crate::process::tool(tool)
         .arg("--strip-all")
         .arg(path)
         .output()

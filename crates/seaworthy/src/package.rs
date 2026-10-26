@@ -1062,19 +1062,11 @@ pub fn adopt_msi(
     Ok(new)
 }
 
-/// An msitools command with only `PATH` and `TMPDIR` from seaworthy's
-/// environment: on a release that environment holds the signers'
-/// credentials, which a parser of the MSI has no use for.
+/// An msitools command: a tool ([`crate::process::tool`]), so none of
+/// the signers' credentials a release's environment holds reaches a parser
+/// of the MSI.
 fn msi_tool(program: &Path) -> Command {
-    let mut command = Command::new(program);
-    command.env_clear();
-    for name in ["PATH", "TMPDIR"] {
-        // allow-std-env: passed through to msitools, the rest withheld
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
+    crate::process::tool(program)
 }
 
 /// Every regular file under `dir`, by its `/`-separated path relative to
@@ -1570,7 +1562,7 @@ fn tree_entries(layout: &Layout, top: &str) -> Result<Vec<Entry>, DistError> {
 fn build_msi(wix: &Path, wxs: &Path, tree: &Path, msi: &Path, pdb: &Path) -> Result<(), DistError> {
     let mut bindpath = std::ffi::OsString::from("tree=");
     bindpath.push(tree);
-    let output = Command::new(wix)
+    let output = crate::process::tool(wix)
         .current_dir(tree)
         .arg("build")
         .arg("-arch")

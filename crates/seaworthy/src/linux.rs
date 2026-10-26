@@ -335,11 +335,7 @@ pub fn validate_desktop_entries(package: &LinuxPackage, work: &Path) -> Result<(
     // allow-std-env: an override for the validator's path, like $NFPM.
     let tool = std::env::var_os("DESKTOP_FILE_VALIDATE")
         .map_or_else(|| PathBuf::from("desktop-file-validate"), PathBuf::from);
-    if std::process::Command::new(&tool)
-        .arg("--help")
-        .output()
-        .is_err()
-    {
+    if crate::process::tool(&tool).arg("--help").output().is_err() {
         return Ok(());
     }
     let dir = work.join("desktop-entries");
@@ -349,7 +345,7 @@ pub fn validate_desktop_entries(package: &LinuxPackage, work: &Path) -> Result<(
         let path = dir.join(name);
         std::fs::write(&path, text).map_err(|e| DistError::io(&path, e))?;
         crate::process::run_ok(
-            std::process::Command::new(&tool).arg(&path),
+            crate::process::tool(&tool).arg(&path),
             "desktop-file-validate",
             std::time::Duration::from_secs(60),
         )

@@ -33,7 +33,6 @@
 //! `rpm --delsign` or dropping the certificate table recovers them.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::DistError;
@@ -97,7 +96,7 @@ impl AuthenticodeSigner for Osslsigncode {
                 .map(|e| e.to_string_lossy().into_owned())
                 .unwrap_or_default()
         ));
-        let mut command = Command::new(&self.tool);
+        let mut command = crate::process::tool(&self.tool);
         command
             .arg("sign")
             .args(["-h", "sha256"])
@@ -173,7 +172,9 @@ impl AuthenticodeSigner for CommandAuthenticode {
             ));
         }
         let path = file.to_string_lossy();
-        let mut command = Command::new(program);
+        // A custody system's client (jsign with a cloud signer's OIDC
+        // token, signtool): it inherits the environment.
+        let mut command = crate::process::signer(program);
         command.args(args.iter().map(|a| substitute(a, &path, description)));
         run_ok(&mut command, "Authenticode", self.timeout).map(|_| ())
     }
@@ -199,7 +200,7 @@ pub fn verify_authenticode(
     file: &Path,
     ca: Option<&Path>,
 ) -> Result<String, DistError> {
-    let mut command = Command::new(tool);
+    let mut command = crate::process::tool(tool);
     command.arg("verify");
     if let Some(ca) = ca {
         command.arg("-CAfile").arg(ca).arg("-TSA-CAfile").arg(ca);
@@ -283,7 +284,7 @@ impl Gpg {
         what: &str,
     ) -> Result<(), DistError> {
         self.check()?;
-        let mut command = Command::new(&self.gpg);
+        let mut command = crate::process::tool(&self.gpg);
         command
             .arg("--homedir")
             .arg(&self.home)
@@ -340,7 +341,7 @@ impl OpenPgpSigner for Gpg {
     fn sign_rpm(&self, rpm: &Path) -> Result<(), DistError> {
         self.check()?;
         let gpg = absolute(&self.gpg)?;
-        let mut command = Command::new(&self.rpmsign);
+        let mut command = crate::process::tool(&self.rpmsign);
         command
             .arg("--addsign")
             // rpm 6 signs through `%_openpgp_sign`; pin gpg, so a host
@@ -443,7 +444,7 @@ fn home_parent() -> PathBuf {
 
 /// Stops `home`'s gpg-agent and deletes the home.
 fn remove_home(home: &Path, gpgconf: &Path) {
-    let mut kill = Command::new(gpgconf);
+    let mut kill = crate::process::tool(gpgconf);
     kill.arg("--homedir").arg(home).args(["--kill", "all"]);
     let _ = run_ok(&mut kill, "gpg agent shutdown", DEFAULT_TOOL_TIMEOUT);
     let _ = std::fs::remove_dir_all(home);
@@ -587,7 +588,7 @@ impl ImportedGpg {
         let gpg = &self.signer;
         let home = gpg.home.as_path();
         // The key goes in on stdin: never an argument or a file.
-        let mut import = Command::new(&gpg.gpg);
+        let mut import = crate::process::tool(&gpg.gpg);
         import
             .arg("--homedir")
             .arg(home)
@@ -605,7 +606,7 @@ impl ImportedGpg {
                 finished.shown()
             )));
         }
-        let mut list = Command::new(&gpg.gpg);
+        let mut list = crate::process::tool(&gpg.gpg);
         list.arg("--homedir").arg(home).args([
             "--batch",
             "--no-auto-check-trustdb",
@@ -630,7 +631,7 @@ impl ImportedGpg {
         let probe = home.join("probe");
         std::fs::write(&probe, b"seaworthy: the imported key signs\n")
             .map_err(|e| DistError::io(&probe, e))?;
-        let mut sign = Command::new(&gpg.gpg);
+        let mut sign = crate::process::tool(&gpg.gpg);
         sign.arg("--homedir")
             .arg(home)
             .args([
@@ -894,7 +895,7 @@ impl Pins {
         for key in &self.openpgp {
             std::fs::metadata(key).map_err(|e| DistError::io(key, e))?;
             let gpg = |args: &[&str], what: &str| {
-                let mut command = Command::new(&self.gpg);
+                let mut command = crate::process::tool(&self.gpg);
                 command
                     .arg("--homedir")
                     .arg(home.path())
@@ -911,7 +912,7 @@ impl Pins {
                     .map(|f| format!("{}: {f}", key.display())),
             );
         }
-        let mut kill = Command::new("gpgconf");
+        let mut kill = crate::process::tool("gpgconf");
         kill.arg("--homedir")
             .arg(home.path())
             .args(["--kill", "all"]);

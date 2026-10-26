@@ -40,7 +40,6 @@
 //! nor change a package.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Value, json};
 
@@ -467,7 +466,7 @@ fn set_executable(path: &Path) -> Result<(), DistError> {
 /// # Errors
 /// [`DistError::Tool`] when it can't run or reports no version.
 pub fn tool_version(tool: &Path) -> Result<String, DistError> {
-    let output = Command::new(tool).arg("--version").output().map_err(|e| {
+    let output = crate::process::tool(tool).arg("--version").output().map_err(|e| {
         DistError::Tool(format!(
             "cannot run {} (nFPM {PINNED_VERSION}: scripts/ci/install-nfpm.sh installs it; set NFPM to its path): {e}",
             tool.display()
@@ -495,7 +494,7 @@ pub fn run(tool: &Path, config: &Path, format: Output, target: &Path) -> Result<
     if target.exists() {
         std::fs::remove_file(target).map_err(|e| DistError::io(target, e))?;
     }
-    let output = Command::new(tool)
+    let output = crate::process::tool(tool)
         .arg("package")
         .arg("--config")
         .arg(config)

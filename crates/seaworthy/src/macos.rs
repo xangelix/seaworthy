@@ -55,7 +55,6 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::DistError;
@@ -754,7 +753,7 @@ pub fn info_plist(
 }
 
 fn run(tool: &Path, args: &[&std::ffi::OsStr], what: &str) -> Result<String, DistError> {
-    let mut command = Command::new(tool);
+    let mut command = crate::process::tool(tool);
     command.args(args);
     crate::process::run_ok(&mut command, what, TOOL_TIMEOUT)
 }
@@ -878,7 +877,7 @@ pub fn notarize(tools: &Tools, id: &DeveloperId, file: &Path) -> Result<(), Dist
         OsStr::new("json"),
     ]);
     let deadline = id.notary_timeout.saturating_add(NOTARY_UPLOAD);
-    let mut command = Command::new(&tools.xcrun);
+    let mut command = crate::process::tool(&tools.xcrun);
     command.args(&args);
     let finished = crate::process::run(&mut command, "notarytool submit", None, deadline, 1 << 20)?;
     let answer: serde_json::Value = serde_json::from_slice(&finished.stdout).map_err(|_| {
@@ -899,7 +898,7 @@ pub fn notarize(tools: &Tools, id: &DeveloperId, file: &Path) -> Result<(), Dist
                 let mut args: Vec<&std::ffi::OsStr> =
                     vec!["notarytool".as_ref(), "log".as_ref(), submission.as_ref()];
                 args.extend(credentials.iter().copied());
-                let mut command = Command::new(&tools.xcrun);
+                let mut command = crate::process::tool(&tools.xcrun);
                 command.args(&args);
                 crate::process::run(&mut command, "notarytool log", None, TOOL_TIMEOUT, 64 << 10)
                     .map(|log| {

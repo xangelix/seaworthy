@@ -33,7 +33,6 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use seaworthy_updater::{
@@ -339,7 +338,9 @@ impl ManifestSigner for CommandSigner {
             .command
             .split_first()
             .ok_or_else(|| DistError::Sign("a command signer needs a program".to_owned()))?;
-        let mut command = Command::new(program);
+        // A custody system's client: it inherits the environment
+        // (less the keys signing.toml hands over).
+        let mut command = crate::process::signer(program);
         command.args(args);
         let finished = crate::process::run(
             &mut command,

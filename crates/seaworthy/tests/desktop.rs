@@ -1183,11 +1183,16 @@ fn an_msi_of_exactly_the_signed_tree_is_adopted_and_listed() {
         .map(|(n, _)| n)
         .collect();
     assert!(names.contains("PATH"), "{env}");
-    // PATH and TMPDIR only, beside the runner's LC_ALL=C and the shell's
-    // own (PWD, SHLVL, _).
+    // A tool's allowlisted environment alone (seaworthy::process::tool),
+    // beside the runner's LC_ALL=C and the shell's own (PWD, SHLVL, _):
+    // never a credential.
     let leaked: Vec<&&str> = names
         .iter()
-        .filter(|n| !["PATH", "TMPDIR", "LC_ALL", "PWD", "OLDPWD", "SHLVL", "_"].contains(n))
+        .filter(|n| {
+            !["LC_ALL", "PWD", "OLDPWD", "SHLVL", "_"].contains(n)
+                && seaworthy::process::tool_environment([((**n).into(), "".into())], None)
+                    .is_empty()
+        })
         .collect();
     assert!(leaked.is_empty(), "msitools were given {leaked:?}");
     let kinds: Vec<Kind> = adopted.iter().map(|a| a.kind).collect();

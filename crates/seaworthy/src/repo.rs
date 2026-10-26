@@ -1098,7 +1098,7 @@ fn apt(
     for (listing, deb) in debs {
         copy_release(out, listing, deb, &root.join(pool(listing, deb)))?;
     }
-    let mut command = Command::new(&tools.dpkg_scanpackages);
+    let mut command = crate::process::tool(&tools.dpkg_scanpackages);
     command
         .current_dir(&root)
         .args(["--hash", "sha256", "pool"]);
@@ -1210,7 +1210,7 @@ fn dnf(
             &root.join("Packages").join(rpm.file_name()),
         )?;
     }
-    let mut command = Command::new(&tools.createrepo_c);
+    let mut command = crate::process::tool(&tools.createrepo_c);
     command
         .current_dir(out)
         .args([
@@ -1266,7 +1266,7 @@ fn pacman(
         files.push(file.to_owned());
     }
     let database = format!("{name}.db.tar.zst");
-    let mut command = Command::new(&tools.repo_add);
+    let mut command = crate::process::tool(&tools.repo_add);
     command
         .current_dir(&root)
         .args(["--quiet", "--nocolor"])
@@ -1493,7 +1493,7 @@ fn read_tool(
     args: &[&OsStr],
     stdin: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, DistError> {
-    let mut command = Command::new(tool);
+    let mut command = crate::process::tool(tool);
     command.args(args);
     let finished = crate::process::run(
         &mut command,
@@ -1620,7 +1620,7 @@ fn tool_version(
     dir: &Path,
     timeout: Duration,
 ) -> Result<String, DistError> {
-    let mut command = Command::new(tool);
+    let mut command = crate::process::tool(tool);
     command.current_dir(dir).arg("--version");
     let finished = crate::process::run(&mut command, what, None, timeout, 64 * 1024)?;
     let text = String::from_utf8_lossy(&finished.stdout);
