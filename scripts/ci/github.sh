@@ -117,9 +117,14 @@ export_env() { # <name> <value>
 matrix() { # <work>
     local work="$1" platforms="${SEAWORTHY_PLATFORMS:-linux,windows,macos}"
     platforms=",${platforms//[[:space:]]/},"
-    local unknown
-    unknown="$(tr ',' '\n' <<<"$platforms" | grep -v -x -E '|linux|windows|macos' || true)"
-    [ -z "$unknown" ] || fail "platforms: unknown platform(s) $(tr '\n' ' ' <<<"$unknown")(linux, windows, macos)"
+    # A loop, not grep: BSD grep (macOS) reads an empty alternative as
+    # matching every line.
+    local unknown="" platform list
+    IFS=',' read -r -a list <<<"$platforms"
+    for platform in "${list[@]}"; do
+        case "$platform" in '' | linux | windows | macos) ;; *) unknown+="$platform " ;; esac
+    done
+    [ -z "$unknown" ] || fail "platforms: unknown platform(s) $unknown(linux, windows, macos)"
     local platform triple dirs
     for platform in linux windows macos; do
         case "$platform" in
