@@ -50,7 +50,10 @@ mkdir -p "$dir"
 tarball="$(mktemp "$dir/nfpm.XXXXXX.tar.gz")"
 trap 'rm -f "$tarball" "$bin.tmp"' EXIT
 echo "install-nfpm: fetching nFPM $NFPM_VERSION" >&2
-curl -fsSL --retry 3 --max-time 600 -o "$tarball" "$NFPM_URL" || die "download failed: $NFPM_URL"
+# https only (redirects too), bounded in time and size; the pin decides.
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+    --connect-timeout 30 --max-time 600 --max-filesize $((64 * 1024 * 1024)) \
+    -o "$tarball" "$NFPM_URL" || die "download failed: $NFPM_URL"
 actual="$(hash_of "$tarball")"
 [ "$actual" = "$NFPM_SHA256" ] || die "SHA-256 mismatch for $NFPM_URL: got $actual, pinned $NFPM_SHA256"
 tar -xzf "$tarball" -O nfpm > "$bin.tmp" || die "cannot extract nfpm"

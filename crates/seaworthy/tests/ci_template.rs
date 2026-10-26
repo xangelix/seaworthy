@@ -1260,6 +1260,27 @@ fn serve(status: u16, body: Vec<u8>) -> String {
     url
 }
 
+/// A server answering every request with a 200 that claims `length`
+/// bytes and sends none of them; returns its URL.
+fn serve_claiming(length: u64) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/packages",
+        listener.local_addr().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let head =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(head.as_bytes());
+        }
+    });
+    url
+}
+
 #[test]
 fn the_repo_step_publishes_after_the_last_plan_or_as_the_first() {
     use common::repo_fixture::{DATE, Fixture, tools};
@@ -2338,6 +2359,33 @@ fn the_adopt_step_adopts_each_msi_into_a_copy_the_repo_step_publishes() {
         "{}",
         calls()
     );
+    // The last plan is read bounded (64 MiB, as publish reads plans back),
+    // and from https or a loopback address only.
+    std::fs::remove_file(&log).unwrap();
+    for (url, refusal) in [
+        (
+            serve_claiming(64 * 1024 * 1024 + 1),
+            "/publish-plan.json is larger than 67108864 bytes",
+        ),
+        (
+            "http://files.example.com/packages".to_owned(),
+            "https only (http only to a loopback address)",
+        ),
+        (
+            "http://127.0.0.1.example.com/packages".to_owned(),
+            "https only (http only to a loopback address)",
+        ),
+    ] {
+        std::fs::write(
+            dir.join("publish.toml"),
+            format!("endpoint = \"http://127.0.0.1:9\"\nbucket = \"b\"\nregion = \"auto\"\nprefix = \"packages\"\npublic-url = \"{url}\"\n"),
+        )
+        .unwrap();
+        let out = step(dir, &["repo"], &release);
+        assert!(!out.status.success(), "{url}");
+        assert!(said(&out).contains(refusal), "{url}: {}", said(&out));
+    }
+    assert!(calls().is_empty(), "repo never ran: {}", calls());
 }
 
 /// A dev build (the template's dev-sign-if): package and adopt-msi

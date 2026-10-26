@@ -670,18 +670,38 @@ repo() {
     local signing_file="${SEAWORTHY_SIGNING:-signing.toml}" url status previous=()
     need_file "$signing_file" "signing.toml (the template's signing-toml)"
     url="$(public_url)"
+    # https, or http to a loopback address only (publish refuses anything
+    # else as public-url too); redirects are never followed.
+    local proto
+    case "$url" in
+        https://*) proto='=https' ;;
+        http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]* | \
+            'http://[::1]' | 'http://[::1]'[:/]*) proto='=http' ;;
+        *) fail "public-url $url: https only (http only to a loopback address)" ;;
+    esac
     mkdir -p "$work/previous"
     # The last publication's plan, cache-busted: 404 is a first publication;
     # anything else must not be taken for one (repo would lose --previous).
-    local release_sequence
+    # Bounded like the plans publish reads back (64 MiB) and in time.
+    local release_sequence code=0 max_plan=$((64 * 1024 * 1024))
     release_sequence="$(sequence)"
-    status="$(curl -sS --retry 3 --max-time 120 -o "$work/previous/publish-plan.json" \
-        -w '%{http_code}' "$url/publish-plan.json?seaworthy-previous=$release_sequence")" ||
-        fail "fetching $url/publish-plan.json failed"
-    case "$status" in
-        200) previous=(--previous "$work/previous/publish-plan.json") ;;
-        404) say "no publication at $url yet: the first" ;;
-        *) fail "$url/publish-plan.json answered HTTP $status" ;;
+    rm -f "$work/previous/publish-plan.json"
+    status="$(curl --proto "$proto" --tlsv1.2 --fail --silent --show-error --retry 3 \
+        --connect-timeout 30 --max-time 120 --max-filesize "$max_plan" \
+        -o "$work/previous/publish-plan.json" -w '%{http_code}' \
+        "$url/publish-plan.json?seaworthy-previous=$release_sequence")" || code=$?
+    case "$code:$status" in
+        0:200)
+            # curl stops a transfer at --max-filesize only from 8.4 on.
+            [ "$(wc -c <"$work/previous/publish-plan.json")" -le "$max_plan" ] ||
+                fail "$url/publish-plan.json is larger than $max_plan bytes"
+            previous=(--previous "$work/previous/publish-plan.json")
+            ;;
+        22:404) say "no publication at $url yet: the first" ;;
+        22:*) fail "$url/publish-plan.json answered HTTP $status" ;;
+        63:*) fail "$url/publish-plan.json is larger than $max_plan bytes" ;;
+        0:*) fail "$url/publish-plan.json answered HTTP $status" ;;
+        *) fail "fetching $url/publish-plan.json failed (curl exit $code)" ;;
     esac
     rm -rf "$work/repo"
     with_secrets "$tool" repo --config "$config" --packages "$packages_dir" --out "$work/repo" \

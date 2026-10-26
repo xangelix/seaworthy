@@ -28,6 +28,13 @@
 set -euo pipefail
 JSIGN_VERSION=7.5
 JSIGN_SHA256=602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
+# Plain http, as Microsoft publishes the endpoint, and acceptable: an RFC 3161
+# answer is a timestamp token signed by the timestamp authority, which
+# Authenticode verification checks up to its trust anchor (seaworthy checks
+# every signature, timestamp included, against [defaults.authenticode]'s
+# `trust` after signing). Tampering in transit makes the token fail that
+# check; it can't forge one. The request carries only the signature's
+# digest, nothing secret.
 TIMESTAMP_URL=http://timestamp.acs.microsoft.com
 
 fail() { echo "azure-sign: $*" >&2; exit 1; }
@@ -65,7 +72,8 @@ if [ ! -f "$jar" ] || ! echo "$JSIGN_SHA256  $jar" | sha256sum -c --status -; th
     (
         unset AZURE_CLIENT_SECRET
         tmp="$(mktemp "$tools/jsign.XXXXXX")"
-        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$tmp" \
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 30 --max-time 600 \
+            --max-filesize $((64 * 1024 * 1024)) -o "$tmp" \
             "https://github.com/ebourg/jsign/releases/download/$JSIGN_VERSION/jsign-$JSIGN_VERSION.jar" ||
             { rm -f "$tmp"; fail "fetching jsign $JSIGN_VERSION failed"; }
         echo "$JSIGN_SHA256  $tmp" | sha256sum -c --status - ||
@@ -76,6 +84,7 @@ fi
 
 # An access token for Trusted Signing (OAuth 2.0 client credentials).
 response="$(printf '%s' "$AZURE_CLIENT_SECRET" | curl --proto '=https' --tlsv1.2 -fsS --retry 3 \
+    --connect-timeout 30 --max-time 120 --max-filesize $((1024 * 1024)) \
     "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
     --data-urlencode "client_id=$AZURE_CLIENT_ID" \
     --data-urlencode "client_secret@-" \

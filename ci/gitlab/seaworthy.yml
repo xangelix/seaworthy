@@ -8,7 +8,11 @@
 #       file: ci/gitlab/seaworthy.yml
 #       inputs:
 #         tools-image: <an image with Rust and the packaging tools>
-#         seaworthy-fetch: git clone --depth 1 --branch <ref> https://github.com/xangelix/seaworthy.git .seaworthy
+#         # A full commit id, never a branch or tag (they move): git checks
+#         # every fetched object against it, so the scripts run are that commit's.
+#         seaworthy-fetch: >-
+#           git init -q .seaworthy && git -C .seaworthy fetch -q --depth 1
+#           https://github.com/xangelix/seaworthy.git <commit> && git -C .seaworthy checkout -q FETCH_HEAD
 #         server-deploy-jobs: deploy-server       # the release-ordering lint
 #         client-deploy-jobs: deploy-web-console
 #         publish-secrets: <your secret store's wrapper> --
@@ -110,7 +114,7 @@ spec:
       description: A seaworthy checkout at this template's ref, relative to the project directory.
       default: .seaworthy
     seaworthy-fetch:
-      description: A command putting the seaworthy checkout at seaworthy-dir when it isn't there (empty, it must be).
+      description: A command putting the seaworthy checkout at seaworthy-dir when it isn't there (empty, it must be). Fetch a full commit id, never a branch or tag, which can move; its scripts run in every job.
       default: ""
     manifest:
       description: The Cargo workspace manifest the products build from.
@@ -165,7 +169,7 @@ spec:
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "8a963ddf50c3cdc8"
+    SEAWORTHY_TEMPLATE: "e307478d6132a47e"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]

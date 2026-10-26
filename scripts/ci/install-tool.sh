@@ -94,8 +94,10 @@ install_one() {
     mkdir "$tmp"
     archive="$tmp/archive.tar.gz"
     echo "install-tool: downloading $tool $version" >&2
+    # https only (redirects too), bounded in time and size; the pin decides.
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-        --retry 3 --retry-delay 2 --output "$archive" "$url" \
+        --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 600 \
+        --max-filesize $((64 * 1024 * 1024)) --output "$archive" "$url" \
         || die "download failed: $url"
     got="$(sha256_of "$archive")"
     if [ "$got" != "$sha" ]; then

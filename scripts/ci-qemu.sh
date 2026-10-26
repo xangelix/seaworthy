@@ -50,7 +50,10 @@ mkdir -p "$dir"
 deb="$(mktemp "$dir/qemu-user.XXXXXX.deb")"
 trap 'rm -f "$deb"' EXIT
 echo "ci-qemu: fetching qemu-user $QEMU_VERSION" >&2
-curl -fsSL --retry 3 --max-time 600 -o "$deb" "$QEMU_URL" || die "download failed: $QEMU_URL"
+# https only (redirects too), bounded in time and size; the pin decides.
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+    --connect-timeout 30 --max-time 600 --max-filesize $((256 * 1024 * 1024)) \
+    -o "$deb" "$QEMU_URL" || die "download failed: $QEMU_URL"
 actual="$(hash_of "$deb")"
 [ "$actual" = "$QEMU_SHA256" ] || die "SHA-256 mismatch for $QEMU_URL: got $actual, pinned $QEMU_SHA256"
 ar p "$deb" data.tar.xz | tar -xJ -O ./usr/bin/qemu-x86_64 > "$bin.tmp" || die "cannot extract qemu-x86_64"

@@ -14,7 +14,7 @@
 # output has no .wxs and is skipped.
 #
 # WiX: v5.0.2 (MS-RL, the last release without the Open Source Maintenance
-# Fee), installed from its pinned MSI
+# Fee), installed from its pinned MSI (https, bounded, SHA-256 checked)
 # unless the image already carries that version. Every ICE error fails the
 # job (none is suppressed; warnings are printed).
 #
@@ -47,7 +47,16 @@ function Get-Wix {
         if ($LASTEXITCODE -eq 0 -and $version.StartsWith("$WixVersion+")) { return $candidate }
     }
     $msi = Join-Path ([IO.Path]::GetTempPath()) 'wix-cli-x64.msi'
-    Invoke-WebRequest -UseBasicParsing -Uri $WixMsiUrl -OutFile $msi
+    # https only (redirects too), bounded in time and size, through Windows'
+    # own curl.exe (Windows 10 1803 and Server 2019 on): Invoke-WebRequest
+    # bounds neither the size nor the whole transfer. The pin decides.
+    if (-not $WixMsiUrl.StartsWith('https://', [StringComparison]::Ordinal)) { Fail "-WixMsiUrl must be an https URL, not $WixMsiUrl" }
+    $curlExe = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path -LiteralPath $curlExe -PathType Leaf)) { Fail "no $curlExe to download WiX with (Windows 10 1803 and Server 2019 on ship it)" }
+    if (Test-Path -LiteralPath $msi) { Remove-Item -LiteralPath $msi -Force }
+    & $curlExe --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 `
+        --connect-timeout 30 --max-time 600 --max-filesize 134217728 --output $msi $WixMsiUrl
+    if ($LASTEXITCODE -ne 0) { Fail "downloading $WixMsiUrl failed (curl.exe exit $LASTEXITCODE)" }
     $hash = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash
     if ($hash -ne $WixMsiSha256.ToUpperInvariant()) { Fail "wix-cli-x64.msi has SHA-256 $hash, not the pinned $WixMsiSha256" }
     # msiexec's own process, not Start-Process -Wait (which waits on every

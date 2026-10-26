@@ -49,8 +49,10 @@ mkdir -p "$dir"
 work="$(mktemp -d "$dir/build.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 echo "install-osslsigncode: fetching osslsigncode $OSSLSIGNCODE_VERSION" >&2
-curl -fsSL --retry 3 --max-time 600 -o "$work/source.tar.gz" "$OSSLSIGNCODE_URL" \
-    || die "download failed: $OSSLSIGNCODE_URL"
+# https only (redirects too), bounded in time and size; the pin decides.
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+    --connect-timeout 30 --max-time 600 --max-filesize $((64 * 1024 * 1024)) \
+    -o "$work/source.tar.gz" "$OSSLSIGNCODE_URL" || die "download failed: $OSSLSIGNCODE_URL"
 actual="$(sha256sum "$work/source.tar.gz" | cut -d' ' -f1)"
 [ "$actual" = "$OSSLSIGNCODE_SHA256" ] \
     || die "SHA-256 mismatch for $OSSLSIGNCODE_URL: got $actual, pinned $OSSLSIGNCODE_SHA256"
