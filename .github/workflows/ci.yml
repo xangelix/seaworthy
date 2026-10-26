@@ -37,6 +37,9 @@ defaults:
 
 jobs:
   plan:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Plan
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -58,8 +61,16 @@ jobs:
       - name: Describe the workspace
         id: plan
         run: scripts/ci/plan.sh | tee -a "$GITHUB_OUTPUT"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   fmt:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Format
     needs: plan
     runs-on: ubuntu-24.04
@@ -80,8 +91,16 @@ jobs:
         run: cargo fmt --all --check
       - name: cargo fmt (fuzz)
         run: cargo fmt --manifest-path fuzz/Cargo.toml --all --check
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   clippy:
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-2025' && 'bash' || 'bash scripts/ci/logged.sh {0}' }}
     name: Clippy (${{ matrix.os }})
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -113,8 +132,16 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked --features "$FEATURES" -- -D warnings
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   test:
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-2025' && 'bash' || 'bash scripts/ci/logged.sh {0}' }}
     name: Test (${{ matrix.os }})
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -151,7 +178,15 @@ jobs:
 
   # seaworthy-formats built with its CI test-key switch on: the trust paths
   # only such a build has (the marker, ci_test_keys!, test keys accepted).
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
   ci-test-keys:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Test (CI test-key switch)
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -172,8 +207,16 @@ jobs:
         env:
           SEAWORTHY_ALLOW_CI_TEST_KEYS: "1"
         run: cargo test -p seaworthy-formats --locked
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   containers:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Container suites (Linux)
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -205,8 +248,16 @@ jobs:
         run: scripts/pull-test-images.sh
       - name: cargo test (container suites required)
         run: cargo test --workspace --locked --features "$FEATURES"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   packaging:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Packaging tools (Arch Linux)
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -256,7 +307,7 @@ jobs:
           # Arch's signed repositories (pacman verifies every package).
           pacman -Syu --noconfirm --needed --noprogressbar base-devel git rustup cmake openssl \
             zlib dpkg rpm-tools createrepo_c pacman gnupg libarchive msitools \
-            desktop-file-utils unzip zstd llvm libxml2 icu dash >/dev/null
+            desktop-file-utils unzip zstd llvm libxml2 icu dash jq >/dev/null
           # pwsh: https only, bounded, the pinned SHA-256 checked before extracting.
           mkdir -p /tmp/pwsh /opt/pwsh
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
@@ -300,8 +351,16 @@ jobs:
       - name: Remove the container
         if: always()
         run: docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   msrv:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: MSRV (${{ needs.plan.outputs.msrv }})
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -332,8 +391,16 @@ jobs:
       # need a newer toolchain than the MSRV.
       - name: cargo check
         run: cargo check --workspace --lib --bins --locked --features "$FEATURES"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   docs:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Docs
     needs: plan
     if: needs.plan.outputs.crates == 'true'
@@ -360,8 +427,16 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: cargo doc
         run: cargo doc --workspace --no-deps --locked --features "$FEATURES"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   deny:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: cargo-deny
     needs: plan
     runs-on: ubuntu-24.04
@@ -386,8 +461,16 @@ jobs:
       # but advisories, bans and sources are.
       - name: cargo deny (fuzz)
         run: cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check advisories bans sources
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   fips:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: FIPS (all features, Linux)
     needs: plan
     if: needs.plan.outputs.fips == 'true'
@@ -433,8 +516,16 @@ jobs:
           cargo build --release --locked -p seaworthy-crypto --features fips --example fips_selfcheck
           scripts/verify-fips-binary.sh target/release/examples/fips_selfcheck
           target/release/examples/fips_selfcheck --expect-fips
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   fuzz-replay:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Fuzz corpus replay
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -460,8 +551,16 @@ jobs:
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
       - name: Replay every seed and regression
         run: cargo test --manifest-path fuzz/Cargo.toml --locked
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   checks:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Repository checks
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -486,8 +585,16 @@ jobs:
             echo "::endgroup::"
           done
           exit "$status"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   lint:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Lint workflows and scripts
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -513,6 +620,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --format=github .
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   result:
     name: CI result

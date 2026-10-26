@@ -90,6 +90,14 @@ jobs:
             ${{ runner.temp }}/windows-lab/releases/*/*/packages/*.wxs
           if-no-files-found: ignore
           retention-days: 7
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            ${{ runner.temp }}/windows-lab/logs
 
   install:
     name: MSI install, upgrade and removal
@@ -122,6 +130,14 @@ jobs:
           path: ${{ runner.temp }}/lab-install/
           if-no-files-found: ignore
           retention-days: 7
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            ${{ runner.temp }}/lab-install
 
   update:
     name: Service update, rollback and squatting
@@ -154,6 +170,14 @@ jobs:
           path: ${{ runner.temp }}/lab-update/
           if-no-files-found: ignore
           retention-days: 7
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            ${{ runner.temp }}/lab-update
 
   scm:
     name: SCM end to end
@@ -227,6 +251,14 @@ jobs:
           path: ${{ runner.temp }}/lab-scm/
           if-no-files-found: ignore
           retention-days: 7
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            ${{ runner.temp }}/lab-scm
 
   upgrade:
     name: Upgrade from previous
@@ -306,6 +338,14 @@ jobs:
             ${{ runner.temp }}/lab-upgrade/previous/previous-run.json
           if-no-files-found: ignore
           retention-days: 7
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            ${{ runner.temp }}/lab-upgrade/evidence
 
   policy-live:
     name: Update policy against the live registry
@@ -407,6 +447,15 @@ jobs:
             ${{ runner.temp }}/windows-lab-fips/logs/
           if-no-files-found: ignore
           retention-days: 7
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            ${{ runner.temp }}/lab-fips
+            ${{ runner.temp }}/windows-lab-fips/logs
 
   result:
     name: Windows lab result

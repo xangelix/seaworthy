@@ -45,6 +45,9 @@ defaults:
 
 jobs:
   launcher-linux:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Launcher e2e (Linux, qemu CPU models)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -80,8 +83,16 @@ jobs:
           path: launcher-e2e.log
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   launcher-linux-fips:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Launcher e2e (Linux, FIPS)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -118,8 +129,16 @@ jobs:
           path: launcher-e2e-fips.log
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   launcher-macos:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Launcher e2e (macOS)
     runs-on: macos-15
     timeout-minutes: 90
@@ -151,8 +170,16 @@ jobs:
           path: launcher-e2e-macos.log
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   linux-conformance:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Linux conformance (5 distributions)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -196,8 +223,19 @@ jobs:
             target/linux-conformance/report/
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            target/linux-conformance/report
 
   macos-pkg-install:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: macOS pkg install
     runs-on: macos-15
     timeout-minutes: 90
@@ -231,8 +269,16 @@ jobs:
           path: macos-pkg-install.log
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
 
   upgrade-linux:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Upgrade from previous (Linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -303,8 +349,19 @@ jobs:
             target/lab-upgrade/previous/previous-run.json
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            target/lab-upgrade/report
 
   upgrade-macos:
+    defaults:
+      run:
+        shell: bash scripts/ci/logged.sh {0}
     name: Upgrade from previous (macOS)
     runs-on: macos-15
     timeout-minutes: 90
@@ -373,6 +430,14 @@ jobs:
             target/lab-upgrade/previous/previous-run.json
           if-no-files-found: ignore
           retention-days: 14
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+        with:
+          paths: |
+            target/lab-upgrade-macos/evidence
 
   result:
     name: Lab result

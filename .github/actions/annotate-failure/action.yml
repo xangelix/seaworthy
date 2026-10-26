@@ -1,0 +1,32 @@
+# Publish the tail of a failed job's output as error annotations. Job logs
+# need a signed-in account even on a public repository; annotations are
+# served by the public API and show on the run's summary page, so the
+# reason a job failed can be read without signing in. Use it as the last
+# step, with `if: failure()`. The job's runs carry no secrets; GitHub masks
+# registered secrets in annotations as it does in logs.
+name: Annotate failure
+description: >-
+  Publish the tails of a failed job's logs (the logged shell's
+  step-output.log by default, plus any files or directories named) as
+  error annotations.
+inputs:
+  paths:
+    description: >-
+      Newline-separated files, directories (their *.log and *.txt files,
+      newest first) or globs, in addition to the logged shell's output.
+    required: false
+    default: ""
+  lines:
+    description: Lines kept from the end of each file.
+    required: false
+    default: "150"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ANNOTATE_PATHS: ${{ inputs.paths }}
+        ANNOTATE_LINES: ${{ inputs.lines }}
+      run: |
+        py="$(command -v python3 || command -v python)"
+        "$py" "$GITHUB_ACTION_PATH/annotate.py"

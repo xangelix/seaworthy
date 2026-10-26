@@ -5,3 +5,4 @@
 /fuzz/logs
 /fuzz/work
 /fuzz/corpus-nightly
+__pycache__/
