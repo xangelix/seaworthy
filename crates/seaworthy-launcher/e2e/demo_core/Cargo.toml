@@ -7,8 +7,15 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Link the AWS-LC FIPS module into the core and run its power-on
+# self-tests (the launcher lanes' fips mode; its tamper test flips a bit
+# inside the module).
+fips = ["dep:seaworthy-crypto"]
+
 [dependencies]
 seaworthy-launcher = { path = "../.." }
+seaworthy-crypto = { path = "../../../seaworthy-crypto", features = ["fips"], optional = true }
 
 # `serve` under the Windows SCM (a Windows service lane's service): the
 # dispatcher and the status protocol.

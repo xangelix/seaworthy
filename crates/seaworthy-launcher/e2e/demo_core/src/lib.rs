@@ -7,6 +7,16 @@
 
 fn main() -> i32 {
     println!("core={}", seaworthy_launcher::this_core());
+    #[cfg(feature = "fips")]
+    {
+        match seaworthy_crypto::module::startup_self_check() {
+            Ok(_) => println!("fips=ok"),
+            Err(e) => {
+                eprintln!("fips self-check failed: {e}");
+                return 3;
+            }
+        }
+    }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("exit") => args.get(2).and_then(|code| code.parse().ok()).unwrap_or(2),

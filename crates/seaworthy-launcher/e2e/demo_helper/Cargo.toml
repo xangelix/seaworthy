@@ -1,0 +1,19 @@
+[package]
+name = "demo_helper"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# The lab fixture's update helper (the conformance, pkg-install and
+# upgrade lanes ship it beside the demo launcher): seaworthy-updater's real
+# helper (`helper::main`), with a lane's seaworthy.toml, release keys and
+# URLs compiled in by build.rs, learning the version to install from the
+# lab server's required-version endpoint. Built outside a lane (no keys),
+# it refuses to run.
+
+[dependencies]
+seaworthy-updater = { path = "../../../seaworthy-updater", features = ["helper"] }
+# The version source: the required-version client alone.
+seaworthy-lab = { path = "../../../seaworthy-lab", default-features = false, features = ["client"] }
+hex = "0.4"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

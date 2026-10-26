@@ -2,16 +2,23 @@
 # scripts/launcher-e2e-macos.sh): a product laid out exactly as a packaging
 # tool lays one out — a launcher built for the architecture's baseline and
 # one core per CPU target — plus a tool that reads the records back out of
-# the built files, and the Windows lab's service product (`scm`, its
+# the built files; the Windows lab's service product (`scm`, its
 # `scm_core` and its update helper `scm_helper`: scm/seaworthy.toml,
-# docs/testing-windows.md). Its own workspace and lockfile, excluded from
-# the repository's workspace: the scripts build it once per CPU target,
-# each in its own target directory.
+# docs/testing-windows.md); and the Linux and macOS lab lanes' update helper
+# (`demo_helper`, seaworthy-updater's real helper with a lane's keys
+# compiled in) and the lab server the conformance lanes run in each host
+# (`conformance_server`; docs/testing.md). Its own workspace and lockfile,
+# excluded from the repository's workspace: the scripts build it once per
+# CPU target, each in its own target directory.
 [workspace]
 members = [
     "demo",
     "demo_core",
     "inspect",
+    # The Linux and macOS lab lanes (scripts/linux-conformance.sh,
+    # scripts/macos-pkg-install.sh, scripts/upgrade-candidate.sh).
+    "conformance_server",
+    "demo_helper",
     # The Windows lab (scripts/windows-lab-build.ps1).
     "scm",
     "scm_core",
@@ -29,3 +36,8 @@ publish = false
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# The FIPS tamper test reads the module's text-range symbols: not stripped.
+[profile.fips-tamper]
+inherits = "release"
+strip = false
