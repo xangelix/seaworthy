@@ -207,7 +207,8 @@ that never ship:
    product's `release-trust`), never by a mix, and a test key equal to a release key is refused.
 5. **Marked binaries.** When a build trusts test keys, its binary carries the ASCII marker
    `seaworthy-ci-test-keys:trusted:1`: it opens the warning the update helper logs at every run,
-   and `with_ci_test_keys` pins it into the binary. Code that only scans for the marker builds it
+   and both `with_ci_test_keys` (given keys) and `ci_test_keys!` (handing out test-key text) pin
+   it into the binary. Code that only scans for the marker builds it
    at run time from a masked copy, so it never carries it itself.
 6. **Release-side checks.** `seaworthy verify` refuses any binary that carries the marker, or a
    key of `[defaults.ci-test-keys]` (a release key's last 32 bytes, raw or as hex; an OpenPGP

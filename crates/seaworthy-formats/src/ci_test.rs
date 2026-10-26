@@ -16,8 +16,9 @@
 //!   [`ci_test_keys_marker`] (`seaworthy-ci-test-keys` then
 //!   `:trusted:1`, as one ASCII string with nothing between): it opens
 //!   the notice [`ManifestTrust::ci_test_keys_notice`](crate::ManifestTrust::ci_test_keys_notice)
-//!   returns, which the update helper logs at every run, and
-//!   `with_ci_test_keys` pins it into the binary. `seaworthy verify`
+//!   returns, which the update helper logs at every run, and both
+//!   `with_ci_test_keys` (given keys) and `ci_test_keys!` (handing out
+//!   text) pin it into the binary. `seaworthy verify`
 //!   refuses a binary carrying it unless the build is a `--ci-test-signing`
 //!   one, and a release pipeline can refuse it with
 //!   `grep -qaF 'seaworthy-ci-test-keys:trusted:1' <file>`.
@@ -75,9 +76,11 @@ const MASKED_MARKER: [u8; 32] = [
 const MARKER_MASK: u8 = 0xa5;
 
 /// The notice a build that trusts CI test keys logs; it starts with the
-/// marker, as one literal.
+/// marker, as one literal. Public only for [`ci_test_keys!`](crate::ci_test_keys),
+/// which pins it into every binary it hands test-key text to.
 #[cfg(seaworthy_ci_test_keys)]
-pub(crate) const CI_TEST_KEYS_NOTICE: &str = concat!(
+#[doc(hidden)]
+pub const CI_TEST_KEYS_NOTICE: &str = concat!(
     "seaworthy-ci-test-keys",
     ":trusted:1",
     " - this build trusts public CI test keys (built with SEAWORTHY_ALLOW_CI_TEST_KEYS=1): ",
@@ -110,9 +113,11 @@ pub fn carries_ci_test_keys_marker(image: &[u8]) -> bool {
 #[cfg(seaworthy_ci_test_keys)]
 #[macro_export]
 macro_rules! ci_test_keys {
-    ($text:expr $(,)?) => {
+    ($text:expr $(,)?) => {{
+        // Test-key text compiled in: the binary carries the marker too.
+        let _ = ::core::hint::black_box($crate::ci_test::CI_TEST_KEYS_NOTICE);
         ::core::option::Option::<&'static str>::Some($text)
-    };
+    }};
 }
 
 /// `Some(text)` in a build made with `SEAWORTHY_ALLOW_CI_TEST_KEYS=1`,
