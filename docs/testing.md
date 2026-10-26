@@ -11,9 +11,10 @@ seaworthy is tested at three levels:
 
 ## The lab lanes
 
-The lab runs in `.github/workflows/lab.yml` (Linux and macOS) and `lab-windows.yml` (Windows) on
-GitHub-hosted runners, on every pull request, on pushes to `main`, weekly and on demand. Its
-required check is **Lab result**. The lanes share one fixture, the e2e workspace in
+The lab runs in `.github/workflows/lab.yml` (Linux and macOS, this page) and `lab-windows.yml`
+(Windows: [testing-windows.md](testing-windows.md)) on GitHub-hosted runners, on every pull
+request, on pushes to `main`, weekly and on demand. The Linux and macOS lanes' required check is
+**Lab result** (the Windows lab's is **Windows lab result**). The lanes share one fixture, the e2e workspace in
 `crates/seaworthy-launcher/e2e/` (a launcher, per-CPU cores, the update helper `demo_helper`, the
 lab server `conformance_server`), and one harness, [`seaworthy-lab`](../crates/seaworthy-lab/README.md):
 a small TLS lab server that serves a release tree and the product's required-version endpoint,
