@@ -11,5 +11,6 @@ rules:
     ignore:
       - ci.yml
       - codeql.yml
+      - lab.yml
       - release.yml
       - lab-windows.yml
