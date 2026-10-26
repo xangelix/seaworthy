@@ -591,27 +591,31 @@ fn anything_a_client_would_refuse_is_never_published() {
         err.contains("larger than the update helper accepts (1073741824 bytes)"),
         "{err}"
     );
-    // A listed file reached through a link: the file, or a
-    // directory on its way.
-    let packages = edited(&fixture, "p-link", "agent", |json, dir| {
-        let at = position(json, ".deb");
-        let file = dir.join(json["artifacts"][at]["file"].as_str().unwrap());
-        let moved = dir.join("elsewhere.deb");
-        std::fs::rename(&file, &moved).unwrap();
-        std::os::unix::fs::symlink(&moved, &file).unwrap();
-    });
-    let err = read_listing(&packages.join("agent"))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("is a link"), "{err}");
-    let packages = edited(&fixture, "p-dir-link", "agent", |_, dir| {
-        std::fs::rename(dir.join("packages"), dir.join("real")).unwrap();
-        std::os::unix::fs::symlink(dir.join("real"), dir.join("packages")).unwrap();
-    });
-    let err = read_listing(&packages.join("agent"))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("packages is a link"), "{err}");
+    // Links: Unix only (creating them on Windows needs a privilege).
+    #[cfg(unix)]
+    {
+        // A listed file reached through a link: the file, or a
+        // directory on its way.
+        let packages = edited(&fixture, "p-link", "agent", |json, dir| {
+            let at = position(json, ".deb");
+            let file = dir.join(json["artifacts"][at]["file"].as_str().unwrap());
+            let moved = dir.join("elsewhere.deb");
+            std::fs::rename(&file, &moved).unwrap();
+            std::os::unix::fs::symlink(&moved, &file).unwrap();
+        });
+        let err = read_listing(&packages.join("agent"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a link"), "{err}");
+        let packages = edited(&fixture, "p-dir-link", "agent", |_, dir| {
+            std::fs::rename(dir.join("packages"), dir.join("real")).unwrap();
+            std::os::unix::fs::symlink(dir.join("real"), dir.join("packages")).unwrap();
+        });
+        let err = read_listing(&packages.join("agent"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("packages is a link"), "{err}");
+    }
 
     // A release no client would accept.
     let packages = edited(&fixture, "p-no-manifest", "agent", |json, _| {

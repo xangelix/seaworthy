@@ -3,6 +3,9 @@
 //! launcher) and `linux.command` (the `/usr/bin` link), through `layout`,
 //! the Linux packages, the tarball, the zip and the MSI's `.wxs`.
 
+// Unix only: these build and inspect packages with Unix tools, modes and
+// links; the Windows lab builds and installs the real MSI.
+#![cfg(unix)]
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,

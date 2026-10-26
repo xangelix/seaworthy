@@ -469,6 +469,7 @@ esac
 
 /// The few tools the scripts and the stand-ins use, by absolute path, so a
 /// test's `PATH` holds nothing else (the host's `systemctl` stays out).
+#[cfg(unix)]
 const TOOLS: &[&str] = &["cat", "rm", "mkdir", "grep"];
 
 fn which(tool: &str) -> PathBuf {
@@ -509,8 +510,8 @@ impl Host {
             std::fs::create_dir_all(root.path().join("run/systemd/system")).unwrap();
         }
         let bin = root.path().join("bin");
+        #[cfg(unix)]
         for tool in TOOLS {
-            #[cfg(unix)]
             std::os::unix::fs::symlink(which(tool), bin.join(tool)).unwrap();
         }
         if systemd_installed {

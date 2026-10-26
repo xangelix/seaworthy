@@ -69,7 +69,11 @@
 # only under a private directory (umask 077), which `signed` shreds when its
 # step ends, and are never printed or put on a command line.
 set -euo pipefail
-shopt -s inherit_errexit
+# inherit_errexit (bash 4.4+) where the shell has it: macOS runners' bash is
+# 3.2, so nothing here relies on it; `quoted` stands in for the 4.4
+# `${var@Q}` expansion.
+shopt -s inherit_errexit 2>/dev/null || true
+quoted() { printf '%q' "$1"; }
 
 fail() { echo "seaworthy (github): FAIL: $*" >&2; exit 1; }
 say() { echo "seaworthy (github): $*"; }
@@ -151,7 +155,7 @@ build_env() { # <triple> <file>
         [ -n "$key" ] || continue
         case "$key" in
             '*' | x86_64-unknown-linux-gnu | x86_64-pc-windows-msvc | aarch64-apple-darwin) ;;
-            *) fail "build-env: ${key@Q} is neither \"*\" nor a target seaworthy builds" ;;
+            *) fail "build-env: $(quoted "$key") is neither \"*\" nor a target seaworthy builds" ;;
         esac
     done <<<"$keys"
     jq -e '[.[][] | test("[\\x00-\\x1f\\x7f]")] | any | not' >/dev/null <<<"$json" ||
@@ -159,7 +163,7 @@ build_env() { # <triple> <file>
     local name value count=0
     # Name and value NUL-separated, the triple's own after "*" (so they win).
     while IFS= read -r -d '' name && IFS= read -r -d '' value; do
-        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || fail "build-env: ${name@Q} isn't a variable name"
+        [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || fail "build-env: $(quoted "$name") isn't a variable name"
         if reserved_variable "$name"; then
             fail "build-env may not set $name"
         fi
@@ -226,7 +230,7 @@ signing_toml() { # <file>
         case "$algorithm" in
             ml-dsa-87 | ecdsa-p256 | ed25519) ;;
             "") fail "the RELEASE_MANIFEST_KEY secret needs the release-manifest-algorithm input (ml-dsa-87, ecdsa-p256 or ed25519)" ;;
-            *) fail "release-manifest-algorithm ${algorithm@Q}: ml-dsa-87, ecdsa-p256 or ed25519" ;;
+            *) fail "release-manifest-algorithm $(quoted "$algorithm"): ml-dsa-87, ecdsa-p256 or ed25519" ;;
         esac
         printf '[[manifest]]\nalgorithm = "%s"\nkey-env = "SEAWORTHY_RELEASE_MANIFEST_KEY"\n\n' \
             "$algorithm" >> "$file"
@@ -252,7 +256,7 @@ signing_toml() { # <file>
         [[ "$profile" =~ ^[A-Za-z0-9-]{3,64}$ ]] || fail "azure-profile: a certificate profile name"
         [ -n "${AZURE_TENANT_ID:-}" ] && [ -n "${AZURE_CLIENT_ID:-}" ] || fail "Azure Artifact Signing needs the azure-tenant-id and azure-client-id inputs"
         scripts="${scripts:-$here}"
-        [ -f "$scripts/azure-sign.sh" ] || fail "no azure-sign.sh in ${scripts@Q}"
+        [ -f "$scripts/azure-sign.sh" ] || fail "no azure-sign.sh in $(quoted "$scripts")"
         check_plain "$scripts/azure-sign.sh"
         printf '[authenticode]\ncommand = ["bash", "%s", "--endpoint", "%s", "--account", "%s", "--profile", "%s", "{file}"]\n\n' \
             "$scripts/azure-sign.sh" "$endpoint" "$account" "$profile" >> "$file"
@@ -467,7 +471,7 @@ signed() { # <step>
     local step="$1"
     case "$step" in
         package | adopt-msi | package-macos | repo) ;;
-        *) fail "signed: package, adopt-msi, package-macos or repo, not ${step@Q}" ;;
+        *) fail "signed: package, adopt-msi, package-macos or repo, not $(quoted "$step")" ;;
     esac
     if [ "${SEAWORTHY_RELEASE:-0}" != 1 ] && [ "${SEAWORTHY_DEV_SIGN:-0}" != 1 ]; then
         exec bash "$here/seaworthy.sh" "$step"
@@ -516,7 +520,7 @@ assemble() { # <out> <label>=<dir>...
     local pair label dir listing product files=0
     for pair in "$@"; do
         label="${pair%%=*}" dir="${pair#*=}"
-        [[ "$label" =~ ^[a-z0-9-]+$ ]] || fail "assemble: ${label@Q} isn't a label"
+        [[ "$label" =~ ^[a-z0-9-]+$ ]] || fail "assemble: $(quoted "$label") isn't a label"
         [ -d "$dir" ] || { say "assemble: no $dir ($label): nothing from it"; continue; }
         for listing in "$dir"/*/packages.json; do
             [ -f "$listing" ] || continue
@@ -526,7 +530,7 @@ assemble() { # <out> <label>=<dir>...
             local file sha actual
             while IFS=$'\t' read -r file sha; do
                 [[ "$file" =~ ^[A-Za-z0-9._+~-]+(/[A-Za-z0-9._+~-]+)*$ && "$file" != *..* ]] ||
-                    fail "$listing lists ${file@Q}, not a plain relative path"
+                    fail "$listing lists $(quoted "$file"), not a plain relative path"
                 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "$listing: ${file}'s SHA-256 isn't one"
                 local from to
                 from="$(dirname "$listing")/$file" to="$out/$label/$product/$file"

@@ -815,6 +815,7 @@ fn the_pkg_s_daemons_scripts_and_uninstaller() {
 /// stopped, and a failure stays its status: run against stand-in tools
 /// (`launchctl` answering that nothing is loaded, a `mkdir` that fails or
 /// succeeds). The macOS install lane breaks a real one.
+#[cfg(unix)]
 #[test]
 fn the_postinstall_starts_the_service_however_it_ends() {
     use seaworthy::macos;
@@ -1100,6 +1101,7 @@ const INSTALLER: &str = "Developer ID Installer: Acme Inc (ABCDE12345)";
 /// submit` answers the status in `dir/notary-status` (default
 /// `Accepted`); `codesign --verify` with a requirement fails while
 /// `dir/wrong-team` exists.
+#[cfg(unix)]
 fn mac_stubs(dir: &Path) -> seaworthy::macos::Tools {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -1152,6 +1154,7 @@ fn mac_stubs(dir: &Path) -> seaworthy::macos::Tools {
     }
 }
 
+#[cfg(unix)]
 fn calls(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("calls"))
         .unwrap_or_default()
@@ -1160,6 +1163,7 @@ fn calls(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 fn developer_id(dir: &Path) -> seaworthy::macos::DeveloperId {
     seaworthy::macos::DeveloperId {
         identity: IDENTITY.to_owned(),
@@ -1263,6 +1267,7 @@ fn developer_id_settings_are_validated() {
 /// the Developer ID requirement for the pinned team; the disk image is
 /// signed, checked, notarized, stapled, validated and assessed, in that
 /// order. Ad hoc stays as it was.
+#[cfg(unix)]
 #[test]
 fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
     let dir = tempfile::tempdir().unwrap();
@@ -1345,6 +1350,7 @@ fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
 /// A signature another team made fails the requirement: refused by name,
 /// before anything is notarized. A rejected notarization names the
 /// service's log, and nothing is stapled.
+#[cfg(unix)]
 #[test]
 fn another_team_s_signature_and_a_rejected_notarization_are_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -1397,6 +1403,7 @@ fn another_team_s_signature_and_a_rejected_notarization_are_refused() {
 /// identity, `pkgutil` must show that identity of the pinned team leading
 /// the chain, then it's notarized, stapled and assessed for install.
 /// Without an installer identity nothing runs.
+#[cfg(unix)]
 #[test]
 fn a_developer_id_signs_and_notarizes_a_service_s_pkg() {
     let dir = tempfile::tempdir().unwrap();

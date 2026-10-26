@@ -1902,7 +1902,13 @@ mod tests {
             index_max_age_seconds: 60,
             retention_days: 30,
         };
-        let credentials = Credentials::new("AKIDEXAMPLE".into(), "secret".into(), None);
+        let credentials = Credentials::new(
+            "AKIDEXAMPLE".into(),
+            // AWS's documented example key: a short one is below the 112-bit
+            // HMAC key floor the `fips` feature enforces.
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            None,
+        );
         Store::new(&target, &credentials).unwrap()
     }
 

@@ -270,20 +270,24 @@ fn local_includes_globs_and_nesting_merge_as_gitlab_merges() {
             .to_string();
         assert!(err.contains(mentions), "{case}: {err}");
     }
-    // A symlinked include reaching outside the repository.
-    let outside = tempfile::tempdir().unwrap();
-    std::fs::write(outside.path().join("evil.yml"), "x: {script: [x]}\n").unwrap();
-    let dir = repo(&[(".gitlab-ci.yml", "include: ci/link.yml\n")]);
-    std::fs::create_dir_all(dir.path().join("ci")).unwrap();
-    std::os::unix::fs::symlink(
-        outside.path().join("evil.yml"),
-        dir.path().join("ci/link.yml"),
-    )
-    .unwrap();
-    let err = load(dir.path(), &dir.path().join(".gitlab-ci.yml"), &[])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("outside the repository"), "{err}");
+    // Unix only: creating a symlink on Windows needs a privilege.
+    #[cfg(unix)]
+    {
+        // A symlinked include reaching outside the repository.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("evil.yml"), "x: {script: [x]}\n").unwrap();
+        let dir = repo(&[(".gitlab-ci.yml", "include: ci/link.yml\n")]);
+        std::fs::create_dir_all(dir.path().join("ci")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("evil.yml"),
+            dir.path().join("ci/link.yml"),
+        )
+        .unwrap();
+        let err = load(dir.path(), &dir.path().join(".gitlab-ci.yml"), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the repository"), "{err}");
+    }
 }
 
 #[test]
