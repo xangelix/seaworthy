@@ -248,7 +248,11 @@ pub fn desktop_update_unit_name(name: &str) -> Result<String, ServiceError> {
 ///
 /// # Errors
 /// [`ServiceError::InvalidName`] for a unit outside
-/// [`desktop_update_unit_name`]'s grammar.
+/// [`desktop_update_unit_name`]'s grammar, or a `package` outside the same
+/// alphabet (`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 200 bytes): the rule is
+/// JavaScript, and a name in its comment must not be able to end the
+/// comment (a line terminator: CR, LF, U+2028, U+2029) or carry anything
+/// else a reader could mistake.
 pub fn desktop_update_polkit_rule(package: &str, unit: &str) -> Result<String, ServiceError> {
     let stem = unit.strip_suffix(".service").unwrap_or_default();
     if desktop_update_unit_name(stem).ok().as_deref() != Some(unit) {
@@ -256,9 +260,9 @@ pub fn desktop_update_polkit_rule(package: &str, unit: &str) -> Result<String, S
             "desktop update unit {unit:?} must be <[A-Za-z0-9][A-Za-z0-9._-]*>.service"
         )));
     }
-    if package.chars().any(char::is_control) {
+    if desktop_update_unit_name(package).is_err() {
         return Err(ServiceError::InvalidName(format!(
-            "package {package:?} must not contain control characters"
+            "package {package:?} must be [A-Za-z0-9][A-Za-z0-9._-]*, at most 200 bytes (it is written into the polkit rule)"
         )));
     }
     Ok(format!(
@@ -1718,6 +1722,23 @@ console.log(JSON.stringify([
             assert!(desktop_update_polkit_rule("acme", bad).is_err(), "{bad:?}");
         }
         assert!(desktop_update_polkit_rule("ac\nme", "a.service").is_err());
+        // U+2028 and U+2029 end a JavaScript line comment just as LF does:
+        // a package name carrying one would put code in the rule.
+        for bad in [
+            "acme\u{2028}polkit.addRule(function(){return polkit.Result.YES;});//",
+            "acme\u{2029}x",
+            "acme\rx",
+            "acme */ x",
+            "acme console",
+            "",
+            "-acme",
+        ] {
+            assert!(
+                desktop_update_polkit_rule(bad, "acme-update.service").is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(desktop_update_polkit_rule("acme-console.v2_x", "acme-update.service").is_ok());
     }
 
     #[test]
