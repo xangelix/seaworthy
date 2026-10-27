@@ -229,6 +229,7 @@ and nothing else):
 | `bundle-id` | `CFBundleIdentifier`, reverse-DNS (`com.example.acme.viewer`). Required and never derived: macOS keys an app's permissions, preferences and notarization to it, so it must never change. |
 | `icon` | The app icon (`.icns`). |
 | `category` | `LSApplicationCategoryType` (`public.app-category.utilities`). |
+| `localizations` | `CFBundleLocalizations`: the languages the app speaks, as language IDs (`["en", "de", "pt-BR", "zh-Hans"]`), each once. An app that carries its translations in its binary has no `.lproj` directories for macOS to find them by: without the list, the system's own text in the app (the standard menus and panels) stays English, and System Settings offers no per-app language. |
 | `entitlements` | An XML property list (`.plist` or `.entitlements`, relative to `seaworthy.toml`) of the entitlements a Developer ID signature gives the main executable: the hardened runtime's exceptions the app needs (`com.apple.security.cs.allow-jit`, …). Ad hoc signatures carry none. |
 
 `[[product.<id>.files]]`: a data file, or a directory with everything below it, installed under the

@@ -586,6 +586,14 @@ pub struct Macos {
     /// `LSApplicationCategoryType` (`public.app-category.utilities`).
     #[serde(default)]
     pub category: Option<String>,
+    /// `CFBundleLocalizations`: the languages the app speaks (`en`,
+    /// `pt-BR`, `zh-Hans`). An app that carries its translations in its
+    /// binary has no `.lproj` directories for macOS to find them by: without
+    /// the list, the system's own text in the app (the standard menus and
+    /// panels) stays English, and System Settings offers no per-app
+    /// language.
+    #[serde(default)]
+    pub localizations: Vec<String>,
     /// The entitlements a Developer ID signature gives the app (an XML
     /// property list, relative to `seaworthy.toml`): the hardened
     /// runtime's exceptions it needs, such as
@@ -1262,6 +1270,17 @@ fn is_app_id(text: &str) -> bool {
         })
 }
 
+/// A language ID as `CFBundleLocalizations` lists them: a two- or
+/// three-letter language, then subtags of two to eight letters or digits
+/// after `-` or `_` (`en`, `pt-BR`, `zh-Hans`, `sr-Latn-RS`).
+fn is_language_id(text: &str) -> bool {
+    let mut parts = text.split(['-', '_']);
+    parts
+        .next()
+        .is_some_and(|l| (2..=3).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphabetic()))
+        && parts.all(|s| (2..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 /// A `.desktop` category name: `[A-Za-z0-9-]`, at most 64 bytes.
 fn is_category(text: &str) -> bool {
     !text.is_empty()
@@ -1912,6 +1931,18 @@ impl Config {
                             entitlements.display()
                         ),
                     ));
+                }
+                for (at_index, language) in macos.localizations.iter().enumerate() {
+                    if !is_language_id(language)
+                        || macos.localizations[..at_index].contains(language)
+                    {
+                        return Err(at(
+                            "macos.localizations",
+                            &format!(
+                                "{language:?} must be a language ID (en, pt-BR, zh-Hans), listed once"
+                            ),
+                        ));
+                    }
                 }
                 if let Some(category) = &macos.category
                     && !category
