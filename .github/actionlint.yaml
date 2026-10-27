@@ -7,3 +7,6 @@ paths:
   .github/workflows/dist.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/delete-artifacts.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

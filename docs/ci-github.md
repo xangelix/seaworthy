@@ -11,6 +11,7 @@ described in [packaging.md](packaging.md), the files the jobs read in
 | File | What |
 |---|---|
 | `.github/workflows/dist.yml` | the reusable workflow (`on: workflow_call`) |
+| `.github/workflows/delete-artifacts.yml` | a reusable workflow deleting the calling run's artifacts once they're delivered ([below](#deleting-the-artifacts)) |
 | `.github/actions/setup-seaworthy` | a composite action building the `seaworthy` command from a seaworthy checkout, cached by its commit |
 
 ## Calling it
@@ -158,9 +159,45 @@ cap them too):
 | `linux-runner`, `windows-runner`, `macos-runner` | `ubuntu-24.04`, `windows-2025`, `macos-15` | runner labels (GitHub-hosted by default; the macOS one Apple Silicon) |
 | `linux-build-image` | the official `rust:1.99.1-bookworm`, digest-pinned | the Linux builds' image: digest-pinned, glibc at or below the products' floor, a FIPS product's toolchain |
 | `release-manifest-algorithm`, `openpgp-key-fingerprint`, `authenticode-timestamp-url`, `azure-*`, `apple-identity` | (none) | the signers' non-secret settings (below) |
-| `artifact-prefix`, `retention-days` | `seaworthy`, `14` | the uploaded artifacts' names and lifetime |
+| `artifact-prefix`, `retention-days` | `seaworthy`, `14` | the uploaded artifacts' names and lifetime (on a public repository, who can read them: [below](#deleting-the-artifacts)) |
 
 Outputs: `version` (the release version) and `packages-artifact` (the packages artifact's name).
+
+## Deleting the artifacts
+
+A run's artifacts aren't private on a public repository: any signed-in GitHub user can download
+them until they expire (`retention-days`), and proxies such as nightly.link serve them with no
+login. The workflow's artifacts are the product's builds, the cores and every package, signed and
+notarized on a release: there before your deploy is approved, and still there if you abandon the
+release. When that matters (binaries you sell, or no signed build of a release you didn't
+publish), delete them once they're delivered, with `delete-artifacts.yml` as the run's last job:
+
+```yaml
+  delete-artifacts:
+    needs: [upload]                   # every job that downloads them
+    # A pull request's run from a fork, or Dependabot's, has a read-only token: skipped there.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login != 'dependabot[bot]')
+    uses: xangelix/seaworthy/.github/workflows/delete-artifacts.yml@<full commit SHA> # the commit dist.yml is pinned to
+    permissions:
+      actions: write # to delete this run's artifacts
+```
+
+It deletes every artifact of the run, the caller's own included; `pattern`, a bash pattern,
+narrows that (`seaworthy-build-*`). A failed or rejected deploy skips it, so the artifacts stay for
+"Re-run failed jobs" until they expire: keep `retention-days` to what a re-run needs. A skipped
+run's artifacts (a fork's pull request) expire the same way. The job runs `gh`, which
+GitHub-hosted runners have.
+
+| Input | Default | What |
+|---|---|---|
+| `pattern` | `*` | the names of the artifacts to delete, a bash pattern |
+| `linux-runner` | `ubuntu-24.04` | the job's runner label |
+
+GitHub has no setting that keeps a public repository's artifacts to its maintainers; the GitLab
+templates can (`artifact-access`, [ci-gitlab.md](ci-gitlab.md#inputs)).
 
 ## Secrets and signers
 
