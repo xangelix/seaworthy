@@ -163,6 +163,14 @@ pub struct Defaults {
     /// (`crate::repository_package`), and `repo` publishes it.
     #[serde(default)]
     pub repository: Option<RepositorySettings>,
+    /// Whether `seaworthy repo` publishes each installable artifact's SBOM
+    /// beside it in the release tree (default `false`). No client fetches
+    /// one, so by default they stay with `package`'s output, for the
+    /// vendor to hand out deliberately (a customer's request, a
+    /// regulator's), rather than an inventory of every file and crate
+    /// anyone can read.
+    #[serde(default)]
+    pub publish_sboms: bool,
 }
 
 fn default_macos_targets() -> Vec<String> {
@@ -578,6 +586,14 @@ pub struct Macos {
     /// `LSApplicationCategoryType` (`public.app-category.utilities`).
     #[serde(default)]
     pub category: Option<String>,
+    /// `CFBundleLocalizations`: the languages the app speaks (`en`,
+    /// `pt-BR`, `zh-Hans`). An app that carries its translations in its
+    /// binary has no `.lproj` directories for macOS to find them by: without
+    /// the list, the system's own text in the app (the standard menus and
+    /// panels) stays English, and System Settings offers no per-app
+    /// language.
+    #[serde(default)]
+    pub localizations: Vec<String>,
     /// The entitlements a Developer ID signature gives the app (an XML
     /// property list, relative to `seaworthy.toml`): the hardened
     /// runtime's exceptions it needs, such as
@@ -628,6 +644,13 @@ pub struct Desktop {
     /// The `.desktop` entry's `Keywords`, for the menu's search.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// The `.desktop` entry's `MimeType`: the types the app opens
+    /// (`inode/directory`: folders), which file managers offer it for
+    /// ("Open With"). With any, `Exec` takes the file it's opened with
+    /// (`%f`: one per launch, so an app taking one path is started once per
+    /// file a user picks rather than refusing the rest).
+    #[serde(default)]
+    pub mime_types: Vec<String>,
     /// The `.desktop` entry's `StartupWMClass`: the window class (X11) or
     /// app id (Wayland) the app's windows carry, so a dock groups them
     /// under the entry (winit: the `app_id`/`name` it sets).
@@ -1252,6 +1275,35 @@ fn is_app_id(text: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
         })
+}
+
+/// A language ID as `CFBundleLocalizations` lists them: a two- or
+/// three-letter language, then subtags of two to eight letters or digits
+/// after `-` or `_` (`en`, `pt-BR`, `zh-Hans`, `sr-Latn-RS`).
+fn is_language_id(text: &str) -> bool {
+    let mut parts = text.split(['-', '_']);
+    parts
+        .next()
+        .is_some_and(|l| (2..=3).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphabetic()))
+        && parts.all(|s| (2..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// A media type as `MimeType` lists them: `type/subtype`, each 1 to 127
+/// of RFC 6838's name characters, starting with a letter or digit (no
+/// `$`, which nFPM would expand).
+fn is_mime_type(text: &str) -> bool {
+    let name = |part: &str| {
+        (1..=127).contains(&part.len())
+            && part
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#&-^_.+".contains(&b))
+    };
+    text.split_once('/')
+        .is_some_and(|(kind, subtype)| name(kind) && name(subtype))
 }
 
 /// A `.desktop` category name: `[A-Za-z0-9-]`, at most 64 bytes.
@@ -1905,6 +1957,18 @@ impl Config {
                         ),
                     ));
                 }
+                for (at_index, language) in macos.localizations.iter().enumerate() {
+                    if !is_language_id(language)
+                        || macos.localizations[..at_index].contains(language)
+                    {
+                        return Err(at(
+                            "macos.localizations",
+                            &format!(
+                                "{language:?} must be a language ID (en, pt-BR, zh-Hans), listed once"
+                            ),
+                        ));
+                    }
+                }
                 if let Some(category) = &macos.category
                     && !category
                         .strip_prefix("public.app-category.")
@@ -2264,6 +2328,14 @@ impl Config {
                         &format!(
                             "{keyword:?} must be non-empty text without control characters, `$`, `;` or `\\`"
                         ),
+                    ));
+                }
+            }
+            for (index, mime) in desktop.mime_types.iter().enumerate() {
+                if !is_mime_type(mime) || desktop.mime_types[..index].contains(mime) {
+                    return Err(at(
+                        "desktop.mime-types",
+                        &format!("{mime:?} must be a media type (inode/directory), listed once"),
                     ));
                 }
             }

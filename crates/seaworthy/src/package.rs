@@ -310,6 +310,18 @@ struct ListedArtifact<'a> {
     sha256: &'a str,
 }
 
+/// Refuses build metadata that isn't SemVer's ([`crate::sign::BuildId::is_valid`]):
+/// it reaches the manifests, the package descriptions and the SBOMs.
+fn check_build(build: &crate::sign::BuildId) -> Result<(), DistError> {
+    if build.is_valid() {
+        return Ok(());
+    }
+    Err(DistError::Config(format!(
+        "the build metadata {:?} isn't SemVer's: at most 64 characters of dot-separated, non-empty identifiers of A-Z a-z 0-9 -",
+        build.metadata
+    )))
+}
+
 /// The artifact stem: `<package>-<version>-<sequence>`.
 #[must_use]
 pub fn stem(config: &Config, id: &str, release: &Release) -> String {
@@ -347,6 +359,7 @@ pub fn package(
         .get(id)
         .ok_or_else(|| DistError::Config(format!("no product {id:?} in seaworthy.toml")))?;
     let versions = options.release.package_versions()?;
+    check_build(&options.build)?;
     let pins = signing_pins(config, signing)?;
     let base = out.join(id);
     remove_listing(&base)?;
@@ -447,6 +460,7 @@ pub fn package(
                     &linux,
                     output,
                     &versions,
+                    &options.build.metadata,
                     options.mtime,
                     &work,
                 )?;
@@ -611,7 +625,14 @@ pub fn package(
             target: built.kind.target(),
             files: &files,
         };
-        let text = crate::sbom::sbom(config, id, &options.release, &info, options.mtime)?;
+        let text = crate::sbom::sbom(
+            config,
+            id,
+            &options.release,
+            &options.build.metadata,
+            &info,
+            options.mtime,
+        )?;
         let path = crate::sbom::sbom_path(&built.path);
         write(&path, text.as_bytes())?;
         sboms.push(artifact(Kind::Sbom, path)?);
@@ -653,6 +674,7 @@ pub fn repository(
         ));
     }
     let versions = options.release.package_versions()?;
+    check_build(&options.build)?;
     let pins = signing_pins(config, signing)?;
     let base = out.join(id);
     remove_listing(&base)?;
@@ -708,7 +730,14 @@ pub fn repository(
             target: kind.target(),
             files: &files,
         };
-        let text = crate::sbom::sbom(config, id, &options.release, &info, options.mtime)?;
+        let text = crate::sbom::sbom(
+            config,
+            id,
+            &options.release,
+            &options.build.metadata,
+            &info,
+            options.mtime,
+        )?;
         let path = crate::sbom::sbom_path(&package.path);
         write(&path, text.as_bytes())?;
         sboms.push(artifact(Kind::Sbom, path)?);
@@ -1047,7 +1076,14 @@ pub fn adopt_msi(
         target: Kind::Msi.target(),
         files: &files,
     };
-    let sbom_text = crate::sbom::sbom(config, id, &options.release, &info, mtime)?;
+    let sbom_text = crate::sbom::sbom(
+        config,
+        id,
+        &options.release,
+        &options.build.metadata,
+        &info,
+        mtime,
+    )?;
     let sbom_path = crate::sbom::sbom_path(&msi_artifact.path);
     write(&sbom_path, sbom_text.as_bytes())?;
     new.push(artifact(Kind::Sbom, sbom_path)?);

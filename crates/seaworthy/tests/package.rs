@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output as ProcessOutput};
 
-use common::{artifact, build, golden, have, layout_for, layouts, nfpm, release, run};
+use common::{artifact, build_as, golden, have, layout_for, layouts, nfpm, release, run};
 use seaworthy::config::{Config, Output};
 use seaworthy::inputs::LINUX;
 use seaworthy::linux::{Source, linux_package};
@@ -306,6 +306,7 @@ fn a_desktop_package_with_the_helper_carries_its_unit_and_polkit_rule() {
             &pkg,
             format,
             &versions,
+            "",
             1_700_000_000,
             &tmp.path().join("work"),
         )
@@ -1218,6 +1219,7 @@ fn nfpm_configurations_match_their_golden_files() {
             &pkg,
             format,
             &versions,
+            "a1b2c3d4",
             1_700_000_000,
             &work,
         )
@@ -1245,8 +1247,10 @@ fn every_output_builds_reads_back_and_reproduces() {
     }
     let config = Config::parse(AGENT).unwrap();
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let first = build(&config, "agent", a.path(), &nfpm, None);
-    let second = build(&config, "agent", b.path(), &nfpm, None);
+    // Named by a build (the commit, in CI): a line of each package's
+    // description and a property of each SBOM.
+    let first = build_as(&config, "agent", a.path(), &nfpm, None, "a1b2c3d4");
+    let second = build_as(&config, "agent", b.path(), &nfpm, None, "a1b2c3d4");
     let names = |artifacts: &[seaworthy::package::Artifact]| -> Vec<(Kind, String, String)> {
         artifacts
             .iter()
@@ -1319,6 +1323,14 @@ fn every_output_builds_reads_back_and_reproduces() {
         sbom_files.contains(&"/opt/acme/agent/AcmeTool"),
         "{sbom_files:?}"
     );
+    assert!(
+        deb_sbom["metadata"]["component"]["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "seaworthy:build" && p["value"] == "a1b2c3d4"),
+        "{deb_sbom}"
+    );
     // Byte for byte, twice.
     assert_eq!(listed, names(&second), "two builds differ");
     let listing: serde_json::Value = serde_json::from_str(
@@ -1327,6 +1339,8 @@ fn every_output_builds_reads_back_and_reproduces() {
     .unwrap();
     assert_eq!(listing["version"], "1.4.0-rc.2");
     assert_eq!(listing["sequence"], 812);
+    assert_eq!(listing["build"], "a1b2c3d4");
+    assert_eq!(listing["token"], "1.4.0-rc.2+a1b2c3d4");
     assert_eq!(
         listing["artifacts"][3]["file"],
         "packages/acme-agent_1.4.0~rc.2-812_amd64.deb"
@@ -1360,6 +1374,10 @@ fn every_output_builds_reads_back_and_reproduces() {
             "libc6 (>= 2.36), systemd, ca-certificates"
         );
         assert_eq!(field("Homepage"), "https://acme.test");
+        assert_eq!(
+            field("Description"),
+            "Collects things for Acme.\n Build: a1b2c3d4"
+        );
         let contents = run(Command::new("dpkg-deb").arg("-c").arg(&deb));
         for (mode, path) in [
             ("-rwxr-xr-x root/root", "./opt/acme/agent/AcmeTool"),
@@ -1431,6 +1449,12 @@ fn every_output_builds_reads_back_and_reproduces() {
             requires.lines().any(|l| l.trim() == "systemd"),
             "{requires}"
         );
+        // The summary is the product's one line; the description adds
+        // the build.
+        assert_eq!(
+            rpm_q(&["--qf", "%{SUMMARY}|%{DESCRIPTION}"]),
+            "Collects things for Acme.|Collects things for Acme.\nBuild: a1b2c3d4"
+        );
         let scripts = rpm_q(&["--scripts"]);
         for phase in ["preinstall", "postinstall", "preuninstall", "postuninstall"] {
             assert!(
@@ -1475,6 +1499,7 @@ fn every_output_builds_reads_back_and_reproduces() {
         for line in [
             "pkgname = acme-agent",
             "pkgver = 1.4.0rc.2-812",
+            "pkgdesc = Collects things for Acme. (build a1b2c3d4)",
             "arch = x86_64",
             "depend = glibc",
             "depend = systemd",

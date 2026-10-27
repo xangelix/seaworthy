@@ -316,8 +316,8 @@ fn signed_releases_publish_as_repositories_every_client_reads() {
     }
 
     // Releases: every installable artifact where the helper's URL template
-    // points, with its manifest, its SBOM and (pacman) its signature, byte
-    // for byte.
+    // points, with its manifest and (pacman) its signature, byte for byte;
+    // never its SBOM, which this seaworthy.toml doesn't publish.
     let mut released = 0;
     for listing in &listings {
         for artifact in &listing.artifacts {
@@ -337,7 +337,11 @@ fn signed_releases_publish_as_repositories_every_client_reads() {
                 std::fs::read(artifact.path(listing)).unwrap(),
                 "{name}"
             );
-            let mut companions = vec![".manifest", ".cdx.json"];
+            assert!(
+                !dir.join(format!("{name}.cdx.json")).exists(),
+                "{name}: an SBOM published without publish-sboms"
+            );
+            let mut companions = vec![".manifest"];
             if artifact.kind == Kind::Pacman {
                 companions.push(".sig");
             }
@@ -438,6 +442,48 @@ fn signed_releases_publish_as_repositories_every_client_reads() {
 }
 
 /// Copies `from` into `to`, recursively.
+/// With `publish-sboms`, every installable artifact's SBOM is published
+/// beside it, byte for byte, and the plan names it as immutable.
+#[test]
+fn sboms_are_published_when_seaworthy_toml_asks() {
+    let Some(nfpm) = tools() else { return };
+    let mut fixture = Fixture::new(&nfpm, true);
+    fixture.config.defaults.publish_sboms = true;
+    let listings = fixture.listings();
+    let out = fixture.path().join("repo");
+    let plan = fixture.build(&listings, &out).unwrap();
+    let mut published = 0;
+    for listing in &listings {
+        for artifact in &listing.artifacts {
+            let Some(format) = artifact.kind.artifact_format() else {
+                continue;
+            };
+            let path = format!(
+                "releases/{package}/stable/{TOKEN}/{target}/{package}.{format}.cdx.json",
+                package = listing.package,
+                target = artifact.target,
+                format = format.tag()
+            );
+            assert_eq!(
+                std::fs::read(out.join(&path)).unwrap(),
+                std::fs::read(listing.dir.join(format!("{}.cdx.json", artifact.file))).unwrap(),
+                "{path}"
+            );
+            assert!(
+                plan.files
+                    .iter()
+                    .any(|f| f.path == path && f.class == Class::Immutable),
+                "{path} isn't planned as immutable"
+            );
+            published += 1;
+        }
+    }
+    assert_eq!(
+        published, 8,
+        "agent: deb, rpm, pacman, tar, zip; console: three"
+    );
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {

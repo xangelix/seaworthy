@@ -33,6 +33,14 @@
 //! `polkit` for rpm and pacman), which reads the rule letting the session
 //! start it.
 //!
+//! The release's build metadata (`package --build`, often the commit) is
+//! a line of the description, where `apt show`, `dpkg -s`, `rpm -qi` and
+//! `pacman -Qi` all show it: `Build: <metadata>` on its own line for deb
+//! and rpm, ` (build <metadata>)` after pacman's one-line `pkgdesc`.
+//! Neither the version nor the file name carries it: a package manager
+//! orders versions, and a commit doesn't sort (the sequence orders two
+//! builds of one version). The rpm summary stays the bare description.
+//!
 //! nFPM expands `$VAR` and `${VAR}` in several metadata fields (description,
 //! maintainer, vendor, homepage, dependencies) with no escape, so
 //! `seaworthy.toml` refuses `$` in every text that reaches it
@@ -138,18 +146,32 @@ fn version_fields(format: Output, v: &PackageVersions) -> (&str, &str) {
     }
 }
 
+/// The package description: the product's, with the build metadata (none
+/// when empty) on a line of its own, or after pacman's one-line `pkgdesc`.
+fn description(product: &str, build: &str, format: Output) -> String {
+    match (build, format) {
+        ("", _) => product.to_owned(),
+        (_, Output::Pacman) => format!("{product} (build {build})"),
+        _ => format!("{product}\nBuild: {build}"),
+    }
+}
+
 /// Writes `format`'s nFPM configuration for product `id` under `work`
-/// (generated files and scripts beside it) and returns its path.
+/// (generated files and scripts beside it) and returns its path. `build`
+/// is the release's build metadata ([`crate::sign::BuildId`], already
+/// checked), empty for none.
 ///
 /// # Errors
 /// [`DistError::Io`]; [`DistError::Config`] for an unknown product or a
 /// format that isn't a Linux package.
+#[allow(clippy::too_many_arguments)]
 pub fn write_config(
     config: &Config,
     id: &str,
     package: &LinuxPackage,
     format: Output,
     versions: &PackageVersions,
+    build: &str,
     mtime: u64,
     work: &Path,
 ) -> Result<PathBuf, DistError> {
@@ -285,7 +307,7 @@ pub fn write_config(
         "section": "misc",
         "priority": "optional",
         "maintainer": d.maintainer,
-        "description": product.description,
+        "description": description(&product.description, build, format),
         "vendor": d.vendor,
         "license": d.license,
         "mtime": time,

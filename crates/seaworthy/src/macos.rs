@@ -766,7 +766,8 @@ fn xml_text(text: &str) -> String {
 /// launcher as its executable, the release as its version
 /// (`CFBundleShortVersionString` is `MAJOR.MINOR.PATCH`, the three integers
 /// Apple allows; `CFBundleVersion` the release sequence, which only grows),
-/// and `defaults.macos-minimum` as `LSMinimumSystemVersion`.
+/// `defaults.macos-minimum` as `LSMinimumSystemVersion`, and the app's
+/// languages as `CFBundleLocalizations`.
 ///
 /// # Errors
 /// [`DistError::Config`] when the product has no `[macos]` section.
@@ -816,6 +817,13 @@ pub fn info_plist(
             "\t<key>{key}</key>\n\t<string>{}</string>\n",
             xml_text(&value)
         ));
+    }
+    if !macos.localizations.is_empty() {
+        text.push_str("\t<key>CFBundleLocalizations</key>\n\t<array>\n");
+        for language in &macos.localizations {
+            text.push_str(&format!("\t\t<string>{}</string>\n", xml_text(language)));
+        }
+        text.push_str("\t</array>\n");
     }
     text.push_str("\t<key>NSHighResolutionCapable</key>\n\t<true/>\n</dict>\n</plist>\n");
     Ok(text)

@@ -73,6 +73,20 @@ fn the_macos_settings_are_validated() {
         &DESKTOP.replace("public.app-category.utilities", "Utilities"),
         "macos.category",
     );
+    for languages in [
+        "[\"en\", \"en\"]",
+        "[\"english\"]",
+        "[\"pt-\"]",
+        "[\"zh-Hans$\"]",
+    ] {
+        refused(
+            &DESKTOP.replace(
+                "bundle-id = \"test.acme.viewer\"",
+                &format!("bundle-id = \"test.acme.viewer\"\nlocalizations = {languages}"),
+            ),
+            "macos.localizations",
+        );
+    }
     refused(
         &DESKTOP.replace("[defaults]", "[defaults]\nmacos-minimum = \"10.15\""),
         "defaults.macos-minimum",
@@ -391,6 +405,7 @@ fn the_info_plist_names_the_bundle_and_the_release() {
     let config = config(DESKTOP).unwrap();
     let product = &config.products["viewer"];
     let plist = seaworthy::macos::info_plist(product, &common::release(), "11.0", true).unwrap();
+    assert!(!plist.contains("CFBundleLocalizations"), "{plist}");
     for needle in [
         "<key>CFBundleExecutable</key>\n\t<string>AcmeTool</string>",
         "<key>CFBundleIdentifier</key>\n\t<string>test.acme.viewer</string>",
@@ -403,6 +418,26 @@ fn the_info_plist_names_the_bundle_and_the_release() {
     ] {
         assert!(plist.contains(needle), "{needle}\n{plist}");
     }
+    // The app's languages, in order.
+    let localized = Config::parse(&DESKTOP.replace(
+        "bundle-id = \"test.acme.viewer\"",
+        "bundle-id = \"test.acme.viewer\"\nlocalizations = [\"en\", \"pt-BR\", \"zh-Hans\"]",
+    ))
+    .unwrap();
+    let plist = seaworthy::macos::info_plist(
+        &localized.products["viewer"],
+        &common::release(),
+        "11.0",
+        true,
+    )
+    .unwrap();
+    assert!(
+        plist.contains(
+            "<key>CFBundleLocalizations</key>\n\t<array>\n\t\t<string>en</string>\n\
+             \t\t<string>pt-BR</string>\n\t\t<string>zh-Hans</string>\n\t</array>\n"
+        ),
+        "{plist}"
+    );
 }
 
 /// Off a Mac, a dmg is refused by name: codesign and hdiutil are macOS's.

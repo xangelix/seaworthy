@@ -11,7 +11,8 @@
 # Installer's validation (ICE); seaworthy-msi-adopt (Linux) checks the MSI's
 # payload is exactly the signed tree (`seaworthy adopt-msi`), signs it with
 # the package job's signers on a release, and lists it with its manifest and
-# SBOM in seaworthy/adopted/, which seaworthy-repo publishes; on a dev build
+# SBOM in seaworthy/adopted/, which seaworthy-repo publishes (the SBOM only
+# with publish-sboms); on a dev build
 # (dev-sign-if) it signs the MSI with [authenticode] alone, under
 # dev-sign-secrets, as the package job signed the binaries. Signing stays on
 # Linux because the version resource is stamped into each binary before it's

@@ -798,6 +798,21 @@ fn desktop_entries_data_files_and_commands_are_validated() {
             "product.viewer.desktop.wm-class",
         ),
         (
+            "wm-class = \"AcmeViewer\"",
+            "mime-types = [\"directory\"]",
+            "product.viewer.desktop.mime-types",
+        ),
+        (
+            "wm-class = \"AcmeViewer\"",
+            "mime-types = [\"inode/directory\", \"inode/directory\"]",
+            "listed once",
+        ),
+        (
+            "wm-class = \"AcmeViewer\"",
+            "mime-types = [\"text/$plain\"]",
+            "must be a media type",
+        ),
+        (
             "linux.command = \"acme-viewer\"",
             "linux.command = \"Acme-Viewer\"",
             "product.viewer.linux.command: a command name",

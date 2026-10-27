@@ -1044,6 +1044,18 @@ pub(crate) fn build(
     nfpm: &Path,
     wix: Option<PathBuf>,
 ) -> Vec<seaworthy::package::Artifact> {
+    build_as(config, id, out, nfpm, wix, "")
+}
+
+/// [`build`], naming the release's build metadata (`package --build`).
+pub(crate) fn build_as(
+    config: &seaworthy::config::Config,
+    id: &str,
+    out: &Path,
+    nfpm: &Path,
+    wix: Option<PathBuf>,
+    build: &str,
+) -> Vec<seaworthy::package::Artifact> {
     let layouts = layouts(config, id, out);
     seaworthy::package::package(
         config,
@@ -1055,7 +1067,9 @@ pub(crate) fn build(
             mtime: 1_700_000_000,
             nfpm: nfpm.to_path_buf(),
             wix,
-            build: seaworthy::sign::BuildId::default(),
+            build: seaworthy::sign::BuildId {
+                metadata: build.to_owned(),
+            },
         },
         &seaworthy::package::Signing::default(),
     )

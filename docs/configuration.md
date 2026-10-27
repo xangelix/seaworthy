@@ -103,6 +103,7 @@ destination = "share"
 | `fips` | no | `true`: the cores carry the AWS-LC FIPS module, and `verify` applies the FIPS binary checks (default `false`). |
 | `macos-targets` | no | The macOS cores' CPU targets (default `["apple-m1"]`, which every arm64 Mac runs). |
 | `macos-minimum` | no | The oldest macOS the products run on (default `"11.0"`): the deployment target and `LSMinimumSystemVersion`; `verify` refuses a binary needing a newer one. |
+| `publish-sboms` | no | `true`: `seaworthy repo` publishes each installable artifact's SBOM beside it in the release tree (`<artifact>.cdx.json`). Default `false`: the SBOMs stay in `package`'s output, for you to hand out; no client fetches them ([packaging.md](packaging.md#sboms)). |
 
 `[defaults.authenticode]` pins who may Authenticode-sign (required to sign with Authenticode). It
 pins by subject and chain, not by certificate, because short-lived signing certificates change
@@ -115,7 +116,8 @@ while the identity and its CA stay:
 
 `[defaults.apple]` pins who may Developer ID-sign the macOS outputs (required to sign with
 `signing.toml`'s `[apple]`). It pins the team, not the certificate: Developer ID certificates are
-renewed while the team stays.
+renewed while the team stays. A pinned team also means a release's macOS outputs are always signed:
+the CI templates refuse a release whose macOS step got no `[apple]` signer.
 
 | Key | Meaning |
 |---|---|
@@ -218,6 +220,7 @@ and nothing else):
 | `desktop-shortcut` | `false` | A shortcut on every user's desktop. |
 | `categories` | `["Utility"]` | The `.desktop` entry's `Categories`: at least one freedesktop main category. |
 | `keywords` | `[]` | The `.desktop` entry's `Keywords`. |
+| `mime-types` | `[]` | The `.desktop` entry's `MimeType`: the media types the app opens (`["inode/directory"]` for folders), which file managers offer it for. With any, `Exec` takes the file it's opened with (`%f`: one per launch, so an app that takes one path starts once per file picked). |
 | `wm-class` | — | `StartupWMClass`: the window class (X11) or app id (Wayland) the app's windows carry. |
 
 `[product.<id>.macos]` (required with a macOS output):
@@ -227,6 +230,7 @@ and nothing else):
 | `bundle-id` | `CFBundleIdentifier`, reverse-DNS (`com.example.acme.viewer`). Required and never derived: macOS keys an app's permissions, preferences and notarization to it, so it must never change. |
 | `icon` | The app icon (`.icns`). |
 | `category` | `LSApplicationCategoryType` (`public.app-category.utilities`). |
+| `localizations` | `CFBundleLocalizations`: the languages the app speaks, as language IDs (`["en", "de", "pt-BR", "zh-Hans"]`), each once. An app that carries its translations in its binary has no `.lproj` directories for macOS to find them by: without the list, the system's own text in the app (the standard menus and panels) stays English, and System Settings offers no per-app language. |
 | `entitlements` | An XML property list (`.plist` or `.entitlements`, relative to `seaworthy.toml`) of the entitlements a Developer ID signature gives the main executable: the hardened runtime's exceptions the app needs (`com.apple.security.cs.allow-jit`, …). Ad hoc signatures carry none. |
 
 `[[product.<id>.files]]`: a data file, or a directory with everything below it, installed under the

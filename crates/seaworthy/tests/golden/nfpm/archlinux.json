@@ -147,7 +147,7 @@
     "systemd",
     "ca-certificates"
   ],
-  "description": "Collects things for Acme.",
+  "description": "Collects things for Acme. (build a1b2c3d4)",
   "disable_globbing": true,
   "homepage": "https://acme.test",
   "license": "MIT",

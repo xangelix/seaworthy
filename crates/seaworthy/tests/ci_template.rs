@@ -948,6 +948,165 @@ fn the_build_step_carries_out_the_plan() {
     assert_eq!(out.status.code(), Some(2), "{}", said(&out));
 }
 
+/// The source paths rustc writes into the binaries are remapped: a crate
+/// from a private git repository (a local one named `private_repo_name`)
+/// and code a build script generated in the target directory leave neither
+/// a path of the build machine (the workspace, the cargo home) nor the
+/// repository's name in the launcher or a core. With
+/// `SEAWORTHY_REMAP_PATHS=0` they do, which shows the check can see them.
+#[test]
+fn the_build_step_remaps_the_source_paths_in_the_binaries() {
+    if !common::have("cargo", &["--version"]) || !common::have("git", &["--version"]) {
+        return;
+    }
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        eprintln!("SKIPPED: the x86-64 Linux build plan links on an x86-64 Linux host only");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let write = |path: &Path, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let repo = root.join("private_repo_name");
+    write(
+        &repo.join("Cargo.toml"),
+        "[package]\nname = \"helper_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(
+        &repo.join("src/lib.rs"),
+        "pub fn origin() -> &'static str { file!() }\n",
+    );
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "private",
+        ],
+    ] {
+        let out = Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", said(&out));
+    }
+    let dependency = format!("helper_crate = {{ git = \"file://{}\" }}\n", repo.display());
+    let ws = root.join("product");
+    write(
+        &ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"tool\", \"core\"]\nresolver = \"3\"\n",
+    );
+    write(
+        &ws.join("tool/Cargo.toml"),
+        &format!(
+            "[package]\nname = \"tiny_tool\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [[bin]]\nname = \"TinyTool\"\npath = \"src/main.rs\"\n\n\
+             [[bin]]\nname = \"TinyUpdate\"\npath = \"src/update.rs\"\n\n[dependencies]\n{dependency}"
+        ),
+    );
+    write(
+        &ws.join("tool/src/main.rs"),
+        "fn main() { println!(\"{}\", helper_crate::origin()); }\n",
+    );
+    write(
+        &ws.join("tool/src/update.rs"),
+        "fn main() { println!(\"update\"); }\n",
+    );
+    write(
+        &ws.join("core/Cargo.toml"),
+        &format!(
+            "[package]\nname = \"tiny_core\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n{dependency}"
+        ),
+    );
+    write(
+        &ws.join("core/build.rs"),
+        "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    \
+         std::fs::write(format!(\"{out}/generated.rs\"), \"pub fn generated() -> &'static str { file!() }\\n\").unwrap();\n}\n",
+    );
+    write(
+        &ws.join("core/src/lib.rs"),
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+         #[unsafe(no_mangle)]\npub extern \"C\" fn tiny_core_origin() -> *const u8 { helper_crate::origin().as_ptr() }\n\
+         #[unsafe(no_mangle)]\npub extern \"C\" fn tiny_core_generated() -> *const u8 { generated().as_ptr() }\n",
+    );
+    write(
+        &ws.join("seaworthy.toml"),
+        "[defaults]\nvendor = \"Tiny\"\ntargets = [\"x86-64-v3\", \"x86-64-v2\"]\nchannel = \"stable\"\n\
+         release-signatures = [\"ml-dsa-87\"]\nmaintainer = \"Tiny <t@tiny.test>\"\nlicense = \"MIT\"\n\n\
+         [product.tool]\ndisplay-name = \"Tiny Tool\"\ndescription = \"A tiny tool.\"\nexecutable = \"TinyTool\"\n\
+         core = \"tiny_core\"\nhelper = \"TinyUpdate\"\nkind = \"desktop\"\noutputs = [\"deb\"]\n",
+    );
+    // A cargo home of its own: the checkout lands where this test can see
+    // it, and nothing reaches the network.
+    let cargo_home = root.join("cargo-home");
+    let cargo_home = cargo_home.to_str().unwrap();
+    let lock = Command::new("cargo")
+        .current_dir(&ws)
+        .env("CARGO_HOME", cargo_home)
+        .args(["generate-lockfile"])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{}", said(&lock));
+    tool_into(&ws);
+    let triple = "x86_64-unknown-linux-gnu";
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+        .current_dir(&ws)
+        .args(["build-plan", "--triple", triple])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{}", said(&plan));
+    std::fs::write(
+        ws.join(format!("seaworthy/plan-{triple}.tsv")),
+        &plan.stdout,
+    )
+    .unwrap();
+    let built = |remap: &str| -> Vec<(&'static str, Vec<u8>)> {
+        let out = step(
+            &ws,
+            &["build", triple],
+            &[("CARGO_HOME", cargo_home), ("SEAWORTHY_REMAP_PATHS", remap)],
+        );
+        assert!(out.status.success(), "{}", said(&out));
+        let artifacts = ws.join(format!("seaworthy/artifacts/{triple}"));
+        ["launcher/TinyTool", "cores/x86-64-v3/libtiny_core.so"]
+            .into_iter()
+            .map(|file| (file, std::fs::read(artifacts.join(file)).unwrap()))
+            .collect()
+    };
+    let holds = |bytes: &[u8], text: &str| bytes.windows(text.len()).any(|w| w == text.as_bytes());
+    let root_text = root.to_str().unwrap();
+    for (file, bytes) in built("1") {
+        for leak in [root_text, "private_repo_name", cargo_home] {
+            assert!(!holds(&bytes, leak), "{file} names {leak}");
+        }
+        assert!(
+            holds(&bytes, "/cargo/git/checkouts/"),
+            "{file}: the dependency's source path, remapped"
+        );
+        if file.starts_with("cores/") {
+            assert!(
+                holds(&bytes, "/target/"),
+                "{file}: the generated code's path, remapped"
+            );
+        }
+    }
+    for (file, bytes) in built("0") {
+        assert!(holds(&bytes, "private_repo_name"), "{file}");
+        assert!(holds(&bytes, root_text), "{file}");
+    }
+}
+
 const DESKTOP: &str = r#"
 [defaults]
 vendor = "Acme"
@@ -1156,6 +1315,65 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     let out = step(dir.path(), &["package"], &env);
     assert!(
         said(&out).contains("no seaworthy/artifacts (from the build jobs)"),
+        "{}",
+        said(&out)
+    );
+}
+
+/// A release's macOS step with no `[apple]` signer (the Developer ID
+/// secrets didn't reach it): under a team `[defaults.apple]` pins, refused
+/// before anything is packaged, since its outputs would ship ad hoc-signed;
+/// without the pin, ad hoc-signed on purpose. `uname` says Darwin: the
+/// step's own checks, run off a Mac.
+#[test]
+fn a_release_never_ships_ad_hoc_macos_outputs_under_a_pinned_apple_team() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script_at(&bin.join("uname"), "#!/bin/bash\necho Darwin\n");
+    let checkout = dir.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("seaworthy/artifacts/aarch64-apple-darwin")).unwrap();
+    let config = DESKTOP
+        .replace(
+            "helper = \"AcmeToolUpdate\"\n",
+            "updates.default = \"off\"\n",
+        )
+        .replace(
+            "outputs = [\"deb\", \"tar\"]",
+            "outputs = [\"deb\", \"tar\", \"dmg\"]",
+        )
+        + "\n[product.console.macos]\nbundle-id = \"test.acme.console\"\n";
+    let path = path_with(&bin);
+    let env = [
+        ("PATH", path.as_str()),
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_VERSION", "1.4.0"),
+        ("SEAWORTHY_SEQUENCE", "41"),
+        ("SEAWORTHY_COMMIT", "0a1b2c3"),
+        ("SEAWORTHY_CHECKOUT", checkout.to_str().unwrap()),
+        ("SEAWORTHY_TOOL_BIN", env!("CARGO_BIN_EXE_seaworthy")),
+        ("SOURCE_DATE_EPOCH", "1700000000"),
+    ];
+    let pinned = format!("{config}\n[defaults.apple]\nteam-id = \"ABCDE12345\"\n");
+    std::fs::write(dir.path().join("seaworthy.toml"), &pinned).unwrap();
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(!out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains(
+            "pins [defaults.apple] (team ABCDE12345), but no [apple] signer reached this release's macOS step"
+        ),
+        "{}",
+        said(&out)
+    );
+    assert!(!dir.path().join("seaworthy/dist-macos").exists());
+    // Without the pin the step goes on, ad hoc-signed (and here fails
+    // later, with no Mac tools to package with).
+    std::fs::write(dir.path().join("seaworthy.toml"), &config).unwrap();
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(
+        said(&out).contains("its macOS outputs stay ad hoc-signed pipeline artifacts"),
         "{}",
         said(&out)
     );
@@ -1681,13 +1899,52 @@ fn common_copy(from: &Path, to: &Path) {
     }
 }
 
-/// An executable script at `path`.
+/// A stub cargo's answer to the build steps' `cargo metadata` (where the
+/// source paths they remap come from), never logged as a build: the JSON
+/// file `$STUB_METADATA` names, else no packages; its arguments, one per
+/// line, into the file `$STUB_METADATA_ARGS` names.
+const METADATA_STUB: &str = "if [ \"$1\" = metadata ]; then \
+                             [ -z \"${STUB_METADATA_ARGS:-}\" ] || printf '%s\\n' \"$@\" > \"$STUB_METADATA_ARGS\"; \
+                             if [ -n \"${STUB_METADATA:-}\" ]; \
+                             then cat \"$STUB_METADATA\"; else echo '{\"packages\":[]}'; fi; exit 0; fi\n";
+
+/// What the build's `cargo metadata` must get, given the caller's cargo
+/// arguments [`CALLER_CARGO_ARGS`]: the triple, and the arguments that say
+/// where the sources are and which features build, never a build-only one.
+fn expected_metadata_args(triple: &str) -> Vec<String> {
+    [
+        "metadata",
+        "--quiet",
+        "--format-version",
+        "1",
+        "--locked",
+        "--filter-platform",
+        triple,
+        "--manifest-path",
+        "Cargo.toml",
+        "--offline",
+        "--config",
+        "source.crates-io.replace-with=\"vendored\"",
+        "--features",
+        "fips",
+        "-Zbuild-std",
+        "--config=net.retry=5",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// A caller's `SEAWORTHY_CARGO_ARGS`: a vendored, offline build (the lab's)
+/// with build-only arguments mixed in (`-j`, `--timings`).
+const CALLER_CARGO_ARGS: &str = "--offline --config source.crates-io.replace-with=\"vendored\" -j 2 \
+                                 --features fips --timings -Zbuild-std --config=net.retry=5";
+
 /// A stub cargo for the Windows build: records its arguments (one file per
 /// call), the release and MSVC variables it was given, and leaves what a
 /// build would (an .exe, or a core .dll and the FIPS DLL pair).
 fn windows_cargo_stub(log: &Path) -> String {
     format!(
-        "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
+        "#!/bin/bash\n{METADATA_STUB}printf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
                  env | grep '^SEAWORTHY_RELEASE_' | sort > \"{log}/release-env\"\n\
                  env | grep -E '^(INCLUDE|LIB|VCToolsInstallDir|LIBCLANG_PATH)=' | sort > \"{log}/msvc-env\"\n\
                  dir=\"\" name=\"\" kind=\"\"\n\
@@ -1700,6 +1957,7 @@ fn windows_cargo_stub(log: &Path) -> String {
     )
 }
 
+/// An executable script at `path`.
 fn script_at(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
     use std::os::unix::fs::PermissionsExt as _;
@@ -1828,18 +2086,25 @@ fn the_windows_build_carries_out_the_plan_in_both_argument_passing_modes() {
         ] {
             assert!(artifacts.join(file).is_file(), "{mode}: {file}");
         }
-        // The per-CPU flags reached cargo as one argument, whole.
+        // The per-CPU flags and the source path remaps (paths, `=`
+        // inside) reached cargo as one argument, whole.
         let calls: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|p| p.extension().is_some_and(|e| e == "args"))
             .map(|p| std::fs::read_to_string(p).unwrap())
             .collect();
+        let workspace = dir.path().canonicalize().unwrap();
+        let remaps = format!(
+            "'--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target'",
+            ws = workspace.display()
+        );
         assert!(
-            calls
-                .iter()
-                .any(|c| c.lines().any(|l| l
-                    == "target.x86_64-pc-windows-msvc.rustflags=['-C','target-cpu=x86-64-v3','-C','target-feature=+crt-static']")),
+            calls.iter().any(|c| c.lines().any(|l| l
+                == format!(
+                    "target.x86_64-pc-windows-msvc.rustflags=['-C','target-cpu=x86-64-v3',\
+                     '-C','target-feature=+crt-static',{remaps}]"
+                ))),
             "{mode}: {calls:#?}"
         );
         assert!(
@@ -2525,7 +2790,7 @@ fn the_build_step_names_the_release_for_the_product_s_build_scripts() {
     script_at(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/bash\nenv | grep '^SEAWORTHY_RELEASE_' | sort > '{}'\n\
+            "#!/bin/bash\n{METADATA_STUB}env | grep '^SEAWORTHY_RELEASE_' | sort > '{}'\n\
              while [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && dir=\"$2\"; shift; done\n\
              mkdir -p \"$dir/x86_64-unknown-linux-gnu/release\" && echo bin > \"$dir/x86_64-unknown-linux-gnu/release/tool\"\n",
             seen.display()
@@ -2791,12 +3056,40 @@ fn rustflags_by_target_dir(log: &Path, triple: &str) -> std::collections::BTreeM
     seen
 }
 
+/// A `cargo metadata` answer, written to `<dir>/metadata.json` for the stub
+/// cargo ([`METADATA_STUB`]): a workspace member, crates from two cargo
+/// homes, and two crates of one private git dependency's checkout. With it,
+/// the remaps the build must derive for `workspace`, most specific last, as
+/// `target.<triple>.rustflags` lists them: the workspace, the target root,
+/// each cargo home once (sorted), then the checkout, without its name.
+fn fake_metadata(dir: &Path, workspace: &Path) -> (PathBuf, String) {
+    let ws = workspace.display();
+    let json = format!(
+        "{{\"packages\":[\n\
+         {{\"name\":\"member\",\"manifest_path\":\"{ws}/core/Cargo.toml\"}},\n\
+         {{\"name\":\"itoa\",\"manifest_path\":\"/fake/home/registry/src/index.crates.io-1949cf8c6b5b557f/itoa-1.0.18/Cargo.toml\"}},\n\
+         {{\"name\":\"secret\",\"manifest_path\":\"/fake/home/git/checkouts/private_repo-0123456789abcdef/abc1234/Cargo.toml\"}},\n\
+         {{\"name\":\"secret_macros\",\"manifest_path\":\"/fake/home/git/checkouts/private_repo-0123456789abcdef/abc1234/macros/Cargo.toml\"}},\n\
+         {{\"name\":\"other\",\"manifest_path\":\"/fake/cargo2/registry/src/index.crates.io-1949cf8c6b5b557f/other-2.0.0/Cargo.toml\"}}\n\
+         ]}}\n"
+    );
+    let path = dir.join("metadata.json");
+    std::fs::write(&path, json).unwrap();
+    let remaps = format!(
+        "'--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target',\
+         '--remap-path-prefix=/fake/cargo2=/cargo','--remap-path-prefix=/fake/home=/cargo',\
+         '--remap-path-prefix=/fake/home/git/checkouts/private_repo-0123456789abcdef=/cargo/git/checkouts/0123456789abcdef'"
+    );
+    (path, remaps)
+}
+
 /// The caller's extra rustflags (`SEAWORTHY_RUSTFLAGS` for every build,
 /// `SEAWORTHY_CORE_RUSTFLAGS` for the cores alone: PGO's `-Cprofile-use`,
 /// say) join each build's `target.<triple>.rustflags` after the plan's
-/// per-CPU flags, with `{workspace}` (absolute), `{triple}` and `{cpu}`
-/// expanded. Refused: a flag choosing the CPU or its features, a quote, an
-/// unknown placeholder, and `{workspace}` without the workspace manifest.
+/// per-CPU flags and the source path remaps, with `{workspace}` (absolute),
+/// `{triple}` and `{cpu}` expanded. Refused: a flag choosing the CPU or its
+/// features, a quote, an unknown placeholder, `{workspace}` without the
+/// workspace manifest, and a `SEAWORTHY_REMAP_PATHS` other than 1 or 0.
 #[test]
 fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
     let triple = "x86_64-unknown-linux-gnu";
@@ -2823,7 +3116,7 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
     script_at(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
+            "#!/bin/bash\n{METADATA_STUB}printf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
              dir=\"\" name=\"\" kind=\"\"\n\
              while [ $# -gt 0 ]; do case \"$1\" in --target-dir) dir=\"$2\"; shift ;; --bin) name=\"$2\"; kind=bin; shift ;; -p) name=\"$2\"; kind=lib; shift ;; esac; shift; done\n\
              release=\"$dir/{triple}/release\"; mkdir -p \"$release\"\n\
@@ -2841,7 +3134,10 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
         step(dir.path(), &["build", triple], &all)
     };
     let workspace = dir.path().canonicalize().unwrap();
+    let (metadata, remaps) = fake_metadata(dir.path(), &workspace);
+    let metadata = metadata.to_str().unwrap();
     let out = build(&[
+        ("STUB_METADATA", metadata),
         (
             "SEAWORTHY_RUSTFLAGS",
             "--cfg every_build -Cdebuginfo=line-tables-only",
@@ -2852,29 +3148,66 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
         ),
     ]);
     assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains("remapping source paths: "),
+        "{}",
+        said(&out)
+    );
     let flags = rustflags_by_target_dir(&log, triple);
     assert_eq!(
-        flags["base"], "['--cfg','every_build','-Cdebuginfo=line-tables-only']",
-        "the launcher and helper get every build's flags, never the cores'"
+        flags["base"],
+        format!("[{remaps},'--cfg','every_build','-Cdebuginfo=line-tables-only']"),
+        "the launcher and helper get the remaps and every build's flags, never the cores'"
     );
     for cpu in ["x86-64-v3", "x86-64-v2"] {
         assert_eq!(
             flags[cpu],
             format!(
-                "['-C','target-cpu={cpu}','--cfg','every_build','-Cdebuginfo=line-tables-only',\
+                "['-C','target-cpu={cpu}',{remaps},'--cfg','every_build','-Cdebuginfo=line-tables-only',\
                  '-Cprofile-use={}/pgo/{triple}-{cpu}.profdata','-Cllvm-args=-pgo-warn-mismatch=false']",
                 workspace.display()
             ),
-            "{cpu}: the plan's flags first, then every build's, then the cores'"
+            "{cpu}: the plan's flags first, then the remaps, every build's, then the cores'"
         );
     }
-    // Without extra flags the launcher's build gets none at all.
+    // A workspace without dependencies: its own paths alone.
     let out = build(&[]);
+    assert!(out.status.success(), "{}", said(&out));
+    let flags = rustflags_by_target_dir(&log, triple);
+    assert_eq!(
+        flags["base"],
+        format!(
+            "['--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target']",
+            ws = workspace.display()
+        )
+    );
+    // cargo metadata resolves what the builds do, and reads the sources
+    // they read: a vendored, offline build's.
+    let seen = dir.path().join("metadata-args");
+    let out = build(&[
+        ("STUB_METADATA_ARGS", seen.to_str().unwrap()),
+        ("SEAWORTHY_CARGO_ARGS", CALLER_CARGO_ARGS),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(&seen)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        expected_metadata_args(triple)
+    );
+    // Without remapping or extra flags the launcher's build gets none at all.
+    let out = build(&[("SEAWORTHY_REMAP_PATHS", "0"), ("STUB_METADATA", metadata)]);
     assert!(out.status.success(), "{}", said(&out));
     let flags = rustflags_by_target_dir(&log, triple);
     assert_eq!(flags["base"], "");
     assert_eq!(flags["x86-64-v3"], "['-C','target-cpu=x86-64-v3']");
     for (variable, value, why) in [
+        (
+            "SEAWORTHY_REMAP_PATHS",
+            "yes",
+            "SEAWORTHY_REMAP_PATHS is 1 (the default) or 0",
+        ),
         (
             "SEAWORTHY_CORE_RUSTFLAGS",
             "-Ctarget-cpu=native",
@@ -2942,7 +3275,7 @@ fn one_target_directory_builds_alone_for_a_job_per_cpu() {
     script_at(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
+            "#!/bin/bash\n{METADATA_STUB}printf '%s\\n' \"$@\" > \"{log}/$(date +%s%N).args\"\n\
              dir=\"\" name=\"\" kind=\"\"\n\
              while [ $# -gt 0 ]; do case \"$1\" in --target-dir) dir=\"$2\"; shift ;; --bin) name=\"$2\"; kind=bin; shift ;; -p) name=\"$2\"; kind=lib; shift ;; esac; shift; done\n\
              release=\"$dir/{triple}/release\"; mkdir -p \"$release\"\n\
@@ -3257,7 +3590,11 @@ fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
         }
         command.output().unwrap()
     };
+    let workspace = dir.canonicalize().unwrap();
+    let (metadata, remaps) = fake_metadata(top.path(), &workspace);
+    let metadata = metadata.to_str().unwrap();
     let out = run(&[
+        ("STUB_METADATA", metadata),
         ("SEAWORTHY_RUSTFLAGS", "--cfg every_build"),
         (
             "SEAWORTHY_CORE_RUSTFLAGS",
@@ -3268,20 +3605,47 @@ fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
     let flags = rustflags_by_target_dir(&log, triple);
     assert_eq!(
         flags["base"],
-        "['-C','target-feature=+crt-static','-C','link-arg=/DEPENDENTLOADFLAG:0xA00','--cfg','every_build']"
+        format!(
+            "['-C','target-feature=+crt-static','-C','link-arg=/DEPENDENTLOADFLAG:0xA00',{remaps},\
+             '--cfg','every_build']"
+        )
     );
-    let workspace = dir.canonicalize().unwrap();
     for cpu in ["x86-64-v3", "x86-64-v2"] {
         assert_eq!(
             flags[cpu],
             format!(
-                "['-C','target-cpu={cpu}','-C','target-feature=+crt-static','--cfg','every_build',\
+                "['-C','target-cpu={cpu}','-C','target-feature=+crt-static',{remaps},'--cfg','every_build',\
                  '-Cprofile-use={}/pgo/{triple}-{cpu}.profdata']",
                 workspace.display()
             )
         );
     }
+    let seen = top.path().join("metadata-args");
+    let out = run(&[
+        ("STUB_METADATA_ARGS", seen.to_str().unwrap()),
+        ("SEAWORTHY_CARGO_ARGS", CALLER_CARGO_ARGS),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(&seen)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        expected_metadata_args(triple)
+    );
+    let out = run(&[("SEAWORTHY_REMAP_PATHS", "0"), ("STUB_METADATA", metadata)]);
+    assert!(out.status.success(), "{}", said(&out));
+    let flags = rustflags_by_target_dir(&log, triple);
+    assert_eq!(
+        flags["base"],
+        "['-C','target-feature=+crt-static','-C','link-arg=/DEPENDENTLOADFLAG:0xA00']"
+    );
     for (variable, value, why) in [
+        (
+            "SEAWORTHY_REMAP_PATHS",
+            "yes",
+            "SEAWORTHY_REMAP_PATHS is 1 (the default) or 0",
+        ),
         (
             "SEAWORTHY_CORE_RUSTFLAGS",
             "-Ctarget-cpu=native",
