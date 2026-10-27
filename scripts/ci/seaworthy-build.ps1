@@ -33,9 +33,9 @@
 
     SEAWORTHY_REMAP_PATHS (1, the default) remaps the source paths rustc writes into the
     binaries, as scripts/ci/seaworthy.sh build does: the workspace to /workspace, the
-    target root to /target, each cargo home to /cargo and each git dependency's checkout
-    to /cargo/git/checkouts/<hash>, after the plan's flags and before the caller's; 0
-    leaves them.
+    target root to /target, the toolchain's own sources to /rustc/<commit>, each cargo
+    home to /cargo and each git dependency's checkout to /cargo/git/checkouts/<hash>,
+    after the plan's flags and before the caller's; 0 leaves them.
 
     Runs in the MSVC build image (the template's windows-image: VS Build Tools, CMake,
     Go, NASM, rustup), where the AWS-LC-FIPS module builds natively. Before building, it
@@ -236,6 +236,23 @@ function Get-RemapFlags {
     $RootPath = $TargetRoot
     if (-not [System.IO.Path]::IsPathRooted($RootPath)) { $RootPath = Join-Path (Get-Location).Path $RootPath }
     $Out += Get-Remap ([System.IO.Path]::GetFullPath($RootPath)) '/target'
+    # The toolchain's own sources: rustc's name for them, /rustc/<commit>,
+    # which a toolchain with rust-src swaps for its local copy. Asked of the
+    # toolchain cargo runs in the workspace (its rust-toolchain.toml).
+    $Rustc = 'rustc'
+    if ($env:RUSTC) { $Rustc = $env:RUSTC }
+    Push-Location -LiteralPath ([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ManifestPath)))
+    try {
+        $Sysroot = "$(& $Rustc --print sysroot)".Trim()
+        $SysrootStatus = $LASTEXITCODE
+        $Commit = @(& $Rustc -vV | ForEach-Object { if ("$_" -match '^commit-hash: (.+)$') { $Matches[1].Trim() } })
+    } finally {
+        Pop-Location
+    }
+    if ($SysrootStatus -ne 0 -or -not $Sysroot) { Fail "$Rustc --print sysroot failed: the toolchain's source path to remap comes from it" }
+    $Hash = 'unknown'
+    if ($Commit.Count -gt 0 -and $Commit[0]) { $Hash = $Commit[0] }
+    $Out += Get-Remap ([System.IO.Path]::Combine($Sysroot, 'lib', 'rustlib', 'src', 'rust')) "/rustc/$Hash"
     $Json = & cargo metadata --quiet --format-version 1 --locked --filter-platform $Triple --manifest-path $Manifest @Passed
     if ($LASTEXITCODE -ne 0) {
         Fail "cargo metadata failed ($LASTEXITCODE): the source paths to remap come from it (it gets SEAWORTHY_CARGO_ARGS' --offline, --frozen, --config, -Z and feature flags; SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
