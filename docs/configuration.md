@@ -103,6 +103,7 @@ destination = "share"
 | `fips` | no | `true`: the cores carry the AWS-LC FIPS module, and `verify` applies the FIPS binary checks (default `false`). |
 | `macos-targets` | no | The macOS cores' CPU targets (default `["apple-m1"]`, which every arm64 Mac runs). |
 | `macos-minimum` | no | The oldest macOS the products run on (default `"11.0"`): the deployment target and `LSMinimumSystemVersion`; `verify` refuses a binary needing a newer one. |
+| `publish-sboms` | no | `true`: `seaworthy repo` publishes each installable artifact's SBOM beside it in the release tree (`<artifact>.cdx.json`). Default `false`: the SBOMs stay in `package`'s output, for you to hand out; no client fetches them ([packaging.md](packaging.md#sboms)). |
 
 `[defaults.authenticode]` pins who may Authenticode-sign (required to sign with Authenticode). It
 pins by subject and chain, not by certificate, because short-lived signing certificates change

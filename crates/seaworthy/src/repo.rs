@@ -46,7 +46,9 @@
 //! - **Releases**: each installable artifact (deb, rpm, pacman, tar, zip,
 //!   msi) under the name the update helper's URL template builds
 //!   (`{product}/{channel}/{version}/{target}/{product}.{format}`),
-//!   with its signed manifest, its SBOM and, for pacman, its signature.
+//!   with its signed manifest and, for pacman, its signature; its SBOM
+//!   too with `defaults.publish-sboms` (no client fetches one, so by
+//!   default it stays with `package`'s output).
 //! - **The key**: `keys/<repo>.asc`, every OpenPGP key `seaworthy.toml` pins
 //!   (`defaults.openpgp-keys`), which the repository definitions name.
 //! - **The repository package** (with `[defaults.repository]`,
@@ -546,7 +548,7 @@ fn build_into(
     rollback: bool,
 ) -> Result<Plan, DistError> {
     let channel = config.defaults.channel.as_str();
-    releases(listings, out)?;
+    releases(listings, out, config.defaults.publish_sboms)?;
     for listing in listings {
         check_release(config, signers.pins, listing, out)?;
     }
@@ -975,10 +977,10 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// `releases/<package>/<channel>/<token>/<target>/<package>.<format>`,
-/// with its manifest, SBOM and (pacman) signature: the listed bytes, read
-/// once ([`ListedArtifact::read`]). Every check and every repository works
-/// from these copies.
-fn releases(listings: &[Listing], out: &Path) -> Result<(), DistError> {
+/// with its manifest, (pacman) signature and, with `publish_sboms`, SBOM:
+/// the listed bytes, read once ([`ListedArtifact::read`]). Every check and
+/// every repository works from these copies.
+fn releases(listings: &[Listing], out: &Path, publish_sboms: bool) -> Result<(), DistError> {
     for listing in listings {
         for artifact in &listing.artifacts {
             let Some(target) = release_path(out, listing, artifact) else {
@@ -991,6 +993,9 @@ fn releases(listings: &[Listing], out: &Path) -> Result<(), DistError> {
                 continue;
             }
             for (suffix, kind) in COMPANIONS {
+                if kind == Kind::Sbom && !publish_sboms {
+                    continue;
+                }
                 if let Some(companion) = listing.companion(artifact, suffix, kind) {
                     write_new(&suffixed(&target, suffix), &companion.read(listing)?)?;
                 }

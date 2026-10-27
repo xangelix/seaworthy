@@ -308,6 +308,13 @@ with its SHA-256, generated files included, and every Rust crate compiled into i
 they were built with `cargo auditable`. The document is byte-reproducible (its serial number derives
 from the artifact's SHA-512, its timestamp is `SOURCE_DATE_EPOCH`).
 
+`repo` publishes them beside their artifacts only with `[defaults]`'s `publish-sboms = true`. No
+client fetches one, so by default they stay in `package`'s output (the CI artifacts): yours to
+match against new advisories and to hand to the customers and auditors who ask, without publishing
+an inventory to everyone. (A binary still names its crates and their versions in its panic
+locations, rustc's paths to their sources; the CI templates' path remapping shortens those paths,
+but no stable compiler option drops the crate directories: [Source paths](#source-paths).)
+
 ### Reproducibility
 
 Every timestamp in every archive and package is `SOURCE_DATE_EPOCH` (default 1980-01-01, at most
@@ -393,7 +400,7 @@ as `package` listed it into a new directory:
 
 | Path | Class | What |
 |---|---|---|
-| `releases/<package>/<channel>/<token>/<target>/<package>.<format>` (+ `.manifest`, `.cdx.json`, pacman `.sig`) | immutable | each installable artifact where the update helper's URL template points |
+| `releases/<package>/<channel>/<token>/<target>/<package>.<format>` (+ `.manifest`, pacman `.sig`, `.cdx.json` with `publish-sboms`) | immutable | each installable artifact where the update helper's URL template points |
 | `apt/pool/main/<package>/*.deb`, `apt/dists/<channel>/main/binary-amd64/by-hash/SHA256/<sha256>` | immutable | the debs, and every index under its hash |
 | `apt/dists/<channel>/main/binary-amd64/Packages{,.gz}`, `apt/dists/<channel>/{Release,Release.gpg,InRelease}` | index | `dpkg-scanpackages`' stanzas and the signed `Release` |
 | `rpm/<channel>/x86_64/Packages/*.rpm`, `repodata/<sha256>-*.xml.gz` | immutable | the rpms and `createrepo_c`'s metadata |

@@ -163,6 +163,14 @@ pub struct Defaults {
     /// (`crate::repository_package`), and `repo` publishes it.
     #[serde(default)]
     pub repository: Option<RepositorySettings>,
+    /// Whether `seaworthy repo` publishes each installable artifact's SBOM
+    /// beside it in the release tree (default `false`). No client fetches
+    /// one, so by default they stay with `package`'s output, for the
+    /// vendor to hand out deliberately (a customer's request, a
+    /// regulator's), rather than an inventory of every file and crate
+    /// anyone can read.
+    #[serde(default)]
+    pub publish_sboms: bool,
 }
 
 fn default_macos_targets() -> Vec<String> {
