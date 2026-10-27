@@ -178,13 +178,21 @@ spec:
     publish-secrets:
       description: On a release, a command prefix the publish job's seaworthy call runs under, giving SEAWORTHY_S3_ACCESS_KEY_ID and SEAWORTHY_S3_SECRET_ACCESS_KEY.
       default: ""
+    artifact-access:
+      description: Who can download the jobs' artifacts through GitLab's UI or API (artifacts:access) - all (anyone, without signing in on a public project), developer, maintainer (GitLab 18.4 or later) or none. The jobs after them get them either way. A release's are its signed packages; pass the same value to every seaworthy template.
+      options:
+        - all
+        - developer
+        - maintainer
+        - none
+      default: all
 ---
 .seaworthy:
   image: $[[ inputs.tools-image ]]
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "aef9ee4913254b24"
+    SEAWORTHY_TEMPLATE: "d09b9e152b6cf19d"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
@@ -242,6 +250,7 @@ seaworthy-prepare:
       # product's version token) and the package job (which checks it).
       - seaworthy/release.env
     expire_in: 1 week
+    access: $[[ inputs.artifact-access ]]
 
 seaworthy-build-linux:
   extends: .seaworthy
@@ -267,6 +276,7 @@ seaworthy-build-linux:
     paths:
       - seaworthy/artifacts/x86_64-unknown-linux-gnu/
     expire_in: 1 week
+    access: $[[ inputs.artifact-access ]]
 
 seaworthy-package:
   extends: .seaworthy
@@ -313,6 +323,7 @@ seaworthy-package:
     paths:
       - seaworthy/dist/
     expire_in: 4 weeks
+    access: $[[ inputs.artifact-access ]]
 
 seaworthy-repo:
   extends: .seaworthy
@@ -347,6 +358,7 @@ seaworthy-repo:
     paths:
       - seaworthy/repo/
     expire_in: 4 weeks
+    access: $[[ inputs.artifact-access ]]
 
 seaworthy-publish:
   extends: .seaworthy

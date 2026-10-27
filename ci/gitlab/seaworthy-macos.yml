@@ -49,6 +49,14 @@ spec:
     release-if:
       description: The rules expression for a release (as seaworthy.yml's), so the job names the release's version; its dmg still stays out of the release.
       default: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)(\.(0|[1-9][0-9]*))?)?$/
+    artifact-access:
+      description: Who can download the jobs' artifacts through GitLab's UI or API (artifacts:access) - all (anyone, without signing in on a public project), developer, maintainer (GitLab 18.4 or later) or none. The jobs after them get them either way. A release's are its signed packages; pass the same value to every seaworthy template.
+      options:
+        - all
+        - developer
+        - maintainer
+        - none
+      default: all
 ---
 seaworthy-macos:
   extends: .seaworthy
@@ -98,3 +106,4 @@ seaworthy-macos:
     paths:
       - seaworthy/dist-macos/
     expire_in: 4 weeks
+    access: $[[ inputs.artifact-access ]]
