@@ -249,6 +249,8 @@ fn no_input_defaults_to_an_organization_and_every_secret_is_optional() {
             "release" | "dev-sign" | "publish-dry-run" | "allow-unsigned" | "ci-test-keys" => {
                 assert_eq!(default, "false")
             }
+            // Source paths are remapped unless a caller says otherwise.
+            "remap-paths" => assert_eq!(default, "true"),
             // Everything else (accounts, endpoints, identities, stores,
             // signing settings) has no default.
             _ => assert_eq!(default, "", "{name}"),

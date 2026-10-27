@@ -97,6 +97,12 @@
 #                             alone (the plan's steps whose target directory
 #                             isn't base), after SEAWORTHY_RUSTFLAGS', such
 #                             as -Cprofile-use={workspace}/pgo/{triple}.profdata
+#   SEAWORTHY_REMAP_PATHS     build: 1 (the default) remaps the source paths
+#                             rustc writes into the binaries (the workspace,
+#                             the target directories, the cargo home, each
+#                             git dependency's checkout) to neutral ones;
+#                             0 leaves them (docs/packaging.md, "Source
+#                             paths")
 #   SEAWORTHY_SERVER_JOBS     prepare: the server deploy jobs, comma-separated
 #   SEAWORTHY_CLIENT_JOBS     prepare: client jobs beside the publish job
 #                             (the web console's deploy), comma-separated
@@ -858,22 +864,35 @@ build() { # <triple> [<target dir>]
             workspace="$(cd "$(dirname "$manifest")" && pwd -P)"
             ;;
     esac
+    # The source paths rustc writes into the binaries, remapped: after the
+    # plan's flags, before the caller's (whose own remaps then win).
+    case "${SEAWORTHY_REMAP_PATHS:-1}" in
+        1)
+            remap_paths "$manifest" "$target_root"
+            say "remapping source paths: ${remaps[*]#--remap-path-prefix=}"
+            ;;
+        0) remaps=() ;;
+        *) fail "SEAWORTHY_REMAP_PATHS is 1 (the default) or 0, not ${SEAWORTHY_REMAP_PATHS@Q}" ;;
+    esac
     while IFS=$'\t' read -r kind a b c; do
         line=$((line + 1))
         case "$kind" in
             build)
-                local args=() flags=() rustflags=()
+                local args=() flags=() caller=() rustflags=()
                 read -r -a args <<<"$c"
                 [ "$b" = - ] || read -r -a flags <<<"$b"
-                # The caller's flags after the plan's: every build's, then
-                # (a core's step: its target directory is its CPU, never
-                # base) the cores'.
+                # The caller's flags after the plan's and the remaps: every
+                # build's, then (a core's step: its target directory is its
+                # CPU, never base) the cores'.
                 extra_flags "$a" "$triple" "$workspace" "${SEAWORTHY_RUSTFLAGS:-}"
-                flags+=("${expanded[@]}")
+                caller+=("${expanded[@]}")
                 if [ "$a" != base ]; then
                     extra_flags "$a" "$triple" "$workspace" "${SEAWORTHY_CORE_RUSTFLAGS:-}"
-                    flags+=("${expanded[@]}")
+                    caller+=("${expanded[@]}")
                 fi
+                # The remaps were announced once: each build names the rest.
+                local shown=("${flags[@]}" "${caller[@]}")
+                flags+=("${remaps[@]}" "${caller[@]}")
                 if [ "${#flags[@]}" -gt 0 ]; then
                     # TOML literal strings (extra_flags refuses a quote):
                     # one word every shell passes as is.
@@ -883,7 +902,7 @@ build() { # <triple> [<target dir>]
                 fi
                 local manifest_args=(--manifest-path "$manifest")
                 case " $c " in *" --manifest-path "*) manifest_args=() ;; esac
-                say "cargo build ${args[*]} ($a${flags[*]:+, ${flags[*]}})"
+                say "cargo build ${args[*]} ($a${shown[*]:+, ${shown[*]}})"
                 cargo build --quiet --release --locked --target "$triple" --target-dir "$target_root/$a" \
                     --config profile.release.strip=false "${rustflags[@]}" "${manifest_args[@]}" \
                     "${args[@]}" "${extra[@]}"
@@ -923,6 +942,58 @@ build() { # <triple> [<target dir>]
     done < "$plan"
     [ -z "$only" ] || rm -f "$plan"
     say "built: $(find "$artifacts/$triple" -type f | wc -l) file(s) under $artifacts/$triple"
+}
+
+# The build's --remap-path-prefix flags, in `remaps`: the source paths
+# rustc writes into the binaries (panic locations, debug info, file!())
+# name no build machine, home directory or private repository. The
+# workspace becomes /workspace, the target root /target, the cargo home
+# /cargo, and each git dependency's checkout /cargo/git/checkouts/<hash>,
+# without the repository's name. The crates' own directories
+# (<crate>-<version>) stay: rustc has no stable way to drop them. rustc
+# applies the last matching prefix, so the most specific come last (a
+# cargo home inside the workspace, a checkout inside the cargo home). The
+# cargo homes and checkouts are the ones cargo metadata names, every
+# feature and platform's, as cargo will hand rustc their paths.
+remaps=()
+remap_paths() { # <manifest> <target root>
+    local manifest="$1" target_root="$2" metadata path home dir from
+    local -A homes=() checkouts=()
+    remaps=()
+    remap_prefix "$(cd "$(dirname "$manifest")" && pwd -P)" /workspace
+    case "$target_root" in
+        /*) remap_prefix "$target_root" /target ;;
+        *) remap_prefix "$(pwd -P)/$target_root" /target ;;
+    esac
+    metadata="$(cargo metadata --quiet --format-version 1 --locked --all-features --manifest-path "$manifest")" ||
+        fail "cargo metadata failed: the source paths to remap come from it (SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
+    while IFS= read -r path; do
+        case "$path" in
+            */git/checkouts/*)
+                home="${path%%/git/checkouts/*}"
+                homes["$home"]=1
+                dir="${path#"$home/git/checkouts/"}"
+                dir="${dir%%/*}"
+                checkouts["$home/git/checkouts/$dir"]="/cargo/git/checkouts/${dir##*-}"
+                ;;
+            */registry/src/*) homes["${path%%/registry/src/*}"]=1 ;;
+        esac
+    done < <(grep -o '"manifest_path":"[^"]*"' <<<"$metadata" | sed 's/^"manifest_path":"//; s/"$//')
+    while IFS= read -r from; do
+        [ -z "$from" ] || remap_prefix "$from" /cargo
+    done < <(printf '%s\n' "${!homes[@]}" | LC_ALL=C sort)
+    while IFS= read -r from; do
+        [ -z "$from" ] || remap_prefix "$from" "${checkouts[$from]}"
+    done < <(printf '%s\n' "${!checkouts[@]}" | LC_ALL=C sort)
+}
+
+# One --remap-path-prefix flag into `remaps`, refusing a path the flags
+# can't carry (they travel as TOML literal strings, so no quote).
+remap_prefix() { # <from> <to>
+    case "$1" in
+        *"'"*) fail "can't remap the source path ${1@Q} (a quote): set SEAWORTHY_REMAP_PATHS=0, or build elsewhere" ;;
+    esac
+    remaps+=("--remap-path-prefix=$1=$2")
 }
 
 # The caller's extra rustflags for one build step, in `expanded`: the

@@ -151,6 +151,10 @@ on:
         description: More rustflags for the cores' builds alone (SEAWORTHY_CORE_RUSTFLAGS), such as -Cprofile-use={workspace}/pgo/{triple}.profdata.
         type: string
         default: ""
+      remap-paths:
+        description: Remap the source paths rustc writes into the binaries (the workspace, the target directories, the cargo home, each git dependency's checkout) to neutral ones (SEAWORTHY_REMAP_PATHS).
+        type: boolean
+        default: true
       build-env:
         description: 'Environment for the builds, JSON: {"*": {"NAME": "value"}, "<target triple>": {...}} (a triple''s entries win).'
         type: string
@@ -407,6 +411,7 @@ jobs:
           SEAWORTHY_CARGO_ARGS: ${{ inputs.cargo-args }}
           SEAWORTHY_RUSTFLAGS: ${{ inputs.rustflags }}
           SEAWORTHY_CORE_RUSTFLAGS: ${{ inputs.core-rustflags }}
+          SEAWORTHY_REMAP_PATHS: ${{ inputs.remap-paths && '1' || '0' }}
         run: |
           set -euo pipefail
           [[ "$IMAGE" == *@sha256:* ]] || { echo "::error::linux-build-image must be digest-pinned (name@sha256:...)"; exit 1; }
@@ -415,7 +420,7 @@ jobs:
             --env-file "$RUNNER_TEMP/build.env"
             -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL -e CARGO_NET_RETRY -e RUSTUP_MAX_RETRIES
             -e SEAWORTHY_WORK -e SEAWORTHY_MANIFEST -e SEAWORTHY_CARGO_ARGS
-            -e SEAWORTHY_RUSTFLAGS -e SEAWORTHY_CORE_RUSTFLAGS
+            -e SEAWORTHY_RUSTFLAGS -e SEAWORTHY_CORE_RUSTFLAGS -e SEAWORTHY_REMAP_PATHS
             -e SEAWORTHY_RELEASE -e SEAWORTHY_VERSION -e SEAWORTHY_VERSION_FILE -e SEAWORTHY_TAG
             -e SEAWORTHY_SEQUENCE -e SEAWORTHY_BUILD_COMMAND -e SEAWORTHY_ALLOW_CI_TEST_KEYS -e GITHUB_SHA)
           [ -z "$TOOLCHAIN" ] || args+=(-e "RUSTUP_TOOLCHAIN=$TOOLCHAIN")
@@ -478,6 +483,7 @@ jobs:
           SEAWORTHY_CARGO_ARGS: ${{ inputs.cargo-args }}
           SEAWORTHY_RUSTFLAGS: ${{ inputs.rustflags }}
           SEAWORTHY_CORE_RUSTFLAGS: ${{ inputs.core-rustflags }}
+          SEAWORTHY_REMAP_PATHS: ${{ inputs.remap-paths && '1' || '0' }}
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File seaworthy-work\scripts\seaworthy-build.ps1
           if ($LASTEXITCODE -ne 0) { throw "seaworthy-build.ps1 exited $LASTEXITCODE" }
@@ -549,6 +555,7 @@ jobs:
           SEAWORTHY_CARGO_ARGS: ${{ inputs.cargo-args }}
           SEAWORTHY_RUSTFLAGS: ${{ inputs.rustflags }}
           SEAWORTHY_CORE_RUSTFLAGS: ${{ inputs.core-rustflags }}
+          SEAWORTHY_REMAP_PATHS: ${{ inputs.remap-paths && '1' || '0' }}
         run: |
           bash --version | head -n1
           bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" build aarch64-apple-darwin "$DIR"

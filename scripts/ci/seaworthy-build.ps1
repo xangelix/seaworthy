@@ -31,6 +31,12 @@
     directory) expanded; a flag choosing the CPU or its features, a quote, or another
     {placeholder} is refused.
 
+    SEAWORTHY_REMAP_PATHS (1, the default) remaps the source paths rustc writes into the
+    binaries, as scripts/ci/seaworthy.sh build does: the workspace to /workspace, the
+    target root to /target, each cargo home to /cargo and each git dependency's checkout
+    to /cargo/git/checkouts/<hash>, after the plan's flags and before the caller's; 0
+    leaves them.
+
     Runs in the MSVC build image (the template's windows-image: VS Build Tools, CMake,
     Go, NASM, rustup), where the AWS-LC-FIPS module builds natively. Before building, it
     enters the x64 MSVC developer environment (vswhere, then vcvarsall.bat x64) unless
@@ -192,6 +198,63 @@ function Get-ExtraFlags([string]$Flags, [string]$Cpu) {
 }
 $Extra = @()
 if ($CargoArgs) { $Extra = @($CargoArgs -split '\s+' | Where-Object { $_ }) }
+
+# One --remap-path-prefix flag, refusing a path the flags can't carry (they
+# travel as TOML literal strings, so no quote).
+function Get-Remap([string]$From, [string]$To) {
+    if ($From.Contains("'")) { Fail "can't remap the source path '$From' (a quote): set SEAWORTHY_REMAP_PATHS=0, or build elsewhere" }
+    return "--remap-path-prefix=$From=$To"
+}
+
+# The build's --remap-path-prefix flags (seaworthy.sh build's remap_paths):
+# the source paths rustc writes into the binaries name no build machine,
+# home directory or private repository. The crates' own directories
+# (<crate>-<version>) stay. rustc applies the last matching prefix, so the
+# most specific come last; the cargo homes and checkouts are the ones cargo
+# metadata names, every feature and platform's, sorted ordinally as the
+# Linux build sorts them (LC_ALL=C).
+function Get-RemapFlags {
+    $Out = @()
+    $ManifestPath = $Manifest
+    if (-not [System.IO.Path]::IsPathRooted($ManifestPath)) { $ManifestPath = Join-Path (Get-Location).Path $ManifestPath }
+    $Out += Get-Remap ([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ManifestPath))) '/workspace'
+    $RootPath = $TargetRoot
+    if (-not [System.IO.Path]::IsPathRooted($RootPath)) { $RootPath = Join-Path (Get-Location).Path $RootPath }
+    $Out += Get-Remap ([System.IO.Path]::GetFullPath($RootPath)) '/target'
+    $Json = & cargo metadata --quiet --format-version 1 --locked --all-features --manifest-path $Manifest
+    if ($LASTEXITCODE -ne 0) {
+        Fail "cargo metadata failed ($LASTEXITCODE): the source paths to remap come from it (SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
+    }
+    $Homes = @{}
+    $Checkouts = @{}
+    # The manifest paths as JSON strings (a backslash is escaped), read
+    # without ConvertFrom-Json, as the Linux build reads them with grep.
+    foreach ($Found in [regex]::Matches(($Json -join "`n"), '"manifest_path":"([^"]*)"')) {
+        $Path = $Found.Groups[1].Value.Replace('\\', '\')
+        if ($Path -match '^(.*?)[\\/]git[\\/]checkouts[\\/]([^\\/]+)[\\/]') {
+            $Homes[$Matches[1]] = $true
+            $Dir = $Matches[2]
+            $Checkouts[$Matches[0].Substring(0, $Matches[0].Length - 1)] = '/cargo/git/checkouts/' + $Dir.Substring($Dir.LastIndexOf('-') + 1)
+        } elseif ($Path -match '^(.*?)[\\/]registry[\\/]src[\\/]') {
+            $Homes[$Matches[1]] = $true
+        }
+    }
+    $Sorted = [string[]]@($Homes.Keys)
+    [Array]::Sort($Sorted, [System.StringComparer]::Ordinal)
+    foreach ($From in $Sorted) { $Out += Get-Remap $From '/cargo' }
+    $Sorted = [string[]]@($Checkouts.Keys)
+    [Array]::Sort($Sorted, [System.StringComparer]::Ordinal)
+    foreach ($From in $Sorted) { $Out += Get-Remap $From $Checkouts[$From] }
+    return ,$Out
+}
+$Remaps = @()
+if ($env:SEAWORTHY_REMAP_PATHS -eq '0') {
+} elseif ((-not $env:SEAWORTHY_REMAP_PATHS) -or $env:SEAWORTHY_REMAP_PATHS -eq '1') {
+    $Remaps = Get-RemapFlags
+    Say "remapping source paths: $(($Remaps | ForEach-Object { $_.Substring('--remap-path-prefix='.Length) }) -join ' ')"
+} else {
+    Fail "SEAWORTHY_REMAP_PATHS is 1 (the default) or 0, not '$($env:SEAWORTHY_REMAP_PATHS)'"
+}
 Enter-MsvcEnvironment
 
 $Steps = @(Get-Content -LiteralPath $Plan)
@@ -221,9 +284,10 @@ foreach ($Text in $Steps) {
             $Config = @('--config', 'profile.release.strip=false')
             $Flags = @()
             if ($Fields[2] -ne '-') { $Flags += @($Fields[2] -split ' ' | Where-Object { $_ }) }
-            # The caller's flags after the plan's: every build's, then (a
-            # core's step: its target directory is its CPU, never base) the
-            # cores'.
+            $Flags += $Remaps
+            # The caller's flags after the plan's and the remaps: every
+            # build's, then (a core's step: its target directory is its CPU,
+            # never base) the cores'.
             $Flags += Get-ExtraFlags $env:SEAWORTHY_RUSTFLAGS $Dir
             if ($Dir -ne 'base') { $Flags += Get-ExtraFlags $env:SEAWORTHY_CORE_RUSTFLAGS $Dir }
             if ($Flags.Count -gt 0) {

@@ -271,6 +271,11 @@ seaworthy-build-linux:
     SEAWORTHY_CORE_RUSTFLAGS: -Cprofile-use={workspace}/pgo/{triple}.profdata
 ```
 
+The builds remap the source paths rustc writes into the binaries (the workspace, the target
+directories, the cargo home, each git dependency's checkout) to neutral ones, so a binary names no
+runner path or private repository ([packaging.md](packaging.md#source-paths));
+`SEAWORTHY_REMAP_PATHS: "0"` on the build jobs turns that off.
+
 ## The release order
 
 A version gate sends every client looking for the server's version the moment the server deploys,

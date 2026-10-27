@@ -66,6 +66,35 @@ others (LLVM matches functions by their control flow; a mismatch is a warning, n
 SEAWORTHY_CORE_RUSTFLAGS='-Cprofile-use={workspace}/pgo/{triple}.profdata'
 ```
 
+### Source paths
+
+rustc writes source paths into every binary: each panic location, `file!()`, the debug info. Built
+as they are found, those name the build machine (`/home/<user>/…`, `/builds/<group>/<project>/…`) and
+every git dependency's repository, which for a private dependency is an internal name anyone can
+read with `strings`. So the build step remaps them (`--remap-path-prefix`, after the plan's flags and
+before the caller's, whose own remaps then win):
+
+| Path | Becomes |
+|---|---|
+| the workspace (the workspace manifest's directory) | `/workspace` |
+| the target root (`SEAWORTHY_TARGET_DIR`; a build script's generated code) | `/target` |
+| each cargo home `cargo metadata` names (the registry's sources) | `/cargo` |
+| each git dependency's checkout (`<cargo home>/git/checkouts/<repository>-<hash>`) | `/cargo/git/checkouts/<hash>` |
+
+The cargo homes and checkouts come from `cargo metadata --all-features` over every platform, so
+every build of one commit gets the same flags; they change only when a git dependency's URL does
+(which rebuilds everything, as any flag change does). A panic then reads
+`/cargo/registry/src/index.crates.io-…/tokio-1.54.1/src/…` or `crates/agent/src/main.rs` (cargo hands
+rustc the workspace's own crates as relative paths), and a binary no longer depends on the directory
+it was built in.
+
+What stays: each crate's own directory (`<crate>-<version>`), so the dependency list can still be
+read from a binary; no stable compiler option drops it (cargo's `trim-paths` and
+`-Zlocation-detail=none` are nightly). Paths a crate builds itself (`env!("CARGO_MANIFEST_DIR")`),
+and a path dependency outside the workspace, aren't remapped: give the latter its own
+`--remap-path-prefix=<path>=<name>` in `SEAWORTHY_RUSTFLAGS`. `SEAWORTHY_REMAP_PATHS=0` (the GitHub
+workflow's `remap-paths: false`) turns remapping off.
+
 ## Verify
 
 `seaworthy verify` runs every check and reports every finding together, so one run names everything
