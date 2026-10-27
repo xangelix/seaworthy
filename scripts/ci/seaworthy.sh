@@ -651,11 +651,18 @@ build_tool() { # <checkout> <path>
         install -m 0755 "$SEAWORTHY_TOOL_BIN" "$2"
         return
     fi
-    local made src target
+    local made src target archive
     private_dir
     src="$made"
-    # The checkout's files, without its target directory or git metadata.
-    (cd "$1" && tar --exclude=./target --exclude=./.git -cf - .) | (cd "$src" && tar -xf -)
+    private_dir
+    archive="$made/checkout.tar"
+    # The checkout's files, without its target directory or git metadata:
+    # through a file, never a pipe. bsdtar (macOS) stops reading at the
+    # archive's end marker, and the writer's last record, still going into
+    # a full pipe (macOS's are small), then fails ("tar: Write error").
+    (cd "$1" && tar --exclude=./target --exclude=./.git -cf "$archive" .)
+    (cd "$src" && tar -xf "$archive")
+    rm -f "$archive"
     cargo_configs_above "$src"
     if release || dev_sign; then
         private_dir
