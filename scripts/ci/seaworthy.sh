@@ -868,7 +868,7 @@ build() { # <triple> [<target dir>]
     # plan's flags, before the caller's (whose own remaps then win).
     case "${SEAWORTHY_REMAP_PATHS:-1}" in
         1)
-            remap_paths "$manifest" "$target_root"
+            remap_paths "$manifest" "$target_root" "$triple" "${extra[@]}"
             say "remapping source paths: ${remaps[*]#--remap-path-prefix=}"
             ;;
         0) remaps=() ;;
@@ -953,20 +953,39 @@ build() { # <triple> [<target dir>]
 # (<crate>-<version>) stay: rustc has no stable way to drop them. rustc
 # applies the last matching prefix, so the most specific come last (a
 # cargo home inside the workspace, a checkout inside the cargo home). The
-# cargo homes and checkouts are the ones cargo metadata names, every
-# feature and platform's, as cargo will hand rustc their paths.
+# cargo homes and checkouts are the ones cargo metadata names, as cargo
+# will hand rustc their paths: for the triple, with the caller's cargo
+# arguments that say where the sources are and which features build
+# (--offline, --frozen, --config, -Z, the feature flags), so it resolves
+# what the builds do and reads only the sources they read (a vendored or
+# offline build included).
 remaps=()
-remap_paths() { # <manifest> <target root>
-    local manifest="$1" target_root="$2" metadata path home dir from
+remap_paths() { # <manifest> <target root> <triple> [<caller's cargo arguments>...]
+    local manifest="$1" target_root="$2" triple="$3" metadata path home dir from word value=0
     local -A homes=() checkouts=()
+    local passed=()
+    shift 3
+    for word in "$@"; do
+        if [ "$value" = 1 ]; then
+            passed+=("$word")
+            value=0
+            continue
+        fi
+        case "$word" in
+            --offline | --frozen | --all-features | --no-default-features) passed+=("$word") ;;
+            --config | -Z | --features | -F) passed+=("$word") value=1 ;;
+            --config=* | -Z?* | --features=* | -F?*) passed+=("$word") ;;
+        esac
+    done
     remaps=()
     remap_prefix "$(cd "$(dirname "$manifest")" && pwd -P)" /workspace
     case "$target_root" in
         /*) remap_prefix "$target_root" /target ;;
         *) remap_prefix "$(pwd -P)/$target_root" /target ;;
     esac
-    metadata="$(cargo metadata --quiet --format-version 1 --locked --all-features --manifest-path "$manifest")" ||
-        fail "cargo metadata failed: the source paths to remap come from it (SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
+    metadata="$(cargo metadata --quiet --format-version 1 --locked --filter-platform "$triple" \
+        --manifest-path "$manifest" "${passed[@]}")" ||
+        fail "cargo metadata failed: the source paths to remap come from it (it gets SEAWORTHY_CARGO_ARGS' --offline, --frozen, --config, -Z and feature flags; SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
     while IFS= read -r path; do
         case "$path" in
             */git/checkouts/*)

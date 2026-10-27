@@ -1901,9 +1901,43 @@ fn common_copy(from: &Path, to: &Path) {
 
 /// A stub cargo's answer to the build steps' `cargo metadata` (where the
 /// source paths they remap come from), never logged as a build: the JSON
-/// file `$STUB_METADATA` names, else no packages.
-const METADATA_STUB: &str = "if [ \"$1\" = metadata ]; then if [ -n \"${STUB_METADATA:-}\" ]; \
+/// file `$STUB_METADATA` names, else no packages; its arguments, one per
+/// line, into the file `$STUB_METADATA_ARGS` names.
+const METADATA_STUB: &str = "if [ \"$1\" = metadata ]; then \
+                             [ -z \"${STUB_METADATA_ARGS:-}\" ] || printf '%s\\n' \"$@\" > \"$STUB_METADATA_ARGS\"; \
+                             if [ -n \"${STUB_METADATA:-}\" ]; \
                              then cat \"$STUB_METADATA\"; else echo '{\"packages\":[]}'; fi; exit 0; fi\n";
+
+/// What the build's `cargo metadata` must get, given the caller's cargo
+/// arguments [`CALLER_CARGO_ARGS`]: the triple, and the arguments that say
+/// where the sources are and which features build, never a build-only one.
+fn expected_metadata_args(triple: &str) -> Vec<String> {
+    [
+        "metadata",
+        "--quiet",
+        "--format-version",
+        "1",
+        "--locked",
+        "--filter-platform",
+        triple,
+        "--manifest-path",
+        "Cargo.toml",
+        "--offline",
+        "--config",
+        "source.crates-io.replace-with=\"vendored\"",
+        "--features",
+        "fips",
+        "-Zbuild-std",
+        "--config=net.retry=5",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// A caller's `SEAWORTHY_CARGO_ARGS`: a vendored, offline build (the lab's)
+/// with build-only arguments mixed in (`-j`, `--timings`).
+const CALLER_CARGO_ARGS: &str = "--offline --config source.crates-io.replace-with=\"vendored\" -j 2 \
+                                 --features fips --timings -Zbuild-std --config=net.retry=5";
 
 /// A stub cargo for the Windows build: records its arguments (one file per
 /// call), the release and MSVC variables it was given, and leaves what a
@@ -3147,6 +3181,21 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
             ws = workspace.display()
         )
     );
+    // cargo metadata resolves what the builds do, and reads the sources
+    // they read: a vendored, offline build's.
+    let seen = dir.path().join("metadata-args");
+    let out = build(&[
+        ("STUB_METADATA_ARGS", seen.to_str().unwrap()),
+        ("SEAWORTHY_CARGO_ARGS", CALLER_CARGO_ARGS),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(&seen)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        expected_metadata_args(triple)
+    );
     // Without remapping or extra flags the launcher's build gets none at all.
     let out = build(&[("SEAWORTHY_REMAP_PATHS", "0"), ("STUB_METADATA", metadata)]);
     assert!(out.status.success(), "{}", said(&out));
@@ -3571,6 +3620,19 @@ fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
             )
         );
     }
+    let seen = top.path().join("metadata-args");
+    let out = run(&[
+        ("STUB_METADATA_ARGS", seen.to_str().unwrap()),
+        ("SEAWORTHY_CARGO_ARGS", CALLER_CARGO_ARGS),
+    ]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(&seen)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        expected_metadata_args(triple)
+    );
     let out = run(&[("SEAWORTHY_REMAP_PATHS", "0"), ("STUB_METADATA", metadata)]);
     assert!(out.status.success(), "{}", said(&out));
     let flags = rustflags_by_target_dir(&log, triple);

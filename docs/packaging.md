@@ -81,9 +81,12 @@ before the caller's, whose own remaps then win):
 | each cargo home `cargo metadata` names (the registry's sources) | `/cargo` |
 | each git dependency's checkout (`<cargo home>/git/checkouts/<repository>-<hash>`) | `/cargo/git/checkouts/<hash>` |
 
-The cargo homes and checkouts come from `cargo metadata --all-features` over every platform, so
-every build of one commit gets the same flags; they change only when a git dependency's URL does
-(which rebuilds everything, as any flag change does). A panic then reads
+The cargo homes and checkouts come from `cargo metadata` for the build's target, with the parts
+of `SEAWORTHY_CARGO_ARGS` that say where the sources are and which features build (`--offline`,
+`--frozen`, `--config`, `-Z`, the feature flags), so it resolves what the builds do and reads only
+the sources they read: a vendored or offline build needs nothing more. Builds of one commit get the
+same flags; they change only when a git dependency's URL does (which rebuilds everything, as any
+flag change does). A panic then reads
 `/cargo/registry/src/index.crates.io-…/tokio-1.54.1/src/…` or `crates/agent/src/main.rs` (cargo hands
 rustc the workspace's own crates as relative paths), and a binary no longer depends on the directory
 it was built in.
@@ -91,7 +94,7 @@ it was built in.
 What stays: each crate's own directory (`<crate>-<version>`), so the dependency list can still be
 read from a binary; no stable compiler option drops it (cargo's `trim-paths` and
 `-Zlocation-detail=none` are nightly). Paths a crate builds itself (`env!("CARGO_MANIFEST_DIR")`),
-and a path dependency outside the workspace, aren't remapped: give the latter its own
+and a path dependency or vendored directory outside the workspace, aren't remapped: give it its own
 `--remap-path-prefix=<path>=<name>` in `SEAWORTHY_RUSTFLAGS`. `SEAWORTHY_REMAP_PATHS=0` (the GitHub
 workflow's `remap-paths: false`) turns remapping off.
 

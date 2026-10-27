@@ -211,19 +211,34 @@ function Get-Remap([string]$From, [string]$To) {
 # home directory or private repository. The crates' own directories
 # (<crate>-<version>) stay. rustc applies the last matching prefix, so the
 # most specific come last; the cargo homes and checkouts are the ones cargo
-# metadata names, every feature and platform's, sorted ordinally as the
-# Linux build sorts them (LC_ALL=C).
+# metadata names for the triple, with the caller's cargo arguments that say
+# where the sources are and which features build (--offline, --frozen,
+# --config, -Z, the feature flags), sorted ordinally as the Linux build
+# sorts them (LC_ALL=C).
 function Get-RemapFlags {
     $Out = @()
+    $Passed = @()
+    $Value = $false
+    foreach ($Word in $Extra) {
+        if ($Value) { $Passed += $Word; $Value = $false; continue }
+        if (@('--offline', '--frozen', '--all-features', '--no-default-features') -contains $Word) {
+            $Passed += $Word
+        } elseif (@('--config', '-Z', '--features', '-F') -contains $Word) {
+            $Passed += $Word
+            $Value = $true
+        } elseif ($Word -match '^(--config=|-Z.|--features=|-F.)') {
+            $Passed += $Word
+        }
+    }
     $ManifestPath = $Manifest
     if (-not [System.IO.Path]::IsPathRooted($ManifestPath)) { $ManifestPath = Join-Path (Get-Location).Path $ManifestPath }
     $Out += Get-Remap ([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($ManifestPath))) '/workspace'
     $RootPath = $TargetRoot
     if (-not [System.IO.Path]::IsPathRooted($RootPath)) { $RootPath = Join-Path (Get-Location).Path $RootPath }
     $Out += Get-Remap ([System.IO.Path]::GetFullPath($RootPath)) '/target'
-    $Json = & cargo metadata --quiet --format-version 1 --locked --all-features --manifest-path $Manifest
+    $Json = & cargo metadata --quiet --format-version 1 --locked --filter-platform $Triple --manifest-path $Manifest @Passed
     if ($LASTEXITCODE -ne 0) {
-        Fail "cargo metadata failed ($LASTEXITCODE): the source paths to remap come from it (SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
+        Fail "cargo metadata failed ($LASTEXITCODE): the source paths to remap come from it (it gets SEAWORTHY_CARGO_ARGS' --offline, --frozen, --config, -Z and feature flags; SEAWORTHY_REMAP_PATHS=0 turns remapping off)"
     }
     $Homes = @{}
     $Checkouts = @{}
