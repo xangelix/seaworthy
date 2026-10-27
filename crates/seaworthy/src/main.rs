@@ -65,7 +65,9 @@
 //! `release-signatures` and `release-keys`. Without it, no manifests are
 //! written. `--build` is the version token's build metadata (the part
 //! after `+`, often the commit): the manifests' `build` field, so a
-//! manifest matches only the exact build the version-gate server names.
+//! manifest matches only the exact build the version-gate server names,
+//! and a line of every Linux package's description and a property of
+//! every SBOM, signed or not.
 //! `--authenticode-only` (with `--signing`) is a dev build: only
 //! `[authenticode]` signs (the Windows binaries, and later the MSI with
 //! `adopt-msi --authenticode-only`), no manifest or OpenPGP key is read,
@@ -562,22 +564,17 @@ fn sync_dir(path: &std::path::Path) {
 /// `--build`: build metadata, SemVer's grammar — dot-separated, non-empty
 /// identifiers of `[0-9A-Za-z-]` — at most 64 characters, or none.
 fn build_arg(args: &Args) -> Result<seaworthy::sign::BuildId, Failure> {
-    let metadata = args.build.clone().unwrap_or_default();
-    let ok = metadata.is_empty()
-        || (metadata.len() <= 64
-            && metadata.split('.').all(|identifier| {
-                !identifier.is_empty()
-                    && identifier
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            }));
-    if !ok {
+    let build = seaworthy::sign::BuildId {
+        metadata: args.build.clone().unwrap_or_default(),
+    };
+    if !build.is_valid() {
         return Err(Usage(format!(
-            "--build {metadata:?}: at most 64 characters of dot-separated, non-empty identifiers of A-Z a-z 0-9 -"
+            "--build {:?}: at most 64 characters of dot-separated, non-empty identifiers of A-Z a-z 0-9 -",
+            build.metadata
         ))
         .into());
     }
-    Ok(seaworthy::sign::BuildId { metadata })
+    Ok(build)
 }
 
 /// `seaworthy.toml`, narrowed to `--platforms` when given: a product with no

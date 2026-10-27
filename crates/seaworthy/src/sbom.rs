@@ -6,7 +6,8 @@
 //!
 //! - **The artifact** (`metadata.component`): the package name, the release
 //!   version, its supplier (the vendor), its SHA-512, and its format,
-//!   target and release sequence as properties.
+//!   target, release sequence and build metadata (`package --build`, often
+//!   the commit; left out when there is none) as properties.
 //! - **Every file it installs** (`components`, type `file`): the install
 //!   path and the SHA-256 of the shipped bytes, generated files (systemd
 //!   units, the preset) included.
@@ -169,7 +170,8 @@ pub struct ArtifactInfo<'a> {
     pub files: &'a [SbomFile],
 }
 
-/// The SBOM of one artifact of product `id`, as JSON text.
+/// The SBOM of one artifact of product `id`, as JSON text. `build` is the
+/// release's build metadata ([`crate::sign::BuildId`]), empty for none.
 ///
 /// # Errors
 /// [`DistError::Io`] reading the artifact or a binary;
@@ -178,6 +180,7 @@ pub fn sbom(
     config: &Config,
     id: &str,
     release: &Release,
+    build: &str,
     artifact: &ArtifactInfo<'_>,
     mtime: u64,
 ) -> Result<String, DistError> {
@@ -248,6 +251,15 @@ pub fn sbom(
     }
     dependencies.insert("artifact".to_owned(), top);
 
+    let mut properties = vec![
+        json!({"name": "seaworthy:format", "value": artifact.format}),
+        json!({"name": "seaworthy:target", "value": artifact.target}),
+        json!({"name": "seaworthy:sequence", "value": release.sequence.to_string()}),
+    ];
+    if !build.is_empty() {
+        properties.push(json!({"name": "seaworthy:build", "value": build}));
+    }
+    properties.push(json!({"name": "seaworthy:file", "value": artifact.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()}));
     let doc = json!({
         "bomFormat": "CycloneDX",
         "specVersion": "1.6",
@@ -268,12 +280,7 @@ pub fn sbom(
                 "version": version,
                 "supplier": {"name": vendor},
                 "hashes": [{"alg": "SHA-512", "content": sha512}],
-                "properties": [
-                    {"name": "seaworthy:format", "value": artifact.format},
-                    {"name": "seaworthy:target", "value": artifact.target},
-                    {"name": "seaworthy:sequence", "value": release.sequence.to_string()},
-                    {"name": "seaworthy:file", "value": artifact.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()},
-                ],
+                "properties": properties,
             },
         },
         "components": components.into_values().collect::<Vec<_>>(),

@@ -283,17 +283,30 @@ the update helper. `seaworthy version` prints every spelling:
 | MSI ProductVersion | `1.4.0` | `1.4.0` |
 
 The MSI's ProductVersion holds neither the pre-release nor the sequence; same-version upgrades are
-allowed, and the installed release is recorded in the registry for the update helper. `--build`
-names the version token's build metadata (often the commit): the manifests' `build` field, so a
-manifest matches only the exact build the product's server names.
+allowed, and the installed release is recorded in the registry for the update helper.
+
+The sequence is what lets one version ship many times: the deb revision, rpm `Release` and pacman
+`pkgrel` are the sequence, so a later build of `1.4.0` installs over an earlier one as an upgrade.
+dpkg, rpm and pacman all compare it as a number (`1.4.0-999` < `1.4.0-1000`), and only after the
+version (`1.4.0-5000` < `1.4.1-1`). It must only grow: the CI templates use the pipeline counter
+(GitLab's `CI_PIPELINE_IID`, GitHub's `run_number`), which keeps growing across branches, so a
+branch's build orders after an older pipeline on the default branch.
+
+`--build` names the version token's build metadata (often the commit): the manifests' `build`
+field, so a manifest matches only the exact build the product's server names. It stays out of
+versions and file names, since a commit doesn't sort; every Linux package's description carries it
+instead (`Build: a1b2c3d4` on its own line for deb and rpm, `(build a1b2c3d4)` after pacman's
+one-line description), where `apt show`, `dpkg -s`, `rpm -qi` and `pacman -Qi` show it, and so do
+`packages.json` (`build`, `token`) and every SBOM (`seaworthy:build`). `package` refuses metadata
+outside SemVer's grammar (dot-separated identifiers of `A-Z a-z 0-9 -`, at most 64 characters).
 
 ### SBOMs
 
 Beside every installable artifact, `<artifact>.cdx.json` (CycloneDX 1.6): the artifact (package
-name, version, vendor, SHA-512, format, target and sequence), every file it installs with its
-SHA-256, generated files included, and every Rust crate compiled into its binaries when they were
-built with `cargo auditable`. The document is byte-reproducible (its serial number derives from the
-artifact's SHA-512, its timestamp is `SOURCE_DATE_EPOCH`).
+name, version, vendor, SHA-512, format, target, sequence and build metadata), every file it installs
+with its SHA-256, generated files included, and every Rust crate compiled into its binaries when
+they were built with `cargo auditable`. The document is byte-reproducible (its serial number derives
+from the artifact's SHA-512, its timestamp is `SOURCE_DATE_EPOCH`).
 
 ### Reproducibility
 

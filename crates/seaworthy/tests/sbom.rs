@@ -96,11 +96,27 @@ fn an_sbom_names_the_artifact_its_files_and_its_crates() {
         target: "x86_64-unknown-linux-gnu",
         files: &files,
     };
-    let text = sbom(&config(), "tool", &release(), &info, 1_700_000_000).unwrap();
+    let text = sbom(
+        &config(),
+        "tool",
+        &release(),
+        "a1b2c3d4",
+        &info,
+        1_700_000_000,
+    )
+    .unwrap();
     // Deterministic: the same inputs give the same bytes.
     assert_eq!(
         text,
-        sbom(&config(), "tool", &release(), &info, 1_700_000_000).unwrap()
+        sbom(
+            &config(),
+            "tool",
+            &release(),
+            "a1b2c3d4",
+            &info,
+            1_700_000_000
+        )
+        .unwrap()
     );
     let doc = document(&text);
     assert_eq!(doc["bomFormat"], "CycloneDX");
@@ -138,6 +154,20 @@ fn an_sbom_names_the_artifact_its_files_and_its_crates() {
     assert!(
         properties.contains(&("seaworthy:format".into(), "tar".into())),
         "{properties:?}"
+    );
+    assert!(
+        properties.contains(&("seaworthy:build".into(), "a1b2c3d4".into())),
+        "{properties:?}"
+    );
+    // No build metadata, no build property.
+    let bare = document(&sbom(&config(), "tool", &release(), "", &info, 1_700_000_000).unwrap());
+    assert!(
+        bare["metadata"]["component"]["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["name"] != "seaworthy:build"),
+        "{bare}"
     );
     let components: Vec<(&str, &str)> = doc["components"]
         .as_array()

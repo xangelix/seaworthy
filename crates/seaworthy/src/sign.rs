@@ -635,8 +635,28 @@ fn verify_signature(
 pub struct BuildId {
     /// The version token's build metadata (after `+`, often the commit):
     /// the manifest's `build` field, so a manifest matches only the exact
-    /// build the version-gate server names.
+    /// build the version-gate server names. The Linux packages' descriptions
+    /// and every SBOM name it too.
     pub metadata: String,
+}
+
+impl BuildId {
+    /// Whether the metadata is SemVer's: dot-separated, non-empty
+    /// identifiers of `[0-9A-Za-z-]`, at most 64 characters, or none. It
+    /// reaches package metadata, where nFPM would expand a `$` and a line
+    /// break would end a control field, so `package` refuses anything else.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let metadata = &self.metadata;
+        metadata.is_empty()
+            || (metadata.len() <= 64
+                && metadata.split('.').all(|identifier| {
+                    !identifier.is_empty()
+                        && identifier
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                }))
+    }
 }
 
 /// The release statement for one artifact of product `id`: its product
