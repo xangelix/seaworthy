@@ -283,7 +283,9 @@ pub fn linux_package(
 /// A desktop product's menu entry (Desktop Entry Specification 1.5):
 /// `exec`, the launcher's absolute install path (its characters need no
 /// quoting: `config` limits the vendor, product id and executable to
-/// `[A-Za-z0-9._-]`), and the icon name when the package ships icons.
+/// `[A-Za-z0-9._-]`), taking the file it's opened with (`%f`, one per
+/// launch) when the entry names media types, and the icon name when the
+/// package ships icons.
 #[must_use]
 pub fn desktop_entry(
     product: &Product,
@@ -294,7 +296,12 @@ pub fn desktop_entry(
     let mut text = String::from("[Desktop Entry]\nType=Application\nVersion=1.5\n");
     text.push_str(&format!("Name={}\n", entry_string(&product.display_name)));
     text.push_str(&format!("Comment={}\n", entry_string(&product.description)));
-    text.push_str(&format!("Exec={exec}\nTryExec={exec}\n"));
+    let files = if desktop.mime_types.is_empty() {
+        ""
+    } else {
+        " %f"
+    };
+    text.push_str(&format!("Exec={exec}{files}\nTryExec={exec}\n"));
     if let Some(icon) = icon {
         text.push_str(&format!("Icon={icon}\n"));
     }
@@ -303,6 +310,9 @@ pub fn desktop_entry(
     if !desktop.keywords.is_empty() {
         let keywords: Vec<String> = desktop.keywords.iter().map(|k| entry_string(k)).collect();
         text.push_str(&format!("Keywords={};\n", keywords.join(";")));
+    }
+    if !desktop.mime_types.is_empty() {
+        text.push_str(&format!("MimeType={};\n", desktop.mime_types.join(";")));
     }
     if let Some(class) = &desktop.wm_class {
         text.push_str(&format!("StartupWMClass={class}\n"));

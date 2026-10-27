@@ -220,6 +220,7 @@ and nothing else):
 | `desktop-shortcut` | `false` | A shortcut on every user's desktop. |
 | `categories` | `["Utility"]` | The `.desktop` entry's `Categories`: at least one freedesktop main category. |
 | `keywords` | `[]` | The `.desktop` entry's `Keywords`. |
+| `mime-types` | `[]` | The `.desktop` entry's `MimeType`: the media types the app opens (`["inode/directory"]` for folders), which file managers offer it for. With any, `Exec` takes the file it's opened with (`%f`: one per launch, so an app that takes one path starts once per file picked). |
 | `wm-class` | — | `StartupWMClass`: the window class (X11) or app id (Wayland) the app's windows carry. |
 
 `[product.<id>.macos]` (required with a macOS output):

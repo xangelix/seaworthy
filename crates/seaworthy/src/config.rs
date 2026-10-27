@@ -644,6 +644,13 @@ pub struct Desktop {
     /// The `.desktop` entry's `Keywords`, for the menu's search.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// The `.desktop` entry's `MimeType`: the types the app opens
+    /// (`inode/directory`: folders), which file managers offer it for
+    /// ("Open With"). With any, `Exec` takes the file it's opened with
+    /// (`%f`: one per launch, so an app taking one path is started once per
+    /// file a user picks rather than refusing the rest).
+    #[serde(default)]
+    pub mime_types: Vec<String>,
     /// The `.desktop` entry's `StartupWMClass`: the window class (X11) or
     /// app id (Wayland) the app's windows carry, so a dock groups them
     /// under the entry (winit: the `app_id`/`name` it sets).
@@ -1279,6 +1286,24 @@ fn is_language_id(text: &str) -> bool {
         .next()
         .is_some_and(|l| (2..=3).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_alphabetic()))
         && parts.all(|s| (2..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// A media type as `MimeType` lists them: `type/subtype`, each 1 to 127
+/// of RFC 6838's name characters, starting with a letter or digit (no
+/// `$`, which nFPM would expand).
+fn is_mime_type(text: &str) -> bool {
+    let name = |part: &str| {
+        (1..=127).contains(&part.len())
+            && part
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#&-^_.+".contains(&b))
+    };
+    text.split_once('/')
+        .is_some_and(|(kind, subtype)| name(kind) && name(subtype))
 }
 
 /// A `.desktop` category name: `[A-Za-z0-9-]`, at most 64 bytes.
@@ -2303,6 +2328,14 @@ impl Config {
                         &format!(
                             "{keyword:?} must be non-empty text without control characters, `$`, `;` or `\\`"
                         ),
+                    ));
+                }
+            }
+            for (index, mime) in desktop.mime_types.iter().enumerate() {
+                if !is_mime_type(mime) || desktop.mime_types[..index].contains(mime) {
+                    return Err(at(
+                        "desktop.mime-types",
+                        &format!("{mime:?} must be a media type (inode/directory), listed once"),
                     ));
                 }
             }

@@ -273,6 +273,52 @@ fn the_linux_packages_carry_the_menu_entry_the_icons_and_the_link() {
     );
 }
 
+/// With media types, the menu entry names them (`MimeType`) and the
+/// launcher takes the file it's opened with (`%f`); desktop-file-validate
+/// accepts it.
+#[test]
+fn a_menu_entry_with_media_types_opens_the_chosen_files() {
+    let text = CONFIG.replacen(
+        "wm-class = \"AcmeViewer\"",
+        "wm-class = \"AcmeViewer\"\nmime-types = [\"inode/directory\", \"application/x-acme-report\"]",
+        1,
+    );
+    assert_ne!(text, CONFIG);
+    let (_project, config) = project(&text);
+    let out = tempfile::tempdir().unwrap();
+    let layouts = layouts(&config, "viewer", out.path());
+    let package =
+        seaworthy::linux::linux_package(&config, "viewer", layout_for(&layouts, LINUX)).unwrap();
+    let Source::Generated(text) = &package
+        .files
+        .iter()
+        .find(|f| f.dst.ends_with(".desktop"))
+        .unwrap()
+        .source
+    else {
+        panic!("generated")
+    };
+    assert!(
+        text.contains("Exec=/opt/acme/viewer/AcmeTool %f\nTryExec=/opt/acme/viewer/AcmeTool\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("MimeType=inode/directory;application/x-acme-report;\n"),
+        "{text}"
+    );
+    if have("desktop-file-validate", &["--help"]) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("acme-viewer.desktop");
+        std::fs::write(&path, text).unwrap();
+        run(Command::new("desktop-file-validate").arg(&path));
+    } else {
+        assert!(
+            !required(),
+            "desktop-file-validate is required (SEAWORTHY_REQUIRE_PACKAGE_TOOLS=1: desktop-file-utils)"
+        );
+    }
+}
+
 #[test]
 fn a_menu_entry_escapes_what_the_specification_escapes() {
     let text = CONFIG.replacen(
