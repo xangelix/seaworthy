@@ -949,10 +949,11 @@ fn the_build_step_carries_out_the_plan() {
 }
 
 /// The source paths rustc writes into the binaries are remapped: a crate
-/// from a private git repository (a local one named `private_repo_name`)
-/// and code a build script generated in the target directory leave neither
-/// a path of the build machine (the workspace, the cargo home) nor the
-/// repository's name in the launcher or a core. With
+/// from a private git repository (a local one named `private_repo_name`),
+/// code a build script generated in the target directory and the standard
+/// library's (a toolchain with rust-src names its local copy) leave neither
+/// a path of the build machine (the workspace, the cargo home, the
+/// toolchain) nor the repository's name in the launcher or a core. With
 /// `SEAWORTHY_REMAP_PATHS=0` they do, which shows the check can see them.
 #[test]
 fn the_build_step_remaps_the_source_paths_in_the_binaries() {
@@ -1038,7 +1039,10 @@ fn the_build_step_remaps_the_source_paths_in_the_binaries() {
         &ws.join("core/src/lib.rs"),
         "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
          #[unsafe(no_mangle)]\npub extern \"C\" fn tiny_core_origin() -> *const u8 { helper_crate::origin().as_ptr() }\n\
-         #[unsafe(no_mangle)]\npub extern \"C\" fn tiny_core_generated() -> *const u8 { generated().as_ptr() }\n",
+         #[unsafe(no_mangle)]\npub extern \"C\" fn tiny_core_generated() -> *const u8 { generated().as_ptr() }\n\
+         #[unsafe(no_mangle)]\npub extern \"C\" fn tiny_core_sum(n: u32) -> u32 {\n    \
+         let mut map = std::collections::BTreeMap::new();\n    for i in 0..n { map.insert(i, i); }\n    \
+         map.values().sum()\n}\n",
     );
     write(
         &ws.join("seaworthy.toml"),
@@ -1086,8 +1090,21 @@ fn the_build_step_remaps_the_source_paths_in_the_binaries() {
     };
     let holds = |bytes: &[u8], text: &str| bytes.windows(text.len()).any(|w| w == text.as_bytes());
     let root_text = root.to_str().unwrap();
+    // The toolchain the build runs: with rust-src installed, the standard
+    // library's code compiled into the core (its BTreeMap) names its local
+    // copy unless remapped.
+    let sysroot = Command::new("rustc")
+        .current_dir(&ws)
+        .args(["--print", "sysroot"])
+        .output()
+        .unwrap();
+    assert!(sysroot.status.success(), "{}", said(&sysroot));
+    let library = format!(
+        "{}/lib/rustlib/src/rust/library",
+        String::from_utf8(sysroot.stdout).unwrap().trim()
+    );
     for (file, bytes) in built("1") {
-        for leak in [root_text, "private_repo_name", cargo_home] {
+        for leak in [root_text, "private_repo_name", cargo_home, library.as_str()] {
             assert!(!holds(&bytes, leak), "{file} names {leak}");
         }
         assert!(
@@ -1101,9 +1118,16 @@ fn the_build_step_remaps_the_source_paths_in_the_binaries() {
             );
         }
     }
+    let rust_src = Path::new(&library).is_dir();
     for (file, bytes) in built("0") {
         assert!(holds(&bytes, "private_repo_name"), "{file}");
         assert!(holds(&bytes, root_text), "{file}");
+        if rust_src && file.starts_with("cores/") {
+            assert!(
+                holds(&bytes, &library),
+                "{file}: rust-src's path, unremapped"
+            );
+        }
     }
 }
 
@@ -1908,6 +1932,17 @@ const METADATA_STUB: &str = "if [ \"$1\" = metadata ]; then \
                              if [ -n \"${STUB_METADATA:-}\" ]; \
                              then cat \"$STUB_METADATA\"; else echo '{\"packages\":[]}'; fi; exit 0; fi\n";
 
+/// A stub rustc for the build steps' toolchain questions: its sysroot is
+/// `/fake/sysroot`, its commit `0123abcd`.
+const RUSTC_STUB: &str = "#!/bin/bash\ncase \"$*\" in\n\
+                          '--print sysroot') echo /fake/sysroot ;;\n\
+                          -vV) printf 'rustc 1.99.1 (stub)\\ncommit-hash: 0123abcd\\n' ;;\n\
+                          *) echo \"stub rustc: $*\" >&2; exit 1 ;;\nesac\n";
+
+/// The remap of the toolchain's sources [`RUSTC_STUB`] answers for.
+const SYSROOT_REMAP: &str =
+    "'--remap-path-prefix=/fake/sysroot/lib/rustlib/src/rust=/rustc/0123abcd'";
+
 /// What the build's `cargo metadata` must get, given the caller's cargo
 /// arguments [`CALLER_CARGO_ARGS`]: the triple, and the arguments that say
 /// where the sources are and which features build, never a build-only one.
@@ -2052,6 +2087,7 @@ fn the_windows_build_carries_out_the_plan_in_both_argument_passing_modes() {
         .unwrap();
         let bin = dir.path().join("stub-bin");
         std::fs::create_dir_all(&bin).unwrap();
+        script_at(&bin.join("rustc"), RUSTC_STUB);
         script_at(&bin.join("cargo"), &windows_cargo_stub(dir.path()));
         let script = repo_root().join("scripts/ci/seaworthy-build.ps1");
         let out = pwsh()
@@ -2096,7 +2132,8 @@ fn the_windows_build_carries_out_the_plan_in_both_argument_passing_modes() {
             .collect();
         let workspace = dir.path().canonicalize().unwrap();
         let remaps = format!(
-            "'--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target'",
+            "'--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target',\
+             {SYSROOT_REMAP}",
             ws = workspace.display()
         );
         assert!(
@@ -2225,6 +2262,7 @@ fn the_windows_build_enters_the_msvc_developer_environment() {
     .unwrap();
     let bin = dir.path().join("stub-bin");
     std::fs::create_dir_all(&bin).unwrap();
+    script_at(&bin.join("rustc"), RUSTC_STUB);
     script_at(&bin.join("cargo"), &windows_cargo_stub(dir.path()));
     // A Visual Studio installation: vcvarsall.bat and the Clang tools.
     let vs = dir.path().join("vs");
@@ -2787,6 +2825,7 @@ fn the_build_step_names_the_release_for_the_product_s_build_scripts() {
     let bin = dir.path().join("stub-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let seen = dir.path().join("seen");
+    script_at(&bin.join("rustc"), RUSTC_STUB);
     script_at(
         &bin.join("cargo"),
         &format!(
@@ -3061,7 +3100,8 @@ fn rustflags_by_target_dir(log: &Path, triple: &str) -> std::collections::BTreeM
 /// homes, and two crates of one private git dependency's checkout. With it,
 /// the remaps the build must derive for `workspace`, most specific last, as
 /// `target.<triple>.rustflags` lists them: the workspace, the target root,
-/// each cargo home once (sorted), then the checkout, without its name.
+/// the toolchain's sources, each cargo home once (sorted), then the
+/// checkout, without its name.
 fn fake_metadata(dir: &Path, workspace: &Path) -> (PathBuf, String) {
     let ws = workspace.display();
     let json = format!(
@@ -3077,7 +3117,7 @@ fn fake_metadata(dir: &Path, workspace: &Path) -> (PathBuf, String) {
     std::fs::write(&path, json).unwrap();
     let remaps = format!(
         "'--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target',\
-         '--remap-path-prefix=/fake/cargo2=/cargo','--remap-path-prefix=/fake/home=/cargo',\
+         {SYSROOT_REMAP},'--remap-path-prefix=/fake/cargo2=/cargo','--remap-path-prefix=/fake/home=/cargo',\
          '--remap-path-prefix=/fake/home/git/checkouts/private_repo-0123456789abcdef=/cargo/git/checkouts/0123456789abcdef'"
     );
     (path, remaps)
@@ -3113,6 +3153,7 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
     std::fs::create_dir_all(&bin).unwrap();
     let log = dir.path().join("log");
     std::fs::create_dir_all(&log).unwrap();
+    script_at(&bin.join("rustc"), RUSTC_STUB);
     script_at(
         &bin.join("cargo"),
         &format!(
@@ -3177,7 +3218,8 @@ fn the_build_step_adds_the_caller_s_rustflags_after_the_plan_s() {
     assert_eq!(
         flags["base"],
         format!(
-            "['--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target']",
+            "['--remap-path-prefix={ws}=/workspace','--remap-path-prefix={ws}/seaworthy/target=/target',\
+             {SYSROOT_REMAP}]",
             ws = workspace.display()
         )
     );
@@ -3272,6 +3314,7 @@ fn one_target_directory_builds_alone_for_a_job_per_cpu() {
     std::fs::create_dir_all(&bin).unwrap();
     let log = dir.path().join("log");
     std::fs::create_dir_all(&log).unwrap();
+    script_at(&bin.join("rustc"), RUSTC_STUB);
     script_at(
         &bin.join("cargo"),
         &format!(
@@ -3373,6 +3416,7 @@ fn one_target_directory_builds_alone_for_a_job_per_cpu() {
     .unwrap();
     let wbin = wdir.path().join("stub-bin");
     std::fs::create_dir_all(&wbin).unwrap();
+    script_at(&wbin.join("rustc"), RUSTC_STUB);
     script_at(&wbin.join("cargo"), &windows_cargo_stub(wdir.path()));
     let script = repo_root().join("scripts/ci/seaworthy-build.ps1");
     let run = |target_dir: &str| {
@@ -3565,6 +3609,7 @@ fn the_windows_build_adds_the_caller_s_rustflags_after_the_plan_s() {
     std::fs::create_dir_all(&bin).unwrap();
     let log = dir.join("log");
     std::fs::create_dir_all(&log).unwrap();
+    script_at(&bin.join("rustc"), RUSTC_STUB);
     script_at(&bin.join("cargo"), &windows_cargo_stub(&log));
     let script = repo_root().join("scripts/ci/seaworthy-build.ps1");
     let run = |env: &[(&str, &str)]| {

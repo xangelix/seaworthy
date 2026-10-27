@@ -651,11 +651,18 @@ build_tool() { # <checkout> <path>
         install -m 0755 "$SEAWORTHY_TOOL_BIN" "$2"
         return
     fi
-    local made src target
+    local made src target archive
     private_dir
     src="$made"
-    # The checkout's files, without its target directory or git metadata.
-    (cd "$1" && tar --exclude=./target --exclude=./.git -cf - .) | (cd "$src" && tar -xf -)
+    private_dir
+    archive="$made/checkout.tar"
+    # The checkout's files, without its target directory or git metadata:
+    # through a file, never a pipe. bsdtar (macOS) stops reading at the
+    # archive's end marker, and the writer's last record, still going into
+    # a full pipe (macOS's are small), then fails ("tar: Write error").
+    (cd "$1" && tar --exclude=./target --exclude=./.git -cf "$archive" .)
+    (cd "$src" && tar -xf "$archive")
+    rm -f "$archive"
     cargo_configs_above "$src"
     if release || dev_sign; then
         private_dir
@@ -947,9 +954,12 @@ build() { # <triple> [<target dir>]
 # The build's --remap-path-prefix flags, in `remaps`: the source paths
 # rustc writes into the binaries (panic locations, debug info, file!())
 # name no build machine, home directory or private repository. The
-# workspace becomes /workspace, the target root /target, the cargo home
-# /cargo, and each git dependency's checkout /cargo/git/checkouts/<hash>,
-# without the repository's name. The crates' own directories
+# workspace becomes /workspace, the target root /target, the toolchain's
+# own sources /rustc/<commit> (rustc's name for them, which a toolchain with
+# the rust-src component swaps for its local copy in the standard library's
+# code compiled into the product), the cargo home /cargo, and each git
+# dependency's checkout /cargo/git/checkouts/<hash>, without the
+# repository's name. The crates' own directories
 # (<crate>-<version>) stay: rustc has no stable way to drop them. rustc
 # applies the last matching prefix, so the most specific come last (a
 # cargo home inside the workspace, a checkout inside the cargo home). The
@@ -962,6 +972,7 @@ build() { # <triple> [<target dir>]
 remaps=()
 remap_paths() { # <manifest> <target root> <triple> [<caller's cargo arguments>...]
     local manifest="$1" target_root="$2" triple="$3" metadata path home dir from word value=0
+    local rustc="${RUSTC:-rustc}" sysroot commit
     local -A homes=() checkouts=()
     local passed=()
     shift 3
@@ -983,6 +994,11 @@ remap_paths() { # <manifest> <target root> <triple> [<caller's cargo arguments>.
         /*) remap_prefix "$target_root" /target ;;
         *) remap_prefix "$(pwd -P)/$target_root" /target ;;
     esac
+    # The toolchain cargo runs there (its rust-toolchain.toml).
+    sysroot="$(cd "$(dirname "$manifest")" && "$rustc" --print sysroot)" && [ -n "$sysroot" ] ||
+        fail "$rustc --print sysroot failed: the toolchain's source path to remap comes from it"
+    commit="$(cd "$(dirname "$manifest")" && "$rustc" -vV | sed -n 's/^commit-hash: //p')"
+    remap_prefix "$sysroot/lib/rustlib/src/rust" "/rustc/${commit:-unknown}"
     metadata="$(cargo metadata --quiet --format-version 1 --locked --filter-platform "$triple" \
         --manifest-path "$manifest" "${passed[@]}")" ||
         fail "cargo metadata failed: the source paths to remap come from it (it gets SEAWORTHY_CARGO_ARGS' --offline, --frozen, --config, -Z and feature flags; SEAWORTHY_REMAP_PATHS=0 turns remapping off)"

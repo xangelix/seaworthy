@@ -78,6 +78,7 @@ before the caller's, whose own remaps then win):
 |---|---|
 | the workspace (the workspace manifest's directory) | `/workspace` |
 | the target root (`SEAWORTHY_TARGET_DIR`; a build script's generated code) | `/target` |
+| the toolchain's sources (`<sysroot>/lib/rustlib/src/rust`, which a toolchain with the `rust-src` component puts in the standard library's code compiled into the product) | `/rustc/<commit>`, rustc's own name for them |
 | each cargo home `cargo metadata` names (the registry's sources) | `/cargo` |
 | each git dependency's checkout (`<cargo home>/git/checkouts/<repository>-<hash>`) | `/cargo/git/checkouts/<hash>` |
 
