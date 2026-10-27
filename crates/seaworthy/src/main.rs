@@ -15,6 +15,7 @@
 //! seaworthy ci-order --ci .gitlab-ci.yml [--root DIR] [--include FILE,…] --server JOB,… --client JOB,…  (GitLab CI)
 //! seaworthy version --release VERSION --sequence N [--json]
 //! seaworthy manifest-version --manifest Cargo.toml
+//! seaworthy apple-team [--config seaworthy.toml]
 //! seaworthy keygen --algorithm ALG --secret FILE --public FILE
 //! seaworthy sign-statement --algorithm ALG --key FILE [--raw]
 //! seaworthy fips-check FILE…
@@ -136,6 +137,11 @@
 //! (`command = ["seaworthy", "sign-statement", …]`), and a way to check a
 //! signing setup end to end.
 //!
+//! `apple-team` prints the Apple team `[defaults.apple]` pins, or nothing
+//! when it pins none: a pinned team means the macOS outputs ship Developer
+//! ID-signed, so the CI scripts refuse a release whose macOS step got no
+//! `[apple]` signer rather than ship its outputs ad hoc-signed.
+//!
 //! `glibc-check` reads each ELF file's glibc version needs as glibc's
 //! loader does (the version-needs table, ABI markers included) and refuses
 //! any past the floor (default 2.34, `verify`'s): the check
@@ -171,6 +177,7 @@ const USAGE: &str = "usage:
   seaworthy ci-order --ci .gitlab-ci.yml [--root DIR] [--include FILE,…] --server JOB,… --client JOB,…  (GitLab CI)
   seaworthy version --release VERSION --sequence N [--json]
   seaworthy manifest-version --manifest Cargo.toml
+  seaworthy apple-team [--config seaworthy.toml]
   seaworthy keygen --algorithm ml-dsa-87|ecdsa-p256|ed25519 --secret FILE --public FILE
   seaworthy sign-statement --algorithm ml-dsa-87|ecdsa-p256|ed25519 --key FILE [--raw]
   seaworthy fips-check FILE...
@@ -272,6 +279,7 @@ fn accepted(command: &str) -> &'static [&'static str] {
         "build-plan" => &["--config", "--triple", "--product", "--manifest"],
         "version" => &["--release", "--sequence", "--json"],
         "manifest-version" => &["--manifest"],
+        "apple-team" => &["--config"],
         "keygen" => &["--algorithm", "--secret", "--public"],
         "sign-statement" => &["--algorithm", "--key", "--raw"],
         _ => &[],
@@ -1220,6 +1228,12 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
         "manifest-version" => {
             let manifest = required(&args.manifest, command, "--manifest")?;
             println!("{}", seaworthy::build_plan::manifest_version(&manifest)?);
+        }
+        "apple-team" => {
+            let config = Config::load(&config_path())?;
+            if let Some(apple) = &config.defaults.apple {
+                println!("{}", apple.team_id);
+            }
         }
         "keygen" => {
             let algorithm = algorithm_arg(args, command)?;

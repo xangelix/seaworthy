@@ -77,7 +77,7 @@ checks its SHA-256 against the listing; nothing unlisted is in it.
 | `package` | Linux | `seaworthy package --platforms linux,windows`: verify, layout, version resources, Authenticode, packages, manifests, SBOMs; signed on a release | the calling job's grant: `contents: read`, plus `id-token: write` with the `azure-*` inputs |
 | `msi` | Windows | WiX v5.0.2 (pinned, checksum-verified) builds and validates each MSI from package's `.wxs` | `contents: read` |
 | `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI's payload checked against the signed tree and its security-relevant tables against the `.wxs`, signed, listed | the calling job's grant, as `package` |
-| `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (desktop) or pkg (service), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed | `contents: read` |
+| `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (desktop) or pkg (service), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed (refused on a release under `[defaults.apple]`'s pinned team) | `contents: read` |
 | `verify` | Linux | every listed artifact against its listing; the packages artifact with `SHA256SUMS` | `contents: read` |
 | `publish` | Linux | on a release with `publish-toml`: `seaworthy repo` after the last published plan, then `seaworthy publish` (one at a time) | `contents: read` |
 
@@ -220,7 +220,11 @@ reaches `openssl` alone, through its environment, and each identity is re-wrappe
 password for `security import`), stores the API key there as a `notarytool` profile, and
 `seaworthy package --platforms macos` signs with the hardened runtime and a secure timestamp,
 checks each signature against `defaults.apple.team-id`, notarizes, staples and asks Gatekeeper.
-Without these secrets the macOS outputs stay ad hoc-signed (Gatekeeper refuses a downloaded copy).
+Without these secrets the macOS outputs stay ad hoc-signed (Gatekeeper refuses a downloaded copy),
+except on a release under a pinned team: with `[defaults.apple]` in `seaworthy.toml`, a release whose
+macOS step got no Developer ID signer fails instead of shipping its outputs ad hoc-signed (a secret
+that didn't reach the job, say). `allow-unsigned` doesn't change that: it covers the jobs that got
+no signer at all, while a pinned team says the macOS outputs are always signed.
 
 ## Build flags and environment
 

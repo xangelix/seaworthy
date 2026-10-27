@@ -1320,6 +1320,65 @@ fn the_package_step_packages_unsigned_outside_a_release_and_refuses_an_unsigned_
     );
 }
 
+/// A release's macOS step with no `[apple]` signer (the Developer ID
+/// secrets didn't reach it): under a team `[defaults.apple]` pins, refused
+/// before anything is packaged, since its outputs would ship ad hoc-signed;
+/// without the pin, ad hoc-signed on purpose. `uname` says Darwin: the
+/// step's own checks, run off a Mac.
+#[test]
+fn a_release_never_ships_ad_hoc_macos_outputs_under_a_pinned_apple_team() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script_at(&bin.join("uname"), "#!/bin/bash\necho Darwin\n");
+    let checkout = dir.path().join("checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("seaworthy/artifacts/aarch64-apple-darwin")).unwrap();
+    let config = DESKTOP
+        .replace(
+            "helper = \"AcmeToolUpdate\"\n",
+            "updates.default = \"off\"\n",
+        )
+        .replace(
+            "outputs = [\"deb\", \"tar\"]",
+            "outputs = [\"deb\", \"tar\", \"dmg\"]",
+        )
+        + "\n[product.console.macos]\nbundle-id = \"test.acme.console\"\n";
+    let path = path_with(&bin);
+    let env = [
+        ("PATH", path.as_str()),
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_VERSION", "1.4.0"),
+        ("SEAWORTHY_SEQUENCE", "41"),
+        ("SEAWORTHY_COMMIT", "0a1b2c3"),
+        ("SEAWORTHY_CHECKOUT", checkout.to_str().unwrap()),
+        ("SEAWORTHY_TOOL_BIN", env!("CARGO_BIN_EXE_seaworthy")),
+        ("SOURCE_DATE_EPOCH", "1700000000"),
+    ];
+    let pinned = format!("{config}\n[defaults.apple]\nteam-id = \"ABCDE12345\"\n");
+    std::fs::write(dir.path().join("seaworthy.toml"), &pinned).unwrap();
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(!out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains(
+            "pins [defaults.apple] (team ABCDE12345), but no [apple] signer reached this release's macOS step"
+        ),
+        "{}",
+        said(&out)
+    );
+    assert!(!dir.path().join("seaworthy/dist-macos").exists());
+    // Without the pin the step goes on, ad hoc-signed (and here fails
+    // later, with no Mac tools to package with).
+    std::fs::write(dir.path().join("seaworthy.toml"), &config).unwrap();
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(
+        said(&out).contains("its macOS outputs stay ad hoc-signed pipeline artifacts"),
+        "{}",
+        said(&out)
+    );
+}
+
 /// The package step packages every platform but macOS: a
 /// product's dmg is the Mac's (package-macos), never in the listing the
 /// repo step publishes, and no macOS artifact is needed here.

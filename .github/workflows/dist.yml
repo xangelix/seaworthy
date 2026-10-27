@@ -868,7 +868,8 @@ jobs:
       # On a release with the Apple secrets: a keychain of its own with the
       # Developer ID identities and the notary profile, made for this step
       # and deleted when it ends, and signing.toml's [apple]; the outputs
-      # are then signed, notarized and released. Without them, ad hoc-signed.
+      # are then signed, notarized and released. Without them, ad hoc-signed
+      # (refused on a release when seaworthy.toml pins [defaults.apple]).
       - name: Package (seaworthy.sh package-macos)
         env:
           SEAWORTHY_TOOL_BIN: ${{ steps.seaworthy.outputs.bin }}

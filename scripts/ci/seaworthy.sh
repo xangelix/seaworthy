@@ -1143,6 +1143,13 @@ package_macos() {
         signing=(--signing "$file")
         say "a release: the macOS outputs are Developer ID-signed and notarized ([apple] in $file)"
     elif release; then
+        # A pinned team means the macOS outputs ship Developer ID-signed:
+        # a release whose Apple secrets didn't reach this step must not
+        # ship them ad hoc-signed.
+        local team
+        team="$("$tool" apple-team --config "$config")" || fail "$config: no Apple team to read"
+        [ -z "$team" ] ||
+            fail "$config pins [defaults.apple] (team $team), but no [apple] signer reached this release's macOS step: its outputs would ship ad hoc-signed (pass the Developer ID secrets; without the pin, a release's macOS outputs are ad hoc-signed on purpose)"
         say "a release: its macOS outputs stay ad hoc-signed pipeline artifacts, outside the release"
     elif ci_test_sign; then
         say "a CI test build: manifests by the CI test keys"

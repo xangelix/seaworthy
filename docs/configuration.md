@@ -116,7 +116,8 @@ while the identity and its CA stay:
 
 `[defaults.apple]` pins who may Developer ID-sign the macOS outputs (required to sign with
 `signing.toml`'s `[apple]`). It pins the team, not the certificate: Developer ID certificates are
-renewed while the team stays.
+renewed while the team stays. A pinned team also means a release's macOS outputs are always signed:
+the CI templates refuse a release whose macOS step got no `[apple]` signer.
 
 | Key | Meaning |
 |---|---|
