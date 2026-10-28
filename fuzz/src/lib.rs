@@ -47,6 +47,7 @@ targets![
     dist_inputs,
     dist_msi_tables,
     dist_pe,
+    dist_post_link,
     lab_request,
     levels_records,
     mldsa_public_key,

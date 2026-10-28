@@ -24,14 +24,18 @@
 //! - The headers are updated: the section count, `SizeOfImage`,
 //!   `SizeOfInitializedData`, the resource data directory, and the PE
 //!   checksum.
+//! - Checked before it is returned: every other section's header and data,
+//!   and every other header byte, must be what they were
+//!   ([`crate::post_link::check_stamp`], an independent reading of both
+//!   images). A FIPS module in the image is never touched.
 //! - Refused rather than risked: an image that isn't PE32+ AMD64, one
 //!   already Authenticode-signed (stamping would break the signature), one
 //!   with data after its last section (a COFF symbol table, an overlay),
 //!   one whose data directories don't fit its optional header or reach
 //!   past its last section, one whose `SizeOfHeaders` reaches into a
 //!   section's data, one breaking the format's alignment rules or with
-//!   sections overlapping in memory, and one without room for one more
-//!   section header before its first section's data.
+//!   sections overlapping in memory or in the file, and one without room
+//!   for one more section header before its first section's data.
 //!
 //! `FileVersion` is `major.minor.patch.sequence` (the sequence clamped to
 //! the 16 bits the field holds), `ProductVersion` the release as written
@@ -537,7 +541,8 @@ fn checksum(pe: &[u8], field: usize) -> u32 {
 ///
 /// # Errors
 /// [`DistError::Layout`] for an image the module refuses (see the module
-/// docs) or a malformed resource tree.
+/// docs), a malformed resource tree, or a result that changed more than the
+/// resources ([`crate::post_link::check_stamp`]).
 pub fn set_resource(
     pe: &[u8],
     type_id: u16,
@@ -586,6 +591,18 @@ pub fn set_resource(
                 > u64::from(b.virtual_address)
         {
             return Err(refused("sections that overlap in memory"));
+        }
+    }
+    // Nor in the file: rewriting a trailing resource section in place
+    // truncates the file at its start, which must not cut into another
+    // section's data.
+    let mut by_file: Vec<&Section> = secs.iter().filter(|s| s.raw_size != 0).collect();
+    by_file.sort_by_key(|s| s.raw_pointer);
+    for pair in by_file.windows(2) {
+        if let [a, b] = pair
+            && u64::from(a.raw_pointer) + u64::from(a.raw_size) > u64::from(b.raw_pointer)
+        {
+            return Err(refused("sections whose file data overlap"));
         }
     }
     // Where the image's sections end in memory: a new section goes after
@@ -755,6 +772,8 @@ pub fn set_resource(
     let sum = checksum(&out, field);
     put_u32(&mut out, field, sum)?;
     let _ = l.directory_count;
+    // Nothing but the resources changed in what Windows maps.
+    crate::post_link::check_stamp(pe, &out)?;
     Ok(out)
 }
 
