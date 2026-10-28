@@ -2102,6 +2102,14 @@ impl Config {
                     claims.push(("linux.command", command));
                 }
             }
+            // The bundle id is also the pkg's identifier, the receipt
+            // `pkgutil` keeps and a conflicting product's pkg looks for:
+            // never shared, conflicting products included (one product's
+            // install or uninstall would rewrite or forget the other's).
+            // macOS compares identifiers without regard to case.
+            if let Some(macos) = &p.macos {
+                claims.push(("macos.bundle-id", macos.bundle_id.to_ascii_lowercase()));
+            }
             if let Some(desktop) = &p.desktop {
                 claims.push((
                     "desktop.app-id",
@@ -2128,6 +2136,8 @@ impl Config {
                         "products {other} and {id} share {key} {value:?}{}",
                         if SHAREABLE.contains(&key) {
                             " (only products that conflict may)"
+                        } else if key == "macos.bundle-id" {
+                            " (it is also the pkg's identifier, its receipt: one per product, even between products that conflict)"
                         } else {
                             ""
                         }

@@ -209,6 +209,33 @@ fn conflicting_products_may_share_what_one_installation_holds() {
     );
 }
 
+/// The bundle id is the pkg's receipt: never shared, not even between
+/// products that conflict, whatever its case.
+#[test]
+fn no_two_products_share_a_bundle_id() {
+    let macos = |id: &str, bundle: &str| {
+        profile(id, "Acme Trove", "").replace(
+            "outputs = [\"deb\", \"rpm\", \"pacman\", \"msi\"]",
+            "outputs = [\"deb\", \"pkg\"]",
+        ) + &format!("\n[product.{id}.macos]\nbundle-id = \"{bundle}\"\n")
+    };
+    let text = |second: &str| {
+        format!(
+            "{DEFAULTS}{}{}",
+            macos("trove-fips", "com.example.trove")
+                .replace("conflicts = []", "conflicts = [\"trove-portable\"]"),
+            macos("trove-portable", second),
+        )
+    };
+    Config::parse(&text("com.example.trove.portable")).unwrap();
+    for shared in ["com.example.trove", "COM.Example.Trove"] {
+        refused(
+            &text(shared),
+            "products trove-fips and trove-portable share macos.bundle-id \"com.example.trove\" (it is also the pkg's identifier, its receipt: one per product, even between products that conflict)",
+        );
+    }
+}
+
 /// Every format names the conflicts and what the package provides, and
 /// replaces nothing.
 #[test]
