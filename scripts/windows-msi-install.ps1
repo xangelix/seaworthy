@@ -19,7 +19,8 @@
 #              under HKLM, of the kind and value WerAddExcludedApplication writes; the
 #              document type under HKLM\SOFTWARE\Classes: .acmeview's ProgID, content
 #              type and OpenWithProgids, the ProgID's icon and its open and inspect
-#              verbs starting the launcher with the file after --, and `assoc` naming it
+#              verbs starting the launcher with the file after --, and HKEY_CLASSES_ROOT (the
+#              merged view programs read) resolving both
 #   launch     the installed launcher picks a core and runs it (core=...); the launcher
 #              carries its own icon and manifest (e2e/demo's build.rs), so Windows'
 #              loader checks the tree the version stamp rebuilt
@@ -282,8 +283,12 @@ function Assert-FileType([string]$Scope) {
     }
     Assert-True ($null -ne (Get-Value "$classes\$DocExtension\OpenWithProgids" $DocProgId)) "$DocExtension\OpenWithProgids lists $DocProgId"
     Assert-True (Test-Path -LiteralPath (Join-Path $at.InstallDir "$DocProgId.ico") -PathType Leaf) "the document icon is installed"
-    $assoc = (& cmd.exe /d /c "assoc $DocExtension" | Out-String).Trim()
-    Assert-True ($assoc -eq "$DocExtension=$DocProgId") "assoc $DocExtension says '$assoc'"
+    # What programs resolve: HKEY_CLASSES_ROOT, the user's Classes merged over the machine's.
+    # (cmd's assoc reads the machine's alone, so it never sees a per-user install.)
+    $resolved = Get-Value "Registry::HKEY_CLASSES_ROOT\$DocExtension" ''
+    Assert-True ($null -ne $resolved -and "$($resolved.Data)" -eq $DocProgId) "HKEY_CLASSES_ROOT\$DocExtension names '$(if ($resolved) { $resolved.Data })', not $DocProgId"
+    $open = Get-Value "Registry::HKEY_CLASSES_ROOT\$DocProgId\shell\open\command" ''
+    Assert-True ($null -ne $open -and "$($open.Data)" -eq "`"$launcher`" -- `"%1`"") "HKEY_CLASSES_ROOT opens $DocExtension with '$(if ($open) { $open.Data })'"
     $other = @{ machine = 'user'; user = 'machine' }[$Scope]
     Assert-True (-not (Test-Path -LiteralPath "$($Scopes[$other].Classes)\$DocProgId")) "nothing registers $DocProgId in $($Scopes[$other].Classes)"
 }
@@ -381,11 +386,13 @@ Invoke-Step 'path' {
         Assert-True ($entries[-1] -eq $dir) "$dir is appended, last on $hive's PATH: $($entries -join ';')"
         $other = @{ HKLM = 'HKCU:'; HKCU = 'HKLM:' }[$hive.TrimEnd(':')]
         Assert-True (-not ((Get-PathEntries $other) -contains $dir)) "$dir isn't on $other's PATH"
-        # A new process finds the launcher by name through that PATH.
-        $env:Path = (@(Get-PathEntries 'HKLM:') + @(Get-PathEntries 'HKCU:')) -join ';'
+        # A new process finds the launcher by name through that PATH (expanded, as a new
+        # process gets it).
+        $env:Path = (@(Get-PathEntries 'HKLM:') + @(Get-PathEntries 'HKCU:') | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) }) -join ';'
         $found = (Get-Command "$Executable.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
         Assert-True ($found -and $found.Source -eq (Join-Path $dir "$Executable.exe")) "$Executable.exe is found on PATH in $dir (found '$(if ($found) { $found.Source })')"
-        $entry = @(Get-Entries -Name 'Acme Viewer Lite')
+        # A per-user product is recorded twice (see Assert-Installed): one product code.
+        $entry = @(Get-Entries -Name 'Acme Viewer Lite' | Sort-Object -Property Code -Unique)
         Assert-True ($entry.Count -eq 1) "one viewer-lite entry ($scope)"
         $code = Invoke-Msiexec @('/x', $entry[0].Code) (Join-Path $Evidence "remove-lite-$scope.log")
         Assert-True ($code -eq 0) "msiexec /x of viewer-lite ($scope) exited $code"
