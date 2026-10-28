@@ -275,7 +275,18 @@ mod tests {
             Err(UpdateError::UpdateInProgress)
         ));
         drop(held);
-        TargetLock::try_acquire(&lock_path).unwrap();
+        // A sibling test's child holds a copy of every descriptor from its
+        // fork until its exec closes them (they're close-on-exec), the lock's
+        // among them: the dropped lock comes free once that child has exec'd.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Err(error) = TargetLock::try_acquire(&lock_path) {
+            assert!(
+                matches!(error, UpdateError::UpdateInProgress)
+                    && std::time::Instant::now() < deadline,
+                "the dropped lock isn't free: {error}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         // A directory where the lockfile should be is refused.
         assert!(TargetLock::try_acquire(dir.path()).is_err());
     }
