@@ -54,8 +54,9 @@ use windows_sys::Win32::System::Threading::{
     STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CWF_CREATE_ONLY, EnumWindows, GetClassNameW, GetDlgItemTextW, GetWindowTextW,
-    GetWindowThreadProcessId, IDOK, PostMessageW, WINSTA_ALL_ACCESS, WM_COMMAND, WSF_VISIBLE,
+    BN_CLICKED, CWF_CREATE_ONLY, EnumWindows, FindWindowExW, GetClassNameW, GetDlgCtrlID,
+    GetDlgItemTextW, GetWindowTextW, GetWindowThreadProcessId, PostMessageW, WINSTA_ALL_ACCESS,
+    WM_CLOSE, WM_COMMAND, WSF_VISIBLE,
 };
 
 /// How long a launcher may take to exit (or to show its dialog).
@@ -550,11 +551,41 @@ fn in_an_interactive_session_a_gui_launcher_shows_its_failure_until_dismissed() 
         let n = unsafe { GetWindowTextW(dialog, buffer, len) };
         n
     });
-    // SAFETY: a window of the child's, and the OK button's command.
+    // Dismissed as a click on its one button would: the button's own
+    // control ID and handle. (Windows gives an OK-only message box's button
+    // another ID than IDOK, so a bare WM_COMMAND IDOK leaves it open.)
+    let class = wide("Button");
+    // SAFETY: a dialog box of the child's, no child to start after, a
+    // NUL-terminated class name and no window name.
+    #[allow(unsafe_code, reason = "FFI: FindWindowExW")]
+    let button = unsafe {
+        FindWindowExW(
+            dialog,
+            std::ptr::null_mut(),
+            class.as_ptr(),
+            std::ptr::null(),
+        )
+    };
+    assert!(!button.is_null(), "the message box has no button");
+    // SAFETY: the button found above.
+    #[allow(unsafe_code, reason = "FFI: GetDlgCtrlID")]
+    let id = unsafe { GetDlgCtrlID(button) };
+    let command = (BN_CLICKED << 16) | id.cast_unsigned();
+    // SAFETY: a window of the child's, a button's click notification and
+    // that button's handle.
     #[allow(unsafe_code, reason = "FFI: PostMessageW")]
-    let posted = unsafe { PostMessageW(dialog, WM_COMMAND, IDOK.cast_unsigned() as usize, 0) };
+    let posted = unsafe { PostMessageW(dialog, WM_COMMAND, command as usize, button as isize) };
     assert_ne!(posted, 0, "{}", std::io::Error::last_os_error());
-    let status = wait(&mut child, LIMIT);
+    let mut status = wait(&mut child, Duration::from_secs(10));
+    if status.is_none() {
+        // A user can also close it from its title bar.
+        eprintln!("note: the message box ignored its button's click: closing it");
+        // SAFETY: a window of the child's and a message without arguments.
+        #[allow(unsafe_code, reason = "FFI: PostMessageW")]
+        let closed = unsafe { PostMessageW(dialog, WM_CLOSE, 0, 0) };
+        assert_ne!(closed, 0, "{}", std::io::Error::last_os_error());
+        status = wait(&mut child, LIMIT);
+    }
     let mut stderr = String::new();
     child
         .stderr
