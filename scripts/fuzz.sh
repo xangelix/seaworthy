@@ -78,11 +78,17 @@ ensure_tools() {
     fi
 }
 
-# `--fuzz-dir` must precede any `--` (everything after it goes to libFuzzer).
+# `--fuzz-dir` and `--target` must precede any `--` (everything after it goes
+# to libFuzzer). cargo-fuzz builds for the platform it was itself compiled for
+# unless told otherwise, and its release binaries are static musl builds,
+# where the sanitizers can't run: the target is the toolchain's own host.
 cargo_fuzz() {
     local subcommand="$1"
     shift
-    cargo "+$TOOLCHAIN" fuzz "$subcommand" --fuzz-dir "$FUZZ_DIR" "$@"
+    local host
+    host="$(rustup run "$TOOLCHAIN" rustc -vV | sed -n 's/^host: //p')"
+    [ -n "$host" ] || die "cannot read the host target of $TOOLCHAIN"
+    cargo "+$TOOLCHAIN" fuzz "$subcommand" --fuzz-dir "$FUZZ_DIR" --target "$host" "$@"
 }
 
 # The canonical list is the fuzz crate's [[bin]] entries.
