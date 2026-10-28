@@ -35,8 +35,10 @@
 //! `<dir>\<core>_<cpu>.dll` beside the launcher (with the FIPS module DLL
 //! pair, resolved from the same directory); Linux `<dir>/lib/lib<core>_<cpu>.so`;
 //! macOS `<App>.app/Contents/Frameworks/lib<core>_<cpu>.dylib`, the launcher
-//! in `Contents/MacOS`. On macOS a launcher started from the Finder (no
-//! terminal) also shows its own failures in an alert.
+//! in `Contents/MacOS`. A desktop launcher with no terminal to report to (on
+//! macOS started from the Finder, on Windows a GUI-subsystem program in an
+//! interactive session) also shows its own failures in a dialog
+//! ([`ENV_NO_DIALOG`] turns it off).
 //!
 //! See the README for the selection rules, the overrides and the exit codes,
 //! and `docs/cpu-levels.md` in the repository for how levels, records and
@@ -117,6 +119,16 @@ pub const ENV_CORE: &str = "SEAWORTHY_CORE";
 /// where whoever set the environment may not be whoever runs with the
 /// privileges.
 pub const ENV_DEBUG: &str = "SEAWORTHY_LAUNCHER_DEBUG";
+/// Set (to anything but empty or `0`), the launcher never shows its own
+/// failures in a dialog; they still go to stderr with the same exit code.
+/// Without it a launcher shows them in one when no terminal would show them
+/// and someone can see a window: on macOS when LaunchServices started it
+/// (the Finder, the Dock, `open`), on Windows when it is a GUI-subsystem
+/// program (`windows_subsystem = "windows"`) whose stderr isn't a console,
+/// outside session 0, on an interactive window station. `CI` set (to
+/// anything but empty, `0` or `false`) turns the dialog off too. Honoured in
+/// a privileged process as well: it only ever takes a dialog away.
+pub const ENV_NO_DIALOG: &str = "SEAWORTHY_LAUNCHER_NO_DIALOG";
 
 /// A product's launcher configuration ([`launcher_main!`] builds it).
 #[derive(Clone, Copy, Debug)]
@@ -168,9 +180,17 @@ pub fn run(launcher: &Launcher) -> ! {
     let mut out = Report::default();
     let code = launch(launcher, &mut out);
     // No terminal to read stderr on: the launcher's own failure goes into
-    // an alert too (macOS, started by LaunchServices).
-    if !out.core_ran && !out.lines.is_empty() && dialog::launch_services_without_terminal() {
-        dialog::show(&program_name(), &out.lines.join("\n"));
+    // a dialog too (the dialog module's rules), with the same exit code.
+    if !out.core_ran && !out.lines.is_empty() {
+        let decision = dialog::decide();
+        let name = program_name();
+        // Debug output names the decision where a dialog exists at all.
+        if out.debug && decision != dialog::Decision::Unsupported {
+            eprintln!("{name}: {}", decision.describe());
+        }
+        if decision == dialog::Decision::Show {
+            dialog::show(&name, &dialog::text(&out.lines));
+        }
     }
     std::process::exit(code)
 }
@@ -202,12 +222,13 @@ fn display_safe(text: &str) -> String {
     out
 }
 
-/// What the launcher printed, and whether the core ran (its exit code, and
-/// its errors, are its own).
+/// What the launcher printed, whether the core ran (its exit code, and its
+/// errors, are its own), and whether debug output is on.
 #[derive(Default)]
 struct Report {
     lines: Vec<String>,
     core_ran: bool,
+    debug: bool,
 }
 
 /// The launcher's settings from its environment.
@@ -300,6 +321,7 @@ fn launch(launcher: &Launcher, out: &mut Report) -> i32 {
         }
     }
     let settings = Settings::from_env(&name);
+    out.debug = settings.debug;
     // macOS reports the path the program was started by (a symlink stays a
     // symlink): the cores sit beside the real file, which Linux's
     // /proc/self/exe already names.

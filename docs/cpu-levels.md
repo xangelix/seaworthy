@@ -239,8 +239,27 @@ keep the file name and the flag in step.
   every core. Never "CPU too old": the missing core may be exactly the one
   this CPU needs.
 
-On macOS, a launcher started from the Finder or the Dock has no terminal
-for stderr, so its own failures also appear in an alert.
+### The failure dialog
+
+A desktop program started from the Finder, the Dock, Explorer or a
+shortcut has no terminal for stderr: a launcher that can't run a core would
+seem to do nothing. So when no one would see its lines otherwise, the
+launcher also shows them in a dialog (escaped like everything it prints, at
+most 40 lines and 4,000 characters), then exits with the same code. Its
+stderr and exit codes never change.
+
+| | Shows a dialog when | Never when |
+| --- | --- | --- |
+| macOS | LaunchServices started it and stderr isn't a terminal (an alert) | |
+| Windows | It is a GUI-subsystem program (`#![windows_subsystem = "windows"]` in the launcher crate), stderr isn't a console, it doesn't run in session 0, and its window station is interactive (a message box, in front) | It is a console program; it runs as a service, a scheduled task without a logged-on user or in an SSH session (session 0, or a window station no one sees) |
+| Both | | `SEAWORTHY_LAUNCHER_NO_DIALOG` is set (anything but empty or `0`), or `CI` is (anything but empty, `0` or `false`) |
+
+On Windows the launcher loads `user32.dll` from System32 only when every
+other condition holds; it doesn't import it. A CI runner's desktop session
+can be interactive, which is why `CI` turns the dialog off: a test that
+starts a GUI launcher in a desktop session and expects it to fail sets
+`SEAWORTHY_LAUNCHER_NO_DIALOG=1`. `SEAWORTHY_LAUNCHER_DEBUG=1` prints the
+decision and its reason.
 
 ## Debugging a machine
 
@@ -254,6 +273,9 @@ privileges (a note on stderr says so when one is set):
   each core was taken or skipped.
 - `SEAWORTHY_CORE=<cpu>` forces one of the product's cores, if the machine
   supports it: an unknown name exits 64, an unsupported one 78.
+
+`SEAWORTHY_LAUNCHER_NO_DIALOG=1` ([the failure dialog](#the-failure-dialog))
+is honoured in a privileged process too: it only ever takes a dialog away.
 
 The core can report which build runs with `seaworthy_launcher::this_core()`
 (and its full record with `record()`).
@@ -312,5 +334,11 @@ own change, never a release.
   records.
 - `scripts/launcher-e2e-macos.sh` (Apple Silicon macOS): the same fixture
   as an app bundle.
+- `crates/seaworthy-launcher/tests/windows_dialog.rs` (Windows, part of
+  `cargo test`): a GUI-subsystem launcher without its core
+  (`examples/desktop_launcher.rs`) shows no dialog when opted out or in
+  CI, none on a window station of its own (never interactive), and in an
+  interactive session shows its lines until the test dismisses the box;
+  each time it exits 74, and a run that blocks fails.
 - The `levels_records` fuzz target covers every parser of untrusted input
   in `seaworthy-levels`.
