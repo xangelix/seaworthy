@@ -754,6 +754,134 @@ pub(crate) fn acme_macos_artifacts(root: &Path) {
     }
 }
 
+/// Every program of product `id` in the artifact directory `root`, for
+/// Linux, Windows and (with `macos`) macOS: each launcher's `.cpulist`
+/// names its own core, each core sits in its build's directory.
+pub(crate) fn program_artifacts(
+    config: &seaworthy::config::Config,
+    id: &str,
+    root: &Path,
+    macos: bool,
+) {
+    for program in config.products[id].programs() {
+        let list = cpulist(&program.core, &CPUS);
+        write(
+            root,
+            &format!("{LINUX}/launcher/{}", program.executable),
+            &Elf {
+                sections: vec![(".cpulist".into(), list.clone())],
+                needed: vec!["libc.so.6".into()],
+                interp: Some(LOADER.into()),
+                ..Elf::default()
+            }
+            .build(),
+        );
+        write(
+            root,
+            &format!("{WINDOWS}/launcher/{}.exe", program.executable),
+            &Pe {
+                sections: vec![(".cpulist".into(), list)],
+                imports: vec!["kernel32.dll".into()],
+                executable: true,
+            }
+            .build(),
+        );
+        for cpu in CPUS {
+            let dir = program.build_dir(cpu);
+            write(
+                root,
+                &format!("{LINUX}/cores/{dir}/lib{}.so", program.core),
+                &Elf {
+                    sections: vec![(".cpureq".into(), record(LINUX, cpu, V2))],
+                    needed: vec!["libc.so.6".into()],
+                    symbols: vec![("seaworthy_core_main".into(), true)],
+                    ..Elf::default()
+                }
+                .build(),
+            );
+            write(
+                root,
+                &format!("{WINDOWS}/cores/{dir}/{}.dll", program.core),
+                &Pe {
+                    // Each core's own bytes (WiX's cabinet keeps one copy of
+                    // identical files).
+                    sections: vec![
+                        (".cpureq".into(), record(WINDOWS, cpu, V2)),
+                        (".rdata".into(), program.core.as_bytes().to_vec()),
+                    ],
+                    imports: vec!["kernel32.dll".into()],
+                    executable: false,
+                }
+                .build(),
+            );
+        }
+        if !macos {
+            continue;
+        }
+        write(
+            root,
+            &format!("{MACOS}/launcher/{}", program.executable),
+            &Macho {
+                executable: true,
+                sections: vec![(
+                    "__DATA".into(),
+                    "__cpulist".into(),
+                    cpulist(&program.core, &MACOS_CPUS),
+                )],
+                ..Macho::default()
+            }
+            .build(),
+        );
+        for cpu in MACOS_CPUS {
+            let mut features = M1.to_vec();
+            if cpu == "apple-m4" {
+                features.extend(["bf16", "i8mm", "v8.5a", "v8.6a", "v8.7a"]);
+            }
+            write(
+                root,
+                &format!(
+                    "{MACOS}/cores/{}/lib{}.dylib",
+                    program.build_dir(cpu),
+                    program.core
+                ),
+                &Macho {
+                    sections: vec![(
+                        "__DATA".into(),
+                        "__cpureq".into(),
+                        record(MACOS, cpu, &features),
+                    )],
+                    ..Macho::default()
+                }
+                .build(),
+            );
+        }
+    }
+}
+
+/// Product `id`'s programs ([`program_artifacts`]) verified and laid out
+/// (unstripped) under `dir`, with `seaworthy.toml`'s directory `config.dir`.
+pub(crate) fn program_layouts(
+    config: &seaworthy::config::Config,
+    id: &str,
+    dir: &Path,
+    macos: bool,
+) -> Vec<seaworthy::layout::Layout> {
+    let input = dir.join("artifacts");
+    program_artifacts(config, id, &input, macos);
+    let verified = seaworthy::verify::verify(config, id, &input).expect("verifies");
+    seaworthy::layout::layout(
+        config,
+        id,
+        &verified,
+        &dir.join("dist"),
+        seaworthy::layout::Options {
+            strip: false,
+            ..seaworthy::layout::Options::default()
+        },
+    )
+    .expect("lays out")
+}
+
 /// A `.cpureq` record.
 pub(crate) fn record(triple: &str, cpu: &str, features: &[&str]) -> Vec<u8> {
     let mut sorted: Vec<&str> = features.to_vec();

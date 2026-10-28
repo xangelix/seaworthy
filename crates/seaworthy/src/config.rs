@@ -660,6 +660,67 @@ pub struct Product {
     /// with a macOS output.
     #[serde(default)]
     pub macos: Option<Macos>,
+    /// `[product.<id>.msi]`: how the MSI installs (an `msi` output only):
+    /// its scope, `PATH`, Windows Error Reporting.
+    #[serde(default)]
+    pub msi: Option<MsiOptions>,
+}
+
+/// `[product.<id>.msi]`: the MSI's installation options.
+///
+/// ```toml
+/// [product.trove.msi]
+/// install-scope = "either"        # per user by default; everyone on request
+/// path = true                     # the install directory on PATH (its cli programs)
+/// wer-exclude = ["TroveGui"]      # no Windows Error Reporting for this program
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct MsiOptions {
+    /// Who the MSI installs for ([`InstallScope`]): `machine` (the
+    /// default), `user` or `either`.
+    #[serde(default)]
+    pub install_scope: InstallScope,
+    /// Append the install directory to `PATH` (the system's for a
+    /// machine-wide install, the user's for a per-user one; removed on
+    /// uninstall), so the product's `cli` programs run by name.
+    #[serde(default)]
+    pub path: bool,
+    /// The programs (by executable) Windows Error Reporting leaves alone:
+    /// `ExcludedApplications` under `HKLM` for a machine-wide install,
+    /// `HKCU` for a per-user one.
+    #[serde(default)]
+    pub wer_exclude: Vec<String>,
+}
+
+/// Who an MSI installs for (`[product.<id>.msi] install-scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallScope {
+    /// Every user of the machine (`%ProgramFiles%`, `HKLM`), which needs
+    /// administrator rights: the default, and the only scope a service or
+    /// the update helper installs in.
+    #[default]
+    Machine,
+    /// The installing user alone (`%LocalAppData%\Programs`, `HKCU`), with
+    /// no administrator rights; a machine-wide install is refused.
+    User,
+    /// Per user by default, or every user when the person installing
+    /// chooses it (`ALLUSERS=1 MSIINSTALLPERUSER=""` on the command
+    /// line).
+    Either,
+}
+
+impl InstallScope {
+    /// Its name in `seaworthy.toml`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Machine => "machine",
+            Self::User => "user",
+            Self::Either => "either",
+        }
+    }
 }
 
 /// What a program is to the people who run it.
@@ -2400,6 +2461,7 @@ impl Config {
             }
             _ => {}
         }
+        self.validate_msi_options(id, p)?;
         if p.outputs.contains(&Output::Msi) && p.windows_directory.is_none() {
             return Err(at(
                 "windows-directory",
@@ -2552,6 +2614,85 @@ impl Config {
             }
         }
         self.validate_desktop_and_files(id, p)
+    }
+
+    /// `[product.<id>.msi]`: only with an `msi` output; a per-user scope
+    /// only for a product with nothing machine-wide to install; `path` with a `cli` program to put on it; each
+    /// `wer-exclude` a program of the product, once.
+    fn validate_msi_options(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        let at = |key: &str, why: &str| DistError::Config(format!("product.{id}.msi.{key}: {why}"));
+        let Some(msi) = &p.msi else {
+            return Ok(());
+        };
+        if !p.outputs.contains(&Output::Msi) {
+            return Err(DistError::Config(format!(
+                "product.{id}.msi: set, but no output is msi"
+            )));
+        }
+        if msi.install_scope != InstallScope::Machine {
+            let scope = msi.install_scope.name();
+            // Everything that only a machine-wide install can put in place.
+            // A service is registered with the service control manager
+            // (with its directory descriptors and its recovery actions run
+            // as LocalSystem); the update helper is a LocalSystem service
+            // with %ProgramData% folders made by a SYSTEM custom action and
+            // the update policy under HKLM.
+            if let Some(service) = &p.service {
+                return Err(at(
+                    "install-scope",
+                    &format!(
+                        "\"{scope}\" installs for one user without administrator rights, but the product's service ({:?}, [product.{id}.service]) is a Windows service: only a machine-wide install registers one, with its directories' descriptors and recovery actions run as LocalSystem; use install-scope = \"machine\"",
+                        service.name
+                    ),
+                ));
+            }
+            if p.ships_helper() {
+                return Err(at(
+                    "install-scope",
+                    &format!(
+                        "\"{scope}\" installs for one user without administrator rights, but the product ships the update helper (helper = {:?}): a LocalSystem service with its %ProgramData% folders (made by a custom action running as SYSTEM) and the update policy under HKLM, all machine-wide; set updates.default = \"off\" (no helper) or use install-scope = \"machine\"",
+                        p.helper.as_deref().unwrap_or_default()
+                    ),
+                ));
+            }
+        }
+        let programs = p.programs();
+        if msi.path && !programs.iter().any(|program| program.role == Role::Cli) {
+            return Err(at(
+                "path",
+                "puts the install directory on PATH so the product's cli programs run by name, and it has no cli program",
+            ));
+        }
+        for (n, executable) in msi.wer_exclude.iter().enumerate() {
+            if !programs
+                .iter()
+                .any(|program| program.executable == *executable)
+            {
+                return Err(at(
+                    "wer-exclude",
+                    &format!(
+                        "{executable:?} isn't one of the product's programs (their executables: {})",
+                        programs
+                            .iter()
+                            .map(|program| program.executable.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+            if msi
+                .wer_exclude
+                .get(..n)
+                .unwrap_or_default()
+                .contains(executable)
+            {
+                return Err(at(
+                    "wer-exclude",
+                    &format!("{executable:?} is listed twice"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The product's programs: the single-program form's keys or
@@ -3217,6 +3358,13 @@ impl Product {
                 }
             })
             .collect()
+    }
+
+    /// The MSI's installation options: `[product.<id>.msi]`, else the
+    /// defaults (machine-wide, nothing on `PATH`).
+    #[must_use]
+    pub fn msi_options(&self) -> MsiOptions {
+        self.msi.clone().unwrap_or_default()
     }
 
     /// The program the service runs: the first.

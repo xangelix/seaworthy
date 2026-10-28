@@ -16,6 +16,16 @@
 //!
 //! What the package does:
 //!
+//! - **Scope** (`[product.<id>.msi] install-scope`): machine-wide (WiX's
+//!   `perMachine`, `ALLUSERS=1`), or Windows Installer 5's dual-purpose
+//!   package (`perUserOrMachine`: `ALLUSERS=2`, `MSIINSTALLPERUSER=1`),
+//!   which installs per user (`ProgramFiles64Folder` redirected to
+//!   `%LocalAppData%\Programs`, `HKMU` and `HKCR` rows to `HKCU`, the
+//!   shortcuts to the user's folders) unless `ALLUSERS=1
+//!   MSIINSTALLPERUSER=""` asks for everyone; `user` adds a launch
+//!   condition refusing that. Nothing else in the package changes with
+//!   the scope but `PATH` (below); validation keeps a service and the
+//!   update helper, and so every machine-wide part, out of a per-user one.
 //! - **Files:** the tree under `%ProgramFiles%\<Vendor>\<Directory>`, one
 //!   component per file (Rust binaries carry no version resource until
 //!   [`crate::pe_version`] stamps one, and WiX derives a stable component
@@ -136,6 +146,15 @@
 //!   all-users folders (`ALLUSERS=1`); the value lands in the installing
 //!   user's hive. Non-advertised, they never start a repair for another
 //!   user; another administrator's removal leaves that one value behind.
+//! - **`PATH`** (`[product.<id>.msi] path`): the install directory
+//!   appended to the system's `PATH` (machine-wide) or the user's (per
+//!   user), removed on uninstall; for `either`, one component each,
+//!   conditioned on the scope Windows Installer chose (`ALLUSERS = 1`,
+//!   `NOT ALLUSERS`), since WiX's `System` is fixed at build time.
+//! - **Windows Error Reporting** (`[product.<id>.msi] wer-exclude`): a
+//!   DWORD 1 named for each excluded program's executable under
+//!   `…\Windows Error Reporting\ExcludedApplications` ([`WER_EXCLUDED_KEY`]),
+//!   in `HKLM`, or `HKMU` for a package that may install per user.
 //! - **Data files** (`[[product.<id>.files]]`) in their subdirectories of
 //!   the install directory, one component each like every file.
 //! - **Programs and Features:** the entry can't be modified
@@ -170,7 +189,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::DistError;
-use crate::config::{Config, UpdatePolicy};
+use crate::config::{Config, InstallScope, UpdatePolicy};
 use crate::layout::{Layout, Role};
 use crate::version::Release;
 use seaworthy_service::render::windows::{self as win, HelperGrantee};
@@ -184,6 +203,11 @@ use seaworthy_service::render::windows::{self as win, HelperGrantee};
 /// `updates_dir_sddl`, `helper_log_dir_sddl`). Short, because Windows
 /// Installer's `CustomAction` target column holds 255 characters.
 pub const PROGRAMDATA_ARGUMENT: &str = "--seaworthy-install-programdata";
+
+/// Where Windows Error Reporting reads the programs it leaves alone
+/// (`[product.<id>.msi] wer-exclude`), under `HKLM` or `HKCU`.
+pub const WER_EXCLUDED_KEY: &str =
+    "Software\\Microsoft\\Windows\\Windows Error Reporting\\ExcludedApplications";
 
 /// A deterministic GUID (an RFC 9562 version 8 UUID) from SHA-256 of
 /// `parts`, NUL-joined, in registry form (`{…}`, uppercase).
@@ -330,6 +354,25 @@ pub fn wxs(
         DistError::Config(format!("product.{id}.service: {e}"))
     };
     let helper_ships = layout.helper().is_some();
+    let options = product.msi_options();
+    // Windows Installer 5's dual-purpose package for anything but a
+    // machine-wide one: ALLUSERS=2 and MSIINSTALLPERUSER=1 (WiX's
+    // perUserOrMachine), so a per-user install puts ProgramFiles64Folder
+    // in %LocalAppData%\Programs and HKCR in HKCU\Software\Classes, with
+    // every component keyed as it is for a machine-wide one. (WiX's
+    // `perUser` sets no ALLUSERS: Program Files would stay the machine's.)
+    let scope = match options.install_scope {
+        InstallScope::Machine => "perMachine",
+        InstallScope::User | InstallScope::Either => "perUserOrMachine",
+    };
+    if options.install_scope != InstallScope::Machine && (product.service.is_some() || helper_ships)
+    {
+        // Validation refuses this; the .wxs never holds machine-wide state
+        // in a per-user package.
+        return Err(DistError::Config(format!(
+            "product.{id}.msi.install-scope: a service or the update helper installs machine-wide only"
+        )));
+    }
     // A desktop product's helper service: its name and the DACL that
     // lets interactive users start it.
     let desktop_helper = if helper_ships && product.kind == crate::config::Kind::Desktop {
@@ -397,7 +440,7 @@ pub fn wxs(
     line(
         2,
         &format!(
-            "<Package Name=\"{}\" Manufacturer=\"{}\" Version=\"{}\" UpgradeCode=\"{upgrade}\" Scope=\"perMachine\" Language=\"1033\" Codepage=\"65001\" Compressed=\"yes\" InstallerVersion=\"500\">",
+            "<Package Name=\"{}\" Manufacturer=\"{}\" Version=\"{}\" UpgradeCode=\"{upgrade}\" Scope=\"{scope}\" Language=\"1033\" Codepage=\"65001\" Compressed=\"yes\" InstallerVersion=\"500\">",
             xml(&product.display_name),
             xml(vendor),
             xml(msi_version)
@@ -455,6 +498,17 @@ pub fn wxs(
         4,
         "<Launch Condition=\"VersionNT64\" Message=\"[ProductName] requires 64-bit Windows.\" />",
     );
+    if options.install_scope == InstallScope::User {
+        // Per user only. With ALLUSERS=2, Windows Installer resets ALLUSERS
+        // to "" for a per-user install and to 1 for a per-machine one (the
+        // ALLUSERS property's documentation); ALLUSERS=1, or
+        // MSIINSTALLPERUSER cleared, would install for everyone, which this
+        // product doesn't. A removal is never refused.
+        line(
+            4,
+            "<Launch Condition=\"Installed OR NOT ALLUSERS\" Message=\"[ProductName] installs for the current user only: leave ALLUSERS and MSIINSTALLPERUSER as they are.\" />",
+        );
+    }
     line(4, "<Property Id=\"ARPNOMODIFY\" Value=\"1\" />");
     // Programs and Features' install location (the Uninstall key's
     // `InstallLocation`), which inventory tools read; an MSI leaves it
@@ -1042,6 +1096,73 @@ pub fn wxs(
             ),
         );
         line(6, "</Component>");
+    }
+    // Windows Error Reporting leaves these programs alone: a value per
+    // executable under ExcludedApplications, as WerAddExcludedApplication
+    // writes it (REG_DWORD 1 named for the executable), in HKLM for a
+    // machine-wide install and HKCU for a per-user one (HKMU follows the
+    // install's context). The value names an executable file name, not a
+    // path: Windows matches every program of that name.
+    let wer_root = match options.install_scope {
+        InstallScope::Machine => "HKLM",
+        InstallScope::User | InstallScope::Either => "HKMU",
+    };
+    for executable in &options.wer_exclude {
+        let name = format!("{executable}.exe");
+        line(
+            6,
+            &format!(
+                "<Component Id=\"{}\" Directory=\"InstallDir\" Guid=\"{}\" Bitness=\"always64\">",
+                identifier("WerExclude", executable, 0),
+                component_guid(&format!("WerExclude\0{executable}"))
+            ),
+        );
+        line(
+            8,
+            &format!(
+                "<RegistryValue Root=\"{wer_root}\" Key=\"{WER_EXCLUDED_KEY}\" Name=\"{}\" Type=\"integer\" Value=\"1\" KeyPath=\"yes\" />",
+                xml(&name)
+            ),
+        );
+        line(6, "</Component>");
+    }
+    // The install directory on PATH, appended (never ahead of the system's
+    // own directories) and taken out again on uninstall: the system PATH
+    // for a machine-wide install, the user's for a per-user one. WiX's
+    // Environment/@System is fixed at build time, so a package for either
+    // scope carries both, each conditioned on the scope the install runs
+    // in (ALLUSERS is 1 or empty once Windows Installer has chosen).
+    if options.path {
+        let entries: &[(&str, &str, Option<&str>)] = match options.install_scope {
+            InstallScope::Machine => &[("PathMachine", "yes", None)],
+            InstallScope::User => &[("PathUser", "no", None)],
+            InstallScope::Either => &[
+                ("PathMachine", "yes", Some("ALLUSERS = 1")),
+                ("PathUser", "no", Some("NOT ALLUSERS")),
+            ],
+        };
+        for (component, system, condition) in entries {
+            let condition = condition
+                .map(|c| format!(" Condition=\"{c}\""))
+                .unwrap_or_default();
+            line(
+                6,
+                &format!(
+                    "<Component Id=\"{component}\" Directory=\"InstallDir\" Guid=\"{}\" Bitness=\"always64\"{condition}>",
+                    component_guid(component)
+                ),
+            );
+            // No file or registry value of its own: the directory is the
+            // key path, which ICE18 wants listed in CreateFolder.
+            line(8, "<CreateFolder />");
+            line(
+                8,
+                &format!(
+                    "<Environment Id=\"{component}\" Name=\"PATH\" Value=\"[InstallDir]\" Action=\"set\" Part=\"last\" System=\"{system}\" />"
+                ),
+            );
+            line(6, "</Component>");
+        }
     }
     if !shortcuts.is_empty() {
         let target = launcher_id.ok_or_else(|| {

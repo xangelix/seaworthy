@@ -160,6 +160,7 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `windows-directory` | with `msi` | The Windows install directory under the vendor's (default: the display name's last word). It also names the state directory, the policy registry key and the Group Policy namespace, so it must never follow a display-name change. |
 | `conflicts` | no | What this product can't be installed beside. A product id of this `seaworthy.toml`: on every platform both build for, the Linux packages conflict (deb `Conflicts:`, rpm `Conflicts:`, pacman `conflict`),, the MSI refuses to install while the other's MSI is installed (found by its UpgradeCode, never removed), and the macOS pkg while the other's pkg is (its receipt); it holds both ways, so listing it on one product is enough. Anything else is a plain Linux package name (`[a-z0-9][a-z0-9.-]+`), which the Linux packages alone conflict with (so a Linux package must be an output); never a package this file builds (name its product) or one `linux.replaces` names. Unlike `linux.replaces`, nothing is replaced: an upgrade never swaps one product for another. Products that conflict may share a command, `windows-directory`, `desktop.app-id` and their shortcuts' name, which only one installation holds (never `macos.bundle-id`); no product conflicts with itself. |
 | `fips` | no | Whether this product's cores carry the AWS-LC FIPS module (default: `defaults.fips`): `verify` applies the FIPS checks to its binaries alone, so one `seaworthy.toml` can list a product per crypto build (`trove-fips` with `fips = true`, `trove-portable` with `fips = false`), each program's `features` choosing the build. |
+| `msi` | no | `[product.<id>.msi]`: who the MSI installs for, `PATH`, Windows Error Reporting ([below](#productidmsi)). |
 | `upgrade-code` | no | The MSI's UpgradeCode, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, which ties every release together. Default: derived from the vendor and the id; set it to keep an existing code before renaming either, and to the code a product's earlier MSIs carry when another tool built them ([packaging.md](packaging.md#migrating-an-existing-product)). `seaworthy check` notes an `msi` product without one. |
 | `updates.default` | no | The install-time update policy: `auto` (the default), `notify` or `off`. |
 | `sidecars.windows` | no | File-name globs (`*` only) matched in each Windows core build: each matches exactly one file, identical in every build, shipped beside the cores (the FIPS module's DLL). |
@@ -189,7 +190,7 @@ role = "gui"
 | `executable` | required | The launcher's file stem. No two programs of a product share one (case-insensitively), nor with the helper. |
 | `core` | required | The core cdylib's crate name. No two programs of a product share one: their cores install side by side as `<core>_<cpu>`. |
 | `launcher` | — | The launcher crate's path from the workspace root, as above. |
-| `role` | required | `cli`: put on `PATH` as `command` (`/usr/bin/<command>` in the Linux packages, `/usr/local/bin/<command>` in the macOS pkg; Windows' `PATH` is not set yet), installed on macOS in the product's tool directory. `gui`: the program `[product.<id>.desktop]`'s menu entry and shortcuts start, and the macOS app bundle's executable; at most one per product. |
+| `role` | required | `cli`: put on `PATH` as `command` (`/usr/bin/<command>` in the Linux packages, `/usr/local/bin/<command>` in the macOS pkg; on Windows the install directory joins `PATH` with `[product.<id>.msi] path = true`), installed on macOS in the product's tool directory. `gui`: the program `[product.<id>.desktop]`'s menu entry and shortcuts start, and the macOS app bundle's executable; at most one per product. |
 | `command` | a `cli` program's executable | The name it is put on `PATH` as (`[a-z0-9][a-z0-9._+-]*`, at most 64 bytes): a `cli` program's executable must be such a name unless it sets one, and a `gui` program is put on `PATH` only when it names one. No two programs, nor two products, share one. |
 | `features` | `[]` | Cargo features of the core crate this program's cores build with (`--features`): names of `[A-Za-z0-9_+.-]` or `<package>/<feature>`, each once. Only the cores: the launcher builds as its crate says. |
 | `default-features` | `true` | `false` builds the cores with `--no-default-features`. |
@@ -284,6 +285,21 @@ directory, sets none of them):
 | `category` | `LSApplicationCategoryType` (`public.app-category.utilities`). |
 | `localizations` | `CFBundleLocalizations`: the languages the app speaks, as language IDs (`["en", "de", "pt-BR", "zh-Hans"]`), each once. An app that carries its translations in its binary has no `.lproj` directories for macOS to find them by: without the list, the system's own text in the app (the standard menus and panels) stays English, and System Settings offers no per-app language. |
 | `entitlements` | An XML property list (`.plist` or `.entitlements`, relative to `seaworthy.toml`) of the entitlements a Developer ID signature gives the main executable (and each launcher in the tool directory): the hardened runtime's exceptions the app needs (`com.apple.security.cs.allow-jit`, …). Ad hoc signatures carry none. |
+
+`[product.<id>.msi]` (an `msi` output only):
+
+```toml
+[product.trove.msi]
+install-scope = "either"        # per user by default, everyone on request
+path = true                     # the install directory on PATH: its cli programs run by name
+wer-exclude = ["TroveGui"]      # Windows Error Reporting leaves this program alone
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `install-scope` | `"machine"` | Who the MSI installs for. `machine`: every user (`%ProgramFiles%`, `HKLM`), which takes administrator rights. `user`: the installing user alone (`%LocalAppData%\Programs`, `HKCU`, no administrator rights); a machine-wide install is refused. `either`: per user by default, or for every user when the person installing asks (`msiexec /i <msi> ALLUSERS=1 MSIINSTALLPERUSER=""`). `user` and `either` are refused for a product with a service or the update helper, which are machine-wide by nature ([packaging.md](packaging.md#install-scope)). |
+| `path` | `false` | Append the install directory to `PATH`, the system's for a machine-wide install and the user's for a per-user one, and take it out again on removal, so the product's `cli` programs run by name (every program of the product installs in that one directory, so each runs by its executable's name). Needs a `cli` program. |
+| `wer-exclude` | `[]` | Programs, by executable, that Windows Error Reporting leaves alone (no crash report, no "stopped working" dialog): a value under `ExcludedApplications`, in `HKLM` for a machine-wide install and `HKCU` for a per-user one. Windows matches the executable's file name, so the exclusion covers any program of that name. Each a program of the product, once. |
 
 `[[product.<id>.files]]`: a data file, or a directory with everything below it, installed under the
 install root (data only: see [packaging.md](packaging.md#layout)):

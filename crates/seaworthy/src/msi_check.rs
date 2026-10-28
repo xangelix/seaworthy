@@ -6,7 +6,7 @@
 //! - **Never in a seaworthy MSI** ([`FORBIDDEN`]): tables whose rows run
 //!   code or change the machine in ways the `.wxs` never asks for (a
 //!   `Binary` stream, self-registration, an embedded chainer or UI, COM and
-//!   file-type registrations, environment variables, INI files, file moves
+//!   advertised file-type registrations, INI files, file moves
 //!   and copies and removals, ODBC, legacy ACLs, service failure actions,
 //!   fonts, registry removals, dialogs). A row in any of them is refused.
 //!   A `.wxs` declaring an element this check doesn't model is refused too,
@@ -16,8 +16,11 @@
 //!   (name, account, start type, type, error control, arguments, display
 //!   name, description and the binary it runs), every service control,
 //!   registry value, descriptor (`MsiLockPermissionsEx`: the object it's
-//!   on and its SDDL) and shortcut (its folder, name, target, arguments and
-//!   working directory): no row more, none less, none other. Objects are
+//!   on and its SDDL), shortcut (its folder, name, target, arguments and
+//!   working directory) and environment change (`PATH` alone: appended,
+//!   removed on uninstall, the system's or the user's, the directory it
+//!   adds and its component's condition): no row more, none less, none
+//!   other. Objects are
 //!   compared by what they resolve to (a directory's path, a component's
 //!   key file's path), never by the ids a tool chose.
 //! - **The sequences**: every action is a standard action (never a forced
@@ -54,7 +57,6 @@ pub const FORBIDDEN: &[&str] = &[
     "AppId",
     "TypeLib",
     "MIME",
-    "Environment",
     "IniFile",
     "RemoveIniFile",
     "MoveFile",
@@ -102,6 +104,7 @@ pub const COMPARED: &[&str] = &[
     "MsiLockPermissionsEx",
     "Shortcut",
     "Upgrade",
+    "Environment",
     "Directory",
     "Component",
     "File",
@@ -162,7 +165,11 @@ pub const COLUMNS: &[(&str, &[&str])] = &[
         "Directory",
         &["Directory", "Directory_Parent", "DefaultDir"],
     ),
-    ("Component", &["Component", "Directory_", "KeyPath"]),
+    ("Environment", &["Name", "Value", "Component_"]),
+    (
+        "Component",
+        &["Component", "Directory_", "KeyPath", "Condition"],
+    ),
     ("File", &["File", "Component_", "FileName"]),
 ];
 
@@ -316,6 +323,7 @@ const MODELED: &[&str] = &[
     "Shortcut",
     "Upgrade",
     "UpgradeVersion",
+    "Environment",
 ];
 
 /// One table as `msiinfo export -s` gives it: its columns, and each row by
@@ -524,6 +532,11 @@ pub struct Expected {
     /// Detect-only searches for other products (`conflicts`): their
     /// UpgradeCode, uppercase, and the property each sets.
     detections: BTreeSet<(String, String)>,
+    /// Environment changes (`PATH`): the `Environment` row's name (its
+    /// action, removal and system prefixes) and value (a directory
+    /// reference resolved to the directory's path), and its component's
+    /// condition.
+    environment: BTreeMap<(String, String, String), usize>,
 }
 
 /// One open element while reading the `.wxs`.
@@ -542,6 +555,7 @@ struct Open {
 #[derive(Debug, Default)]
 struct OpenComponent {
     directory: String,
+    condition: String,
     key_file: Option<String>,
     services: Vec<Service>,
     controls: Vec<(String, String, String)>,
@@ -652,6 +666,7 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
     // Directory id -> path.
     let mut directories: BTreeMap<String, String> = BTreeMap::new();
     let mut pending_shortcuts = Vec::new();
+    let mut pending_environment: Vec<(String, String, String)> = Vec::new();
     let mut scheduled: Vec<(String, String, String)> = Vec::new();
     loop {
         let event = reader
@@ -735,6 +750,7 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
                 open.id = Some(attr("Id"));
                 component = Some(OpenComponent {
                     directory,
+                    condition: attr("Condition"),
                     ..OpenComponent::default()
                 });
             }
@@ -987,6 +1003,13 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
                 }
                 expected.detections.insert((code, property));
             }
+            "Environment" => {
+                let open_component = component
+                    .as_ref()
+                    .ok_or_else(|| "an <Environment> outside a component".to_owned())?;
+                let row = environment_row(&attributes)?;
+                pending_environment.push((row.0, row.1, open_component.condition.clone()));
+            }
             "InstallExecuteSequence" | "InstallUISequence" => {
                 open.sequence = Some(name.clone());
             }
@@ -1023,6 +1046,14 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
             })?;
         }
     }
+    for (name, value, condition) in pending_environment {
+        let value = resolve_directory_reference(&value, |id| directories.get(id).cloned());
+        let count = expected
+            .environment
+            .entry((name, value, condition))
+            .or_insert(0);
+        *count = count.saturating_add(1);
+    }
     for (folder, name, target, arguments, working) in pending_shortcuts {
         // `[#<file id>]`: the file's install path.
         let target = match target.strip_prefix("[#").and_then(|t| t.strip_suffix(']')) {
@@ -1037,6 +1068,52 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
             .insert((folder, name, target, arguments, working));
     }
     Ok(expected)
+}
+
+/// The `Environment` row WiX writes for an `<Environment>` (its binder's
+/// `AddEnvironmentSymbol`): the name prefixed by the action (`=` set), `-`
+/// (removed on uninstall) and `*` (the system's, not the user's), and the
+/// value after `[~];` (appended to what's there). Only what seaworthy
+/// writes is modeled: `PATH`, set, appended, removed on uninstall.
+fn environment_row(attributes: &BTreeMap<String, String>) -> Result<(String, String), String> {
+    let get = |key: &str| attributes.get(key).map(String::as_str);
+    if let Some(key) = attributes.keys().find(|k| {
+        !matches!(
+            k.as_str(),
+            "Id" | "Name" | "Value" | "Action" | "Part" | "System"
+        )
+    }) {
+        return Err(format!(
+            "an <Environment {key}=>, which this check doesn't model"
+        ));
+    }
+    if get("Name") != Some("PATH") || get("Action") != Some("set") || get("Part") != Some("last") {
+        return Err(
+            "an <Environment> other than PATH, set, its value appended (Part=\"last\"), which this check doesn't model"
+                .to_owned(),
+        );
+    }
+    let system = match get("System") {
+        Some("yes") => "*",
+        None | Some("no") => "",
+        Some(other) => return Err(format!("an <Environment System={other:?}>")),
+    };
+    let value = get("Value").unwrap_or_default();
+    if value.is_empty() {
+        return Err("an <Environment> without a value".to_owned());
+    }
+    Ok((format!("=-{system}PATH"), format!("[~];{value}")))
+}
+
+/// An `Environment` value `[~];[<directory id>]` with the directory's path
+/// for its id (as `lookup` resolves it); any other value as it is.
+fn resolve_directory_reference(value: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    value
+        .strip_prefix("[~];[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .filter(|id| !id.contains(['[', ']']))
+        .and_then(lookup)
+        .map_or_else(|| value.to_owned(), |path| format!("[~];<{path}>"))
 }
 
 /// Moves a closed component's services, controls and shortcuts into
@@ -1064,6 +1141,8 @@ struct Resolver<'a> {
     directories: BTreeMap<&'a str, (&'a str, &'a str)>,
     components: BTreeMap<&'a str, (&'a str, &'a str)>,
     files: BTreeMap<&'a str, (&'a str, &'a str)>,
+    /// Each component's condition.
+    conditions: BTreeMap<&'a str, &'a str>,
 }
 
 /// A `Directory` or `File` name's long part (`short|long`, and for a
@@ -1090,6 +1169,15 @@ impl<'a> Resolver<'a> {
             directories: pairs("Directory", "Directory", "Directory_Parent", "DefaultDir"),
             components: pairs("Component", "Component", "Directory_", "KeyPath"),
             files: pairs("File", "File", "Component_", "FileName"),
+            conditions: tables
+                .get("Component")
+                .map(|t| {
+                    t.rows
+                        .iter()
+                        .map(|r| (Table::get(r, "Component"), Table::get(r, "Condition")))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -1424,6 +1512,37 @@ pub fn findings(
         findings.push(format!(
             "the .wxs's shortcut is missing or other: {missing:?}"
         ));
+    }
+
+    // Environment changes: PATH, appending the directory the .wxs names,
+    // the system's or the user's as it says, on its component's condition.
+    let mut environment: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for row in rows("Environment") {
+        let value = resolve_directory_reference(get(row, "Value"), |id| resolver.directory(id));
+        let condition = resolver.conditions.get(get(row, "Component_")).map_or_else(
+            || format!("<component {}>", get(row, "Component_")),
+            |c| (*c).to_owned(),
+        );
+        let count = environment
+            .entry((get(row, "Name").to_owned(), value, condition))
+            .or_insert(0);
+        *count = count.saturating_add(1);
+    }
+    if environment != expected.environment {
+        for (row, count) in &environment {
+            if expected.environment.get(row) != Some(count) {
+                findings.push(format!(
+                    "environment change {row:?} (x{count}), which the .wxs doesn't declare so"
+                ));
+            }
+        }
+        for (row, count) in &expected.environment {
+            if environment.get(row) != Some(count) {
+                findings.push(format!(
+                    "the .wxs's environment change {row:?} (x{count}) is missing"
+                ));
+            }
+        }
     }
 
     // Upgrades: the product's own, and detect-only searches for the
@@ -2002,8 +2121,10 @@ mod tests {
             .iter()
             .map(|name| (*name, &["Action", "Condition"][..]));
         let mut checked = 0_usize;
+        // With PATH, so every compared table is there.
+        let expected = expected_from_wxs(&with_path(WXS)).unwrap();
         for (name, columns) in COLUMNS.iter().copied().chain(sequences) {
-            let tables = wix_tables();
+            let tables = path_tables();
             if !tables.contains_key(name) {
                 assert!(SEQUENCES.contains(&name), "wix_tables lacks {name}");
                 continue;
@@ -2322,18 +2443,31 @@ mod tests {
             "an upgrade row for {00000000",
         );
         // A table a seaworthy MSI never uses.
+        // An environment change of its own.
         check(
             &|t| {
                 t.insert(
                     "Environment".to_owned(),
                     Table {
                         name: "Environment".to_owned(),
-                        columns: vec!["Environment".to_owned()],
-                        rows: vec![BTreeMap::new()],
+                        columns: ["Environment", "Name", "Value", "Component_"]
+                            .map(str::to_owned)
+                            .to_vec(),
+                        rows: vec![
+                            [
+                                ("Environment", "e"),
+                                ("Name", "=-*PATH"),
+                                ("Value", "[~];C:\\evil"),
+                                ("Component_", "c000_AcmeTool.exe"),
+                            ]
+                            .into_iter()
+                            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                            .collect(),
+                        ],
                     },
                 );
             },
-            "row(s) in Environment",
+            "environment change (\"=-*PATH\", \"[~];C:\\\\evil\", \"\")",
         );
         check(
             &|t| {
@@ -2348,6 +2482,138 @@ mod tests {
             },
             "row(s) in ODBCDriver",
         );
+    }
+
+    /// `PATH` for either scope: two components, each conditioned on the
+    /// scope Windows Installer chose, appending the install directory to
+    /// the system's or the user's.
+    fn with_path(wxs: &str) -> String {
+        wxs.replacen(
+            "    </Feature>",
+            "      <Component Id=\"PathMachine\" Directory=\"InstallDir\" Guid=\"{7}\" Bitness=\"always64\" Condition=\"ALLUSERS = 1\">\n        <CreateFolder />\n        <Environment Id=\"PathMachine\" Name=\"PATH\" Value=\"[InstallDir]\" Action=\"set\" Part=\"last\" System=\"yes\" />\n      </Component>\n      <Component Id=\"PathUser\" Directory=\"InstallDir\" Guid=\"{8}\" Bitness=\"always64\" Condition=\"NOT ALLUSERS\">\n        <CreateFolder />\n        <Environment Id=\"PathUser\" Name=\"PATH\" Value=\"[InstallDir]\" Action=\"set\" Part=\"last\" System=\"no\" />\n      </Component>\n    </Feature>",
+            1,
+        )
+    }
+
+    /// [`wix_tables`] with the rows WiX builds for [`with_path`]'s
+    /// components (its binder's `AddEnvironmentSymbol`).
+    fn path_tables() -> BTreeMap<String, Table> {
+        let mut tables = wix_tables();
+        let component = tables.get_mut("Component").unwrap();
+        for (id, condition) in [
+            ("PathMachine", "ALLUSERS = 1"),
+            ("PathUser", "NOT ALLUSERS"),
+        ] {
+            component.rows.push(
+                [
+                    ("Component", id),
+                    ("ComponentId", "{7}"),
+                    ("Directory_", "InstallDir"),
+                    ("Attributes", "256"),
+                    ("Condition", condition),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+            );
+        }
+        let (name, table) = table(
+            "Environment",
+            &["Environment", "Name", "Value", "Component_"],
+            &[
+                &["PathMachine", "=-*PATH", "[~];[InstallDir]", "PathMachine"],
+                &["PathUser", "=-PATH", "[~];[InstallDir]", "PathUser"],
+            ],
+        );
+        tables.insert(name, table);
+        tables
+    }
+
+    #[test]
+    fn path_is_appended_as_the_wxs_says() {
+        let expected = expected_from_wxs(&with_path(WXS)).unwrap();
+        let found = findings(&expected, &path_tables(), CODE);
+        assert!(found.is_empty(), "{found:#?}");
+        let check = |change: &dyn Fn(&mut BTreeMap<String, Table>), wanted: &str| {
+            let mut tables = path_tables();
+            change(&mut tables);
+            let found = findings(&expected, &tables, CODE);
+            assert!(
+                found.iter().any(|f| f.contains(wanted)),
+                "{wanted}: {found:#?}"
+            );
+        };
+        // The user's PATH made the system's, a prepend, a value kept on
+        // uninstall, another directory, another condition, a row dropped.
+        check(
+            &|t| set(t, "Environment", 1, "Name", "=-*PATH"),
+            "environment change (\"=-*PATH\", \"[~];<ProgramFiles64Folder/Acme/Agent>\", \"NOT ALLUSERS\")",
+        );
+        check(
+            &|t| set(t, "Environment", 0, "Value", "[InstallDir];[~]"),
+            "environment change (\"=-*PATH\", \"[InstallDir];[~]\"",
+        );
+        check(
+            &|t| set(t, "Environment", 0, "Name", "=*PATH"),
+            "environment change (\"=*PATH\"",
+        );
+        check(
+            &|t| set(t, "Environment", 0, "Value", "[~];[StateDir]"),
+            "[~];<CommonAppDataFolder/Acme/Agent/state>",
+        );
+        check(
+            &|t| set(t, "Component", 5, "Condition", "1"),
+            "environment change (\"=-*PATH\", \"[~];<ProgramFiles64Folder/Acme/Agent>\", \"1\")",
+        );
+        check(
+            &|t| {
+                t.get_mut("Environment").unwrap().rows.remove(1);
+            },
+            "the .wxs's environment change (\"=-PATH\"",
+        );
+        // A column the check reads, missing.
+        check(
+            &|t| {
+                let table = t.get_mut("Environment").unwrap();
+                table.columns.retain(|c| c != "Value");
+                for row in &mut table.rows {
+                    row.remove("Value");
+                }
+            },
+            "its Environment table has no Value column",
+        );
+        // Without the .wxs's PATH, the same rows are refused.
+        let plain = expected_from_wxs(WXS).unwrap();
+        let found = findings(&plain, &path_tables(), CODE);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|f| f.starts_with("environment change"))
+                .count(),
+            2,
+            "{found:#?}"
+        );
+        // Anything but an appended, uninstalled PATH isn't modeled.
+        for (from, to) in [
+            ("Name=\"PATH\" Value", "Name=\"PATHEXT\" Value"),
+            (
+                "Part=\"last\" System=\"yes\"",
+                "Part=\"first\" System=\"yes\"",
+            ),
+            (
+                "Action=\"set\" Part=\"last\" System=\"yes\"",
+                "Action=\"create\" System=\"yes\"",
+            ),
+            ("System=\"yes\" />", "System=\"yes\" Permanent=\"yes\" />"),
+            ("System=\"yes\" />", "System=\"yes\" Separator=\",\" />"),
+        ] {
+            let wxs = with_path(WXS);
+            assert!(wxs.contains(from), "{from}");
+            assert!(
+                expected_from_wxs(&wxs.replacen(from, to, 1)).is_err(),
+                "{to}"
+            );
+        }
     }
 
     #[test]
