@@ -144,6 +144,12 @@
 //!   The database's code page is UTF-8 (`Codepage="65001"`, WiX's default
 //!   pinned): a display name outside one Windows code page still reaches
 //!   the entry whole (the Windows update lane's product has one).
+//! - **Conflicts** (`conflicts`, both ways): for each product it can't be
+//!   installed beside that ships an MSI, a detect-only `Upgrade` row on
+//!   that product's UpgradeCode (`FindRelatedProducts` sets
+//!   `CONFLICT_<ID>`, [`conflict_property`]; the other product is never
+//!   removed) and a launch condition refusing the install while it's
+//!   there, naming it. A repair or a removal is never refused.
 //! - **Upgrades:** `MajorUpgrade` removes the installed version first
 //!   (`afterInstallInitialize`), allows two builds of one version (the
 //!   sequence orders them) and refuses downgrades. The UpgradeCode is
@@ -254,6 +260,31 @@ fn identifier(prefix: &str, name: &str, n: usize) -> String {
     let mut id = format!("{prefix}{n:03}_{clean}");
     id.truncate(72);
     id
+}
+
+/// The property the MSI's search for conflicting product `id` sets:
+/// `CONFLICT_<ID>`, uppercase (a public property, which
+/// `FindRelatedProducts` sets), `-` as `_`.
+#[must_use]
+pub fn conflict_property(id: &str) -> String {
+    format!("CONFLICT_{}", id.to_ascii_uppercase().replace('-', "_"))
+}
+
+/// `text` as literal text in an MSI *Formatted* string: `[`, `]`, `{` and
+/// `}` written as Windows Installer's escapes (`[\[]`, …), so a display
+/// name never expands a property.
+fn formatted_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '[' | ']' | '{' | '}') {
+            out.push_str("[\\");
+            out.push(c);
+            out.push(']');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn policy_value(policy: UpdatePolicy) -> &'static str {
@@ -384,6 +415,38 @@ pub fn wxs(
         4,
         "<MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\" DowngradeErrorMessage=\"A newer version of [ProductName] is already installed.\" />",
     );
+    // The products this one can't be installed beside (`conflicts`, both
+    // ways) that ship an MSI: each found by its UpgradeCode, detect-only
+    // (never removed), and the install refused while one is there. A
+    // maintenance run (repair, removal) is never refused.
+    for other in config.conflicting_products(id) {
+        let Some(other_product) = config
+            .products
+            .get(&other)
+            .filter(|p| p.outputs.contains(&crate::config::Output::Msi))
+        else {
+            continue;
+        };
+        let property = conflict_property(&other);
+        line(
+            4,
+            &format!("<Upgrade Code=\"{}\">", upgrade_code(config, &other)?),
+        );
+        line(
+            6,
+            &format!(
+                "<UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"{property}\" />"
+            ),
+        );
+        line(4, "</Upgrade>");
+        let name = xml(&formatted_literal(&other_product.display_name));
+        line(
+            4,
+            &format!(
+                "<Launch Condition=\"Installed OR NOT {property}\" Message=\"[ProductName] can't be installed while {name} is installed: uninstall {name} first.\" />"
+            ),
+        );
+    }
     line(
         4,
         "<MediaTemplate EmbedCab=\"yes\" CompressionLevel=\"high\" />",

@@ -518,6 +518,12 @@ pub struct Linux {
     /// link, a menu entry).
     #[serde(default)]
     pub replaces: Vec<String>,
+    /// Virtual package names this product's Linux packages provide (deb
+    /// `Provides:`, rpm `Provides:`, pacman `provides`), unversioned: what
+    /// another package may depend on whichever of several products (one
+    /// per crypto build, say) is installed.
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 /// The default glibc floor: 2.34, RHEL 9's (and so Rocky's and Alma's),
@@ -631,6 +637,14 @@ pub struct Product {
     /// product installs its files and nothing else.
     #[serde(default)]
     pub desktop: Option<Desktop>,
+    /// What this product can't be installed beside: product ids of this
+    /// `seaworthy.toml` (both ways: [`Config::conflicting_products`]; every
+    /// platform both build for: the Linux packages' conflicts, an MSI that
+    /// refuses to install beside the other's) or plain Linux package names (the Linux
+    /// packages' conflicts alone). Unlike `linux.replaces`, never replaced
+    /// on an upgrade: a package manager never swaps one for the other.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
     /// Whether this product's cores carry the AWS-LC FIPS module
     /// ([`Config::fips`]): `defaults.fips` when unset. One `seaworthy.toml`
     /// can then ship a product per crypto build (`acme-fips`,
@@ -1984,6 +1998,51 @@ impl Config {
         product.fips.unwrap_or(self.defaults.fips)
     }
 
+    /// The products of this file product `id` can't be installed beside,
+    /// sorted: those its `conflicts` names, and those whose `conflicts`
+    /// names it (a conflict holds both ways, so each product's packages
+    /// refuse the other's whichever is installed first).
+    #[must_use]
+    pub fn conflicting_products(&self, id: &str) -> Vec<String> {
+        let mut found = BTreeSet::new();
+        if let Some(product) = self.products.get(id) {
+            for name in &product.conflicts {
+                if name != id && self.products.contains_key(name) {
+                    found.insert(name.clone());
+                }
+            }
+        }
+        for (other, product) in &self.products {
+            if other != id && product.conflicts.iter().any(|name| name == id) {
+                found.insert(other.clone());
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// The Linux packages product `id`'s packages conflict with, sorted:
+    /// each conflicting product's package (`<vendor>-<id>`) and every plain
+    /// package name its `conflicts` lists. `linux.replaces`' packages are
+    /// conflicts too, which nFPM's `replaces` adds.
+    #[must_use]
+    pub fn conflicting_packages(&self, id: &str) -> Vec<String> {
+        let mut found: BTreeSet<String> = self
+            .conflicting_products(id)
+            .iter()
+            .map(|other| crate::linux::package_name(self, other))
+            .collect();
+        if let Some(product) = self.products.get(id) {
+            found.extend(
+                product
+                    .conflicts
+                    .iter()
+                    .filter(|name| !self.products.contains_key(*name))
+                    .cloned(),
+            );
+        }
+        found.into_iter().collect()
+    }
+
     /// Whether releases carry signed manifests (`defaults.release-signatures`
     /// lists an algorithm). Without them `package` writes none and `repo`
     /// expects none; validation allows that only when no product ships an
@@ -2005,7 +2064,18 @@ impl Config {
 
     /// Two products may not install into, or register, the same thing.
     fn validate_across_products(&self) -> Result<(), DistError> {
-        let mut seen: BTreeMap<(&str, String), &str> = BTreeMap::new();
+        // Products that conflict are never installed together, so they may
+        // install the same command, menu entry, shortcuts and directory
+        // (one product per crypto build, each the tool's one install);
+        // nothing else is shared, the UpgradeCode least of all (it would
+        // make one an upgrade of the other).
+        const SHAREABLE: [&str; 4] = [
+            "windows-directory",
+            "linux.command",
+            "desktop.app-id",
+            "display-name (the MSI's shortcut)",
+        ];
+        let mut seen: BTreeMap<(&str, String), Vec<&str>> = BTreeMap::new();
         for (id, p) in &self.products {
             let mut claims = vec![(
                 "windows-directory",
@@ -2047,12 +2117,22 @@ impl Config {
                     ));
                 }
             }
+            let conflicting = self.conflicting_products(id);
             for (key, value) in claims {
-                if let Some(other) = seen.insert((key, value.clone()), id) {
+                let holders = seen.entry((key, value.clone())).or_default();
+                if let Some(other) = holders.iter().find(|other| {
+                    !(SHAREABLE.contains(&key) && conflicting.iter().any(|c| c == *other))
+                }) {
                     return Err(DistError::Config(format!(
-                        "products {other} and {id} share {key} {value:?}"
+                        "products {other} and {id} share {key} {value:?}{}",
+                        if SHAREABLE.contains(&key) {
+                            " (only products that conflict may)"
+                        } else {
+                            ""
+                        }
                     )));
                 }
+                holders.push(id);
             }
         }
         Ok(())
@@ -2645,6 +2725,7 @@ impl Config {
                 ));
             }
         }
+        self.validate_relations(id, p, linux_package)?;
         if let Some(desktop) = &p.desktop {
             if p.gui_program().is_none() {
                 return Err(at(
@@ -2803,6 +2884,102 @@ impl Config {
                 .any(|(i, p)| files.platforms[..i].contains(p));
             if files.platforms.is_empty() || twice {
                 return Err(at(&key("platforms"), "linux and/or windows, each once"));
+            }
+        }
+        Ok(())
+    }
+
+    /// `conflicts` and `linux.provides`: no product conflicts with itself
+    /// or provides itself; a plain name is a package name no product here
+    /// builds (a sibling is named by its id, so every platform follows),
+    /// and only a Linux package has one.
+    fn validate_relations(
+        &self,
+        id: &str,
+        p: &Product,
+        linux_package: bool,
+    ) -> Result<(), DistError> {
+        let at = |key: &str, why: &str| DistError::Config(format!("product.{id}.{key}: {why}"));
+        let own = crate::linux::package_name(self, id);
+        let built = |name: &str| {
+            self.products
+                .keys()
+                .map(|other| (other.clone(), crate::linux::package_name(self, other)))
+                .chain(
+                    self.repository_package()
+                        .map(|package| (REPOSITORY_ID.to_owned(), package)),
+                )
+                .find(|(_, package)| package == name)
+                .map(|(other, _)| other)
+        };
+        let mut listed = BTreeSet::new();
+        for name in &p.conflicts {
+            if !listed.insert(name.as_str()) {
+                return Err(at("conflicts", &format!("{name:?} is listed twice")));
+            }
+            if name == id || *name == own {
+                return Err(at("conflicts", "a product can't conflict with itself"));
+            }
+            if self.products.contains_key(name) {
+                continue;
+            }
+            if !is_package_name(name) || name.len() > 64 {
+                return Err(at(
+                    "conflicts",
+                    &format!(
+                        "{name:?} is neither a product of this seaworthy.toml nor a package name every format accepts ([a-z0-9][a-z0-9.-]+, at most 64 characters)"
+                    ),
+                ));
+            }
+            if let Some(other) = built(name) {
+                return Err(at(
+                    "conflicts",
+                    &format!(
+                        "{name:?} is a package this seaworthy.toml builds: name the product ({other:?}), so its MSI and pkg refuse too"
+                    ),
+                ));
+            }
+            if p.linux.replaces.contains(name) {
+                return Err(at(
+                    "conflicts",
+                    &format!("{name:?} is in linux.replaces, which conflicts with it already"),
+                ));
+            }
+            if !linux_package {
+                return Err(at(
+                    "conflicts",
+                    &format!(
+                        "{name:?} is a Linux package, and only a Linux package (deb, rpm, pacman) conflicts with one"
+                    ),
+                ));
+            }
+        }
+        if !p.linux.provides.is_empty() && !linux_package {
+            return Err(at(
+                "linux.provides",
+                "only a Linux package (deb, rpm, pacman) provides packages",
+            ));
+        }
+        let mut provided = BTreeSet::new();
+        for name in &p.linux.provides {
+            if !is_package_name(name) || name.len() > 64 {
+                return Err(at(
+                    "linux.provides",
+                    &format!(
+                        "{name:?} isn't a package name every format accepts ([a-z0-9][a-z0-9.-]+, at most 64 characters)"
+                    ),
+                ));
+            }
+            if !provided.insert(name.as_str()) {
+                return Err(at("linux.provides", &format!("{name:?} is listed twice")));
+            }
+            // Providing a package this file builds (itself included) would
+            // satisfy what depends on that one with this one.
+            if *name == own || built(name).is_some() {
+                return Err(at(
+                    "linux.provides",
+                    &format!("{name:?} is a package this seaworthy.toml builds"),
+                ));
             }
         }
         Ok(())

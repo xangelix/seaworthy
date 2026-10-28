@@ -205,9 +205,12 @@ nFPM 2.47.0 (`$NFPM`; `scripts/ci/install-nfpm.sh` installs the pinned release, 
 builds the deb, rpm and pacman packages from the Linux tree. A service's packages carry its systemd
 unit, a `sysusers.d` entry for its sandbox user, a vendor preset and, with the update helper, the
 helper's path and service units. A product with a `gui` program carries its menu entry (starting
-that program) and hicolor icons, and every product a `/usr/bin/<command>` link to each program put on
-`PATH`; a desktop product with the helper carries the helper's unit and a polkit rule letting an
-active local session start exactly that unit ([updates.md](updates.md)).
+that program) and hicolor icons, and every product a `/usr/bin/<command>` link to each program put
+on `PATH`; a desktop product with the helper carries the helper's unit and a polkit rule letting an
+active local session start exactly that unit ([updates.md](updates.md)). The products and packages
+a product conflicts with (`conflicts`) are every format's conflicts, and `linux.provides` its
+provides; neither replaces anything, so a package manager never swaps one product for another (one
+per crypto build: installing another profile means removing the installed one first).
 
 One package-script lifecycle, spelled for each format:
 
@@ -248,6 +251,9 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
   repair a standard user can start (`MsiServiceConfigFailureActions` is documented as broken);
 - writes the installed release (in deb's spelling) and, with `UPDATES=` and `SERVER=`, the update
   policy default and the machine's update server under `HKLM\SOFTWARE\<Vendor>\<Directory>`;
+- refuses a first install while a product it conflicts with (`conflicts`, either way) is installed
+  by its MSI: a detect-only search for that product's UpgradeCode (`FindRelatedProducts`, never
+  removing it) and a launch condition naming it. A repair or a removal is never refused;
 - allows two builds of one version (the sequence orders them) and refuses downgrades. Its
   UpgradeCode is `upgrade-code`, else derived from the vendor and the product id: pin it before
   renaming either, and to the code earlier MSIs carry when another tool built them
@@ -269,7 +275,9 @@ and its security-relevant tables must be exactly what the `.wxs` declares (read 
 - no row in a table a seaworthy MSI never uses (`Binary`, `SelfReg`, `MsiEmbeddedChainer`,
   `MsiEmbeddedUI`, COM and file-type registrations, `Environment`, INI files, `MoveFile`,
   `DuplicateFile`, `RemoveFile`, ODBC, `LockPermissions`, the service failure-action tables,
-  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode;
+  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode or is
+  a detect-only search the `.wxs` declares for a product it conflicts with (that product's
+  UpgradeCode and property, never removing it);
 - a `.wxs` with an element the check doesn't model (a WiX extension's, `Environment`, …) is
   refused, so the check grows with the `.wxs`, never behind it.
 
@@ -573,7 +581,7 @@ instead of upgrading it, or never reaches the machines at all. Check every row b
 | MSI ProductVersion | `MAJOR.MINOR.PATCH`; Windows Installer compares the first three fields only, allows the same version again and refuses a downgrade. | The first release is refused as a downgrade unless its version compares at or above the installed one on those three fields (a build counter the old versions kept in the third field, say). |
 | MSI component GUIDs | Derived from the UpgradeCode and each file. | Nothing to do: the major upgrade removes the old product before it installs (`afterInstallInitialize`), so the two never share a component. |
 | MSI scope | Per machine. | A per-user installation of the old product isn't found by the upgrade: remove it first. |
-| Package names | `<vendor>-<id>` in lowercase, for deb, rpm and pacman. | apt, dnf and pacman see an unrelated package: both stay installed and collide on shared paths (`/usr/bin/<command>`, units), and the update helper doesn't find the installed release. seaworthy declares no `Replaces`, `Obsoletes` or `Conflicts`: choose `vendor` and the product id so the name is the old one, or retire the old package on each machine. |
+| Package names | `<vendor>-<id>` in lowercase, for deb, rpm and pacman. | apt, dnf and pacman see an unrelated package: both stay installed and collide on shared paths (`/usr/bin/<command>`, units), and the update helper doesn't find the installed release. Choose `vendor` and the product id so the name is the old one, or name the old package in `linux.replaces` (every format then conflicts with it and replaces it), or retire it on each machine. |
 | Service names | `[product.<id>.service]`'s `name`: the SCM name, the systemd unit's basename, the LaunchDaemon's label; with `state-directory` (systemd `StateDirectory=`) and the sandbox `user`. | The old service keeps running beside the new one wherever the old package or product survives, and a new state directory or user starts the service without its state, or without the right to it. Keep all three. |
 | Install directories | `/opt/<vendor>/<id>` (lowercase), `%ProgramFiles%\<Vendor>\<windows-directory>`, `/Applications/<Display Name>.app`; state, staging and logs under `%ProgramData%\<Vendor>\<windows-directory>`. | Files move: whatever names the old paths (scripts, firewall rules, monitoring, allow-lists) stops matching, and state left under the old directory isn't carried over. |
 | macOS bundle id | `bundle-id`, which is also the pkg's identifier. | macOS keys permissions and preferences to the bundle id, and the installer upgrades an app only under the same identifier. Keep it. |
