@@ -152,7 +152,7 @@ cap them too):
 | `ci-signing-toml` | (none) | outside a release, the CI test keys' signing configuration (`seaworthy package --ci-test-signing`) |
 | `publish-toml`, `publish-dry-run` | (none), `false` | on a release, the store to publish to; a dry run checks everything and uploads nothing |
 | `toolchain` | the product's `rust-toolchain.toml` | a toolchain for the product's builds |
-| `cargo-args` | (none) | more cargo arguments for every build (`--features fips`) |
+| `cargo-args` | (none) | more cargo arguments for every build (`--features fips`); products built in several crypto builds give each program its own `features` in `seaworthy.toml` instead |
 | `rustflags`, `core-rustflags` | (none) | more rustflags for every build, and for the cores alone ([packaging.md](packaging.md#extra-build-flags); `{workspace}`, `{triple}` and `{cpu}` expand) |
 | `remap-paths` | `true` | remap the source paths rustc writes into the binaries to neutral ones: no build machine path or private repository name ([packaging.md](packaging.md#source-paths)) |
 | `build-env` | (none) | the builds' environment, JSON: `{"*": {"CC": "clang"}, "x86_64-pc-windows-msvc": {...}}` (a triple's entries win; the runner's, loader's and cargo's own variables are refused) |

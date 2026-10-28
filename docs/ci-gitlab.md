@@ -219,7 +219,7 @@ nothing earlier jobs left them but data:
 | `seaworthy-dir` | `.seaworthy` | a seaworthy checkout at this template's revision |
 | `seaworthy-fetch` | (none) | a command putting it there when it's missing (a shallow fetch of the commit, a submodule update) |
 | `manifest` | `Cargo.toml` | the workspace the products build from; `seaworthy.toml`'s crate paths (`launcher`, `helper-crate`) are relative to its directory |
-| `cargo-args` | (none) | more cargo arguments for every build (`--features fips`) |
+| `cargo-args` | (none) | more cargo arguments for every build (`--features fips`); products built in several crypto builds give each program its own `features` in `seaworthy.toml` instead |
 | `version-file` | (none) | a `Cargo.toml` whose `[package]` version (read as TOML; a workspace-inherited one resolved) names a release that has no tag and every pipeline outside a release; a release tag must name the same version. A `SEAWORTHY_VERSION` pipeline variable overrides both |
 | `build-metadata` | (none) | a command (`bash -eo pipefail`, in the checkout) printing the release's build metadata (SemVer's: dot-separated `[0-9A-Za-z-]` identifiers, at most 64 characters), for a product that composes its own version token. It runs in prepare alone, before anything is staged: the build and package jobs read what it printed from `release.env`, so product code never shares a job with the signers. Without it, the commit's short SHA |
 | `release-if` | a `vX.Y.Z[-alpha\|beta\|rc[.N]]` tag | the rules expression for a release; the server deploy needs the same |

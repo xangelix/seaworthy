@@ -119,7 +119,7 @@ wrong:
 4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build
    of every program, and the copies are byte-identical: a difference means an accidental
    per-target FIPS build.
-5. **FIPS** (`defaults.fips`). Every Linux core passes the static-link checks of
+5. **FIPS** (the product's `fips`, else `defaults.fips`). Every Linux core passes the static-link checks of
    `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no second
    libcrypto, no other module version. On Windows and macOS every core loads the pinned module's
    library, and the sidecars ship it.

@@ -135,7 +135,8 @@ pub struct Defaults {
     /// binary checks (Linux); on Windows and macOS, where AWS-LC builds the
     /// module as a dynamic library, every core loads the pinned module's
     /// crypto library and the sidecars ship every module library the cores
-    /// load (on macOS the module's own symbols pass the Linux checks).
+    /// load (on macOS the module's own symbols pass the Linux checks). A
+    /// product's own `fips` overrides it ([`Config::fips`]).
     #[serde(default)]
     pub fips: bool,
     /// The package maintainer (deb `Maintainer:`, rpm `Packager:`).
@@ -563,6 +564,12 @@ pub struct Product {
     /// product installs its files and nothing else.
     #[serde(default)]
     pub desktop: Option<Desktop>,
+    /// Whether this product's cores carry the AWS-LC FIPS module
+    /// ([`Config::fips`]): `defaults.fips` when unset. One `seaworthy.toml`
+    /// can then ship a product per crypto build (`acme-fips`,
+    /// `acme-portable`), each checked as what it is.
+    #[serde(default)]
+    pub fips: Option<bool>,
     /// `[[product.<id>.files]]`: data files installed under the install
     /// root beside the launcher (fonts, images, documents, licenses).
     #[serde(default)]
@@ -1866,6 +1873,15 @@ impl Config {
         self.validate_across_products()
     }
 
+    /// Whether `product`'s cores carry the AWS-LC FIPS module: its own
+    /// `fips`, else `defaults.fips`. `verify` applies the FIPS binary
+    /// checks to the cores (and on Windows and macOS to the sidecars) of
+    /// exactly these products.
+    #[must_use]
+    pub fn fips(&self, product: &Product) -> bool {
+        product.fips.unwrap_or(self.defaults.fips)
+    }
+
     /// Whether releases carry signed manifests (`defaults.release-signatures`
     /// lists an algorithm). Without them `package` writes none and `repo`
     /// expects none; validation allows that only when no product ships an
@@ -2204,7 +2220,7 @@ impl Config {
         if !p.sidecars.macos.is_empty() && !macos_output {
             return Err(at("sidecars.macos", "set, but no output is for macOS"));
         }
-        if self.defaults.fips && macos_output && p.sidecars.macos.is_empty() {
+        if self.fips(p) && macos_output && p.sidecars.macos.is_empty() {
             return Err(at(
                 "sidecars.macos",
                 "with fips, a macOS build ships the FIPS module's dylib beside the cores (AWS-LC builds the module only as a dynamic library off Linux): sidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]",

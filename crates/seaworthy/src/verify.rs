@@ -23,7 +23,7 @@
 //!    build, no file matches two globs, names are plain file names, and the
 //!    copies are byte-identical. A difference means an accidental
 //!    per-target FIPS build.
-//! 5. **FIPS** (`defaults.fips`): every Linux core passes
+//! 5. **FIPS** (the product's `fips`, else `defaults.fips`): every Linux core passes
 //!    `scripts/verify-fips-binary.sh`'s checks over its symbol table, read
 //!    as `nm` reads it ([`fips_symbol_findings`]). On Windows every core
 //!    imports the pinned module's crypto DLL, and the sidecars ship every
@@ -694,14 +694,14 @@ impl Run {
                 }
                 Err(e) => self.finding(core, format!("no valid requirement record: {e}")),
             }
-            if config.defaults.fips && os == Os::Linux {
+            if config.fips(product) && os == Os::Linux {
                 for finding in
                     fips_symbol_findings(&bytes, seaworthy_crypto::module::FIPS_SYMBOL_PREFIX)
                 {
                     self.finding(core, finding);
                 }
             }
-            if config.defaults.fips && windows {
+            if config.fips(product) && windows {
                 let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
                 let crypto = format!("{prefix}crypto.dll");
                 let imports = pe_imports(&bytes).unwrap_or_default();
@@ -713,7 +713,7 @@ impl Run {
                 }
                 module_imports.extend(imports.into_iter().filter(|name| name.starts_with(prefix)));
             }
-            if config.defaults.fips && os == Os::Macos {
+            if config.fips(product) && os == Os::Macos {
                 let module = format!("lib{}", seaworthy_crypto::module::FIPS_SYMBOL_PREFIX);
                 let crypto = format!("{module}crypto.dylib");
                 let loads: Vec<String> = macho_facts(&bytes)
@@ -822,7 +822,7 @@ impl Run {
                     None => {
                         if self.binary(&path, &bytes, os, BinaryKind::Library, config, product)
                             && os == Os::Macos
-                            && config.defaults.fips
+                            && config.fips(product)
                             && name.starts_with(&format!(
                                 "lib{}",
                                 seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
@@ -851,7 +851,7 @@ impl Run {
                 }
             }
         }
-        if config.defaults.fips {
+        if config.fips(product) {
             let names: Vec<String> = sidecars
                 .iter()
                 .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
