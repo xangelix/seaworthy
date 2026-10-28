@@ -1,0 +1,56 @@
+# Deletes the calling run's artifacts: a caller's last job, after every job
+# that downloads them. A public repository's artifacts aren't private: any
+# signed-in GitHub user can download a run's artifacts for as long as they're
+# kept (retention-days), and proxies such as nightly.link serve them with no
+# login. dist.yml's are the product's builds, the cores and every package,
+# signed and notarized on a release: there before a deploy is approved, and
+# still there when a release is abandoned (docs/ci-github.md).
+#
+#   delete-artifacts:
+#     needs: [deploy]                  # every job that downloads them
+#     uses: xangelix/seaworthy/.github/workflows/delete-artifacts.yml@<full commit SHA>
+#     permissions:
+#       actions: write # to delete this run's artifacts
+#
+# A pull request's run from a fork, or Dependabot's, has a read-only token
+# and can't delete: skip the job there. The job runs gh, which GitHub-hosted
+# runners have.
+name: delete artifacts
+
+on:
+  workflow_call:
+    inputs:
+      pattern:
+        description: The names of the artifacts to delete, a bash pattern (seaworthy-build-*); every artifact of the run by default.
+        type: string
+        default: "*"
+      linux-runner:
+        description: The runner label of the job.
+        type: string
+        default: ubuntu-24.04
+
+jobs:
+  delete:
+    name: Delete the run's artifacts
+    runs-on: ${{ inputs.linux-runner }}
+    timeout-minutes: 10
+    permissions:
+      actions: write # to delete this run's artifacts
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - name: Check out seaworthy at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .seaworthy
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - name: Delete the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATTERN: ${{ inputs.pattern }}
+        run: bash .seaworthy/scripts/ci/github.sh delete-artifacts "$PATTERN"

@@ -63,6 +63,14 @@ spec:
     dev-sign-secrets:
       description: The command prefix the adopt job's seaworthy call runs under on a dev build (seaworthy.yml's dev-sign-secrets).
       default: ""
+    artifact-access:
+      description: Who can download the jobs' artifacts through GitLab's UI or API (artifacts:access) - all (anyone, without signing in on a public project), developer, maintainer (GitLab 18.4 or later) or none. The jobs after them get them either way. A release's are its signed packages; pass the same value to every seaworthy template.
+      options:
+        - all
+        - developer
+        - maintainer
+        - none
+      default: all
 ---
 seaworthy-build-windows:
   stage: $[[ inputs.build-stage ]]
@@ -90,6 +98,7 @@ seaworthy-build-windows:
     paths:
       - seaworthy/artifacts/x86_64-pc-windows-msvc/
     expire_in: 1 week
+    access: $[[ inputs.artifact-access ]]
 
 # WiX on the Windows runner: every product's .wxs (the package job's) built
 # into an MSI and validated (scripts/ci/seaworthy-msi.ps1: WiX v5.0.2 from
@@ -110,6 +119,7 @@ seaworthy-msi:
     paths:
       - seaworthy/msi/
     expire_in: 1 week
+    access: $[[ inputs.artifact-access ]]
 
 # On Linux, with the package job's tools image: each MSI checked against the
 # signed tree it was built from (byte for byte, at the release's version and
@@ -162,3 +172,4 @@ seaworthy-msi-adopt:
     paths:
       - seaworthy/adopted/
     expire_in: 4 weeks
+    access: $[[ inputs.artifact-access ]]

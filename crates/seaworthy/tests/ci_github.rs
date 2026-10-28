@@ -78,6 +78,35 @@ fn steps(workflow: &Yaml) -> Vec<(String, Yaml)> {
     out
 }
 
+/// Every action pinned by commit with its version beside it (but the
+/// workflow's own, from `./.seaworthy/`), no checkout keeping credentials,
+/// no expression in a script.
+fn steps_follow_the_baseline(text: &str, workflow: &Yaml) {
+    for (job, step) in steps(workflow) {
+        if let Some(uses) = string(&step["uses"]) {
+            if !uses.starts_with("./.seaworthy/") {
+                assert!(pinned(uses), "{job}: {uses} isn't pinned by commit");
+                // The pinned version in a comment beside it.
+                let line = text.lines().find(|l| l.contains(uses)).unwrap();
+                assert!(line.contains(" # v"), "{job}: {line}");
+            }
+            if uses.starts_with("actions/checkout@") {
+                assert_eq!(
+                    step["with"]["persist-credentials"].as_bool(),
+                    Some(false),
+                    "{job}: a checkout keeps no credentials"
+                );
+            }
+        }
+        if let Some(run) = string(&step["run"]) {
+            assert!(
+                !run.contains("${{"),
+                "{job}: an expression in a script (pass it through env):\n{run}"
+            );
+        }
+    }
+}
+
 #[test]
 fn the_reusable_workflow_follows_the_actions_baseline() {
     let (text, workflow) = yaml(".github/workflows/dist.yml");
@@ -169,29 +198,7 @@ fn the_reusable_workflow_follows_the_actions_baseline() {
         string(&selftest["jobs"]["dist"]["permissions"]["contents"]),
         Some("read")
     );
-    for (job, step) in steps(&workflow) {
-        if let Some(uses) = string(&step["uses"]) {
-            if !uses.starts_with("./.seaworthy/") {
-                assert!(pinned(uses), "{job}: {uses} isn't pinned by commit");
-                // The pinned version in a comment beside it.
-                let line = text.lines().find(|l| l.contains(uses)).unwrap();
-                assert!(line.contains(" # v"), "{job}: {line}");
-            }
-            if uses.starts_with("actions/checkout@") {
-                assert_eq!(
-                    step["with"]["persist-credentials"].as_bool(),
-                    Some(false),
-                    "{job}: a checkout keeps no credentials"
-                );
-            }
-        }
-        if let Some(run) = string(&step["run"]) {
-            assert!(
-                !run.contains("${{"),
-                "{job}: an expression in a script (pass it through env):\n{run}"
-            );
-        }
-    }
+    steps_follow_the_baseline(&text, &workflow);
     // The seaworthy checkout is the workflow's own commit.
     assert!(text.contains("repository: ${{ job.workflow_repository }}"));
     assert!(text.contains("ref: ${{ job.workflow_sha }}"));
@@ -207,6 +214,66 @@ fn the_reusable_workflow_follows_the_actions_baseline() {
     assert!(
         text.contains("cache: ${{ (inputs.release || inputs.dev-sign) && 'false' || 'true' }}")
     );
+}
+
+/// delete-artifacts.yml: a reusable workflow alone, its one job capped at
+/// `actions: write`, held to dist.yml's baseline (harden-runner first,
+/// every action pinned, no credentials kept, no expression in a script) and
+/// running `github.sh delete-artifacts` from seaworthy's checkout at the
+/// workflow's own commit. The self-test calls it as a caller does, after
+/// the job that downloads the packages.
+#[test]
+fn the_artifact_deletion_workflow_follows_the_actions_baseline() {
+    let (text, workflow) = yaml(".github/workflows/delete-artifacts.yml");
+    let on = key(&workflow, "on").as_hash().unwrap();
+    assert_eq!(on.len(), 1);
+    let inputs = workflow["on"]["workflow_call"]["inputs"].as_hash().unwrap();
+    let defaults: Vec<(&str, &str)> = inputs
+        .iter()
+        .map(|(name, input)| {
+            let name = name.as_str().unwrap();
+            assert!(string(&input["description"]).is_some(), "{name}: described");
+            (name, string(&input["default"]).unwrap())
+        })
+        .collect();
+    assert_eq!(
+        defaults,
+        [("pattern", "*"), ("linux-runner", "ubuntu-24.04")]
+    );
+    assert!(key(&workflow, "permissions").is_badvalue());
+    assert_eq!(key(&workflow, "jobs").as_hash().unwrap().len(), 1);
+    let job = &workflow["jobs"]["delete"];
+    assert!(job["timeout-minutes"].as_i64().is_some());
+    assert_eq!(job["permissions"].as_hash().unwrap().len(), 1);
+    assert_eq!(string(&job["permissions"]["actions"]), Some("write"));
+    assert_eq!(string(&job["runs-on"]), Some("${{ inputs.linux-runner }}"));
+    let job_steps = job["steps"].as_vec().unwrap();
+    assert!(
+        string(&job_steps[0]["uses"])
+            .is_some_and(|u| u.starts_with("step-security/harden-runner@")),
+        "harden-runner first"
+    );
+    assert_eq!(
+        string(&job_steps[0]["with"]["egress-policy"]),
+        Some("audit")
+    );
+    steps_follow_the_baseline(&text, &workflow);
+    assert!(text.contains("repository: ${{ job.workflow_repository }}"));
+    assert!(text.contains("ref: ${{ job.workflow_sha }}"));
+    let runs: Vec<&str> = job_steps.iter().filter_map(|s| string(&s["run"])).collect();
+    assert_eq!(
+        runs,
+        ["bash .seaworthy/scripts/ci/github.sh delete-artifacts \"$PATTERN\""]
+    );
+    let (_, selftest) = yaml(".github/workflows/dist-selftest.yml");
+    let call = &selftest["jobs"]["delete-builds"];
+    assert_eq!(
+        string(&call["uses"]),
+        Some("./.github/workflows/delete-artifacts.yml")
+    );
+    assert_eq!(call["permissions"].as_hash().unwrap().len(), 1);
+    assert_eq!(string(&call["permissions"]["actions"]), Some("write"));
+    assert_eq!(string(&call["needs"]), Some("check"));
 }
 
 #[test]
@@ -513,6 +580,114 @@ fn the_oidc_grant_is_azure_s_alone() {
     );
     assert!(run(&[&azure, &[("SEAWORTHY_DEV_SIGN", "1")]]).status.code() == Some(1));
     assert!(run(&[&azure]).status.success());
+}
+
+/// delete-artifacts lists the run's artifacts once, then deletes the ones
+/// whose names match the pattern (every one by default) by id, and fails
+/// when a call fails; an empty pattern, and a run or repository that isn't
+/// one, are refused before any call. A stub gh records its calls.
+#[test]
+fn delete_artifacts_deletes_the_run_s_matching_artifacts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = dir.path().join("calls");
+    let listing = dir.path().join("listing");
+    std::fs::write(
+        &listing,
+        "11\tseaworthy-build-linux-base\n12\tseaworthy-packages\n13\tseaworthy-build-windows-znver4\n",
+    )
+    .unwrap();
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        format!(
+            r#"#!/usr/bin/env bash
+echo "$*" >> {calls}
+if [ "$2" = --paginate ]; then cat {listing}; exit "${{STUB_LIST_EXIT:-0}}"; fi
+case "$*" in *"/artifacts/${{STUB_DELETE_FAIL:-none}}") exit 1 ;; esac
+"#,
+            calls = calls.display(),
+            listing = listing.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let run = |args: &[&str], extra: &[(&str, &str)]| {
+        let _ = std::fs::remove_file(&calls);
+        let mut env = vec![
+            ("PATH", path.as_str()),
+            ("GITHUB_REPOSITORY", "acme/viewer"),
+            ("GITHUB_RUN_ID", "42"),
+        ];
+        env.extend_from_slice(extra);
+        let out = glue(&[&["delete-artifacts"][..], args].concat(), &env);
+        (out, std::fs::read_to_string(&calls).unwrap_or_default())
+    };
+
+    // A pattern: the matching artifacts alone, by id, after one listing.
+    let (out, made) = run(&["seaworthy-build-*"], &[]);
+    assert!(out.status.success(), "{}", said(&out));
+    let made: Vec<&str> = made.lines().collect();
+    assert_eq!(made.len(), 3, "{made:?}");
+    assert!(
+        made[0].starts_with("api --paginate repos/acme/viewer/actions/runs/42/artifacts --jq "),
+        "{}",
+        made[0]
+    );
+    assert!(made[0].contains("select(.expired | not)"), "{}", made[0]);
+    assert_eq!(
+        made[1..],
+        [
+            "api --silent -X DELETE repos/acme/viewer/actions/artifacts/11",
+            "api --silent -X DELETE repos/acme/viewer/actions/artifacts/13",
+        ]
+    );
+    assert!(
+        said(&out).contains("deleted 2 artifact(s) of run 42; kept 1"),
+        "{}",
+        said(&out)
+    );
+
+    // No pattern: every artifact.
+    let (out, made) = run(&[], &[]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(made.lines().filter(|l| l.contains(" DELETE ")).count(), 3);
+
+    // A failed listing or deletion fails the step.
+    let (out, _) = run(&[], &[("STUB_LIST_EXIT", "1")]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("couldn't list run 42's artifacts"),
+        "{}",
+        said(&out)
+    );
+    let (out, _) = run(&[], &[("STUB_DELETE_FAIL", "12")]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("couldn't delete seaworthy-packages"),
+        "{}",
+        said(&out)
+    );
+
+    // Refused before any call.
+    for (args, extra, why) in [
+        (vec![""], vec![], "an empty pattern"),
+        (vec![], vec![("GITHUB_RUN_ID", "42; rm")], "isn't a run id"),
+        (
+            vec![],
+            vec![("GITHUB_REPOSITORY", "acme")],
+            "isn't owner/name",
+        ),
+    ] {
+        let (out, made) = run(&args, &extra);
+        assert!(!out.status.success(), "{why}");
+        assert!(said(&out).contains(why), "{}", said(&out));
+        assert!(made.is_empty(), "{why}: {made}");
+    }
 }
 
 const TWO_PLATFORMS: &str = r#"

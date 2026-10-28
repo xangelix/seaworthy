@@ -7,7 +7,8 @@
 # sign through Azure does (dist.yml refuses id-token: write without the
 # azure-* inputs). On pull requests too (unsigned, read-only, no secrets):
 # a change reaches main only after every pipeline a push to main runs has
-# passed on it, Dependabot's updates included.
+# passed on it, Dependabot's updates included. Then delete-artifacts.yml, as
+# a caller runs it: the per-CPU builds deleted, the packages artifact kept.
 name: dist (self-test)
 
 on:
@@ -62,3 +63,42 @@ jobs:
           for kind in deb zip msi dmg tar.zst; do
             find . -name "*.$kind" | grep -q . || { echo "::error::no .$kind in the packages artifact"; exit 1; }
           done
+
+  # After the last job that downloads them, as a caller deletes its
+  # artifacts. A pull request's run from a fork, or Dependabot's, has a
+  # read-only token and can't delete: skipped there.
+  delete-builds:
+    needs: check
+    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')
+    uses: ./.github/workflows/delete-artifacts.yml
+    permissions:
+      actions: write # to delete this run's artifacts
+    with:
+      pattern: selftest-build-*
+
+  deleted:
+    name: The build artifacts deleted
+    needs: [dist, delete-builds]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read # to list this run's artifacts
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - name: No build artifact left, the packages artifact kept
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGES: ${{ needs.dist.outputs.packages-artifact }}
+        run: |
+          set -euo pipefail
+          names="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.expired | not) | .name')"
+          printf '%s\n' "$names"
+          if grep -q '^selftest-build-' <<< "$names"; then
+            echo "::error::a build artifact is left"
+            exit 1
+          fi
+          grep -qxF "$PACKAGES" <<< "$names" || { echo "::error::the packages artifact ($PACKAGES) is gone"; exit 1; }

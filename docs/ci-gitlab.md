@@ -228,6 +228,7 @@ nothing earlier jobs left them but data:
 | `server-deploy-jobs` | (none) | the server deploy jobs, comma-separated, for the lint |
 | `client-deploy-jobs` | (none) | other client jobs every server deploy waits for (a web console's deploy) |
 | `package-secrets`, `repo-secrets`, `publish-secrets` | (none) | on a release, a command prefix (space-separated words, no quoting or globbing) the step's `seaworthy` call runs under, giving it its credentials (`publish-secrets`: `SEAWORTHY_S3_ACCESS_KEY_ID` and `SEAWORTHY_S3_SECRET_ACCESS_KEY`) |
+| `artifact-access` | `all` | who can download the jobs' artifacts through GitLab's UI and API (`artifacts:access`): `all` (on a public project, anyone, without signing in), `developer`, `maintainer` (GitLab 18.4 or later) or `none`; the jobs after them get them either way. A release's artifacts are its signed packages, there before any deploy and kept after an abandoned release: a public project that doesn't hand them out sets `developer` or `maintainer`, and passes the same value to every template. Job logs follow the project's own visibility setting for pipelines |
 
 `seaworthy-windows.yml`:
 
@@ -238,7 +239,7 @@ nothing earlier jobs left them but data:
 | `build-stage`, `package-stage` | `build`, `build` | as `seaworthy.yml`'s |
 | `package-secrets`, `dev-sign-secrets` | (none) | the adopt job's prefixes: pass the same values as to `seaworthy.yml` (the MSI is signed with the package job's signers) |
 | `manifest`, `cargo-args` | as `seaworthy.yml`'s | the Windows build's |
-| `release-if`, `dev-sign-if` | as `seaworthy.yml`'s | pass the same values |
+| `release-if`, `dev-sign-if`, `artifact-access` | as `seaworthy.yml`'s | pass the same values |
 
 `seaworthy-macos.yml`:
 
@@ -248,6 +249,7 @@ nothing earlier jobs left them but data:
 | `macos-tags` | **required** | the Mac runner's tags |
 | `macos-resource-group` | `seaworthy-macos` | the job's resource group: a Mac host runs few VMs at once, so share it with any other Mac job of the project |
 | `seaworthy-dir`, `seaworthy-fetch`, `manifest`, `cargo-args`, `release-if`, `build-stage` | as `seaworthy.yml`'s | the Mac job builds `seaworthy` from the checkout too, so it fetches it the same way; on a release it names the release's version (its packages still stay out of the release) |
+| `artifact-access` | as `seaworthy.yml`'s | pass the same value |
 
 **A compiler cache** is the product's own: set `RUSTC_WRAPPER` (and whatever credentials the cache
 needs) as CI/CD variables for the build jobs. seaworthy's own build ignores it, whatever its scope

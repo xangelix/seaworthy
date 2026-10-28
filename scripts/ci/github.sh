@@ -32,6 +32,10 @@
 #                                        every listed artifact, checked
 #                                        against its listing's SHA-256, into
 #                                        <out>/<label>/, with SHA256SUMS
+#   github.sh delete-artifacts [pattern] this run's artifacts whose names
+#                                        match the bash pattern (every one
+#                                        by default), deleted through gh
+#                                        (delete-artifacts.yml)
 #
 # Environment (the workflow sets it; the secrets only on a release or a
 # dev build, and only in the jobs that sign):
@@ -64,6 +68,9 @@
 #                                       signing-toml: a release or a dev build
 #                                       with no signer is refused unless
 #                                       SEAWORTHY_ALLOW_UNSIGNED=1
+#   GITHUB_REPOSITORY, GITHUB_RUN_ID    delete-artifacts: the run (the
+#   GH_TOKEN                              runner sets the first two), and a
+#                                         token with actions: write
 #
 # Every value that reaches a file is checked first; secrets go to files
 # only under a private directory (umask 077), which `signed` shreds when its
@@ -567,6 +574,37 @@ assemble() { # <out> <label>=<dir>...
     say "assembled $files artifact(s) into $out, checked against their listings (SHA256SUMS)"
 }
 
+# This run's artifacts whose names match <pattern> (a bash pattern), deleted
+# through the GitHub API. The whole listing is read before anything is
+# deleted (deleting while paging would skip some); an expired artifact
+# (an earlier attempt's) is already gone.
+delete_artifacts() { # [pattern]
+    local pattern="${1-*}"
+    [ -n "$pattern" ] || fail "delete-artifacts: an empty pattern names no artifact"
+    local repo="${GITHUB_REPOSITORY:-}" run="${GITHUB_RUN_ID:-}"
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "delete-artifacts: GITHUB_REPOSITORY $(quoted "$repo") isn't owner/name"
+    [[ "$run" =~ ^[0-9]+$ ]] || fail "delete-artifacts: GITHUB_RUN_ID $(quoted "$run") isn't a run id"
+    local listing
+    listing="$(gh api --paginate "repos/$repo/actions/runs/$run/artifacts" \
+        --jq '.artifacts[] | select(.expired | not) | "\(.id)\t\(.name)"')" ||
+        fail "delete-artifacts: couldn't list run $run's artifacts"
+    local id name deleted=0 kept=0
+    while IFS=$'\t' read -r id name; do
+        [ -n "$id" ] || continue
+        [[ "$id" =~ ^[0-9]+$ ]] || fail "delete-artifacts: artifact id $(quoted "$id")"
+        # shellcheck disable=SC2053 # the pattern matches as a pattern
+        if [[ "$name" == $pattern ]]; then
+            gh api --silent -X DELETE "repos/$repo/actions/artifacts/$id" ||
+                fail "delete-artifacts: couldn't delete $(quoted "$name")"
+            say "deleted $name"
+            deleted=$((deleted + 1))
+        else
+            kept=$((kept + 1))
+        fi
+    done <<< "$listing"
+    say "deleted $deleted artifact(s) of run $run; kept $kept"
+}
+
 step="${1:-}"
 shift || true
 case "$step" in
@@ -584,5 +622,6 @@ case "$step" in
     signed) signed "${1:?usage: github.sh signed <step>}" ;;
     apple-cleanup) apple_cleanup ;;
     assemble) assemble "$@" ;;
-    *) echo "usage: $0 matrix|build-env|oidc-grant|signing-toml|signed|apple-cleanup|assemble" >&2; exit 2 ;;
+    delete-artifacts) delete_artifacts "$@" ;;
+    *) echo "usage: $0 matrix|build-env|oidc-grant|signing-toml|signed|apple-cleanup|assemble|delete-artifacts" >&2; exit 2 ;;
 esac
