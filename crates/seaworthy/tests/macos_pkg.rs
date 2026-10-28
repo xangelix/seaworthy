@@ -14,7 +14,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use common::{M1, MACOS_CPUS, Macho, cpulist, record, write};
 use seaworthy::config::Config;
@@ -454,14 +454,12 @@ fn the_pkgs_names_say_where_everything_installs() {
     );
 }
 
-fn stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+#[cfg(unix)]
+fn stub(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
 

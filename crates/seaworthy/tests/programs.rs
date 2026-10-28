@@ -622,13 +622,8 @@ fn verify_checks_every_programs_launcher_and_cores() {
         err.contains("TroveGui: its .cpulist names core \"trove_cli_core\", seaworthy.toml says \"trove_gui_core\""),
         "{err}"
     );
-    assert!(
-        err.contains(&format!(
-            "{}/libtrove_gui_core.so",
-            gui.build_dir("x86-64-v2")
-        )),
-        "{err}"
-    );
+    let missing = std::path::Path::new(&gui.build_dir("x86-64-v2")).join("libtrove_gui_core.so");
+    assert!(err.contains(&missing.display().to_string()), "{err}");
 }
 
 #[test]
