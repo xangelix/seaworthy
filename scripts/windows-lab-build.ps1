@@ -36,7 +36,9 @@
                 lane's agent 1.0.0-rc.1 (sequence 1) and 1.0.0 (2), signed with release
                 manifests; agent 1.0.1 (3), whose .wxs gets a custom action failing after
                 InstallServices (the rolled-back upgrade) and is built by WiX directly; the
-                desktop viewer 1.0.0 (1) and 1.0.1 (2), unsigned. Every MSI passes Windows
+                desktop viewer 1.0.0 (1) and 1.0.1 (2) and the command-line viewer-lite 1.0.0
+                (1), unsigned (both MSIs for either scope; the viewer with its licence page,
+                the lite one putting its directory on PATH). Every MSI passes Windows
                 Installer's validation (`wix msi validate`: an ICE error fails the build).
       upgrade   the upgrade-from-previous lane's candidate (scripts/windows-upgrade.ps1):
                 the plan built again with seaworthy-formats' CI test-key switch
@@ -738,6 +740,9 @@ if (-not $Fips) {
         Test-Msi (Get-Single $packages '*.msi')
         Add-ToBundle $packages $release[0]
     }
+    $lite = Invoke-Package -Config $DesktopConfig -Artifacts $DesktopArtifacts -Name 'viewer-lite-1' -Product 'viewer-lite' -Version '1.0.0' -Sequence 1
+    Test-Msi (Get-Single $lite '*.msi')
+    Add-ToBundle $lite 'viewer-lite-1'
     # Programs and Features' icon, as the layout staged it (the install lane compares
     # Windows Installer's cached copy with it).
     $icon = Join-Path (Join-Path (Join-Path $Out 'releases') 'viewer-1') "viewer\$Triple\tree\Acme\Viewer.ico"
