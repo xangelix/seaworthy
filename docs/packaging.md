@@ -304,7 +304,9 @@ recovery actions run as LocalSystem) and the update helper (a LocalSystem servic
 
 Windows Installer upgrades a product in the context it was installed in: install a new release of an
 `either` product the way the installed one was installed (`ALLUSERS=1 MSIINSTALLPERUSER=""` again for
-a machine-wide one), or the new one installs beside it.
+a machine-wide one), or the new one installs beside it. A conflict's detect-only search
+(`conflicts`) is Windows Installer's same related-product search, so don't rely on it to see a
+conflicting product installed in the other context.
 
 #### Setup dialogs
 

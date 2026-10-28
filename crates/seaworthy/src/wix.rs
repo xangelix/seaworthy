@@ -147,7 +147,7 @@
 //!   user's hive. Non-advertised, they never start a repair for another
 //!   user; another administrator's removal leaves that one value behind.
 //! - **Setup dialogs** (`[product.<id>.msi] license`, or `install-scope
-//!   = "either"`): seaworthy's own text-only dialog set ([`setup_ui`]): the
+//!   = "either"`): seaworthy's own text-only dialog set (`setup_ui`): the
 //!   licence to accept (`license`, staged as `tree/<Vendor>/<Directory>.rtf`
 //!   for WiX to read) and the scope to choose, progress, a cancel
 //!   confirmation, and Windows Installer's standard error, files-in-use and

@@ -981,7 +981,7 @@ fn xml_text(text: &str) -> String {
 /// Apple allows; `CFBundleVersion` the release sequence, which only grows),
 /// `defaults.macos-minimum` as `LSMinimumSystemVersion`, the app's
 /// languages as `CFBundleLocalizations`, and its file types
-/// ([`document_types`]).
+/// (`document_types`).
 ///
 /// # Errors
 /// [`DistError::Config`] when the product has no `[macos]` section.

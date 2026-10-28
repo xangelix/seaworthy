@@ -31,6 +31,14 @@ a throwaway CA, and the client the fixture helper's version source uses.
 | Upgrade from previous, macOS | The same on macOS: the previous pkg installed, the CA in the System keychain, the helper's daemon updating it to this run's pkg | `scripts/upgrade-candidate.sh macos`, `scripts/upgrade-previous.sh`, `scripts/upgrade-macos.sh` |
 | Upgrade from previous, Windows (`lab-windows.yml`) | The same on Windows: the previous MSI installed, the CA in `LocalMachine\Root`, the helper's service updating it to this run's MSI through Windows Installer ([testing-windows.md](testing-windows.md#the-upgrade-lane)) | `scripts/windows-lab-build.ps1` (its upgrade step), `scripts/windows-upgrade-previous.ps1`, `scripts/windows-upgrade.ps1` |
 
+Beside the lab, `.github/workflows/dist-selftest.yml` runs the reusable workflow a product calls
+(`dist.yml`) on the e2e workspace's desktop fixture, unsigned: every build, the Linux packages, the
+Windows zip and MSIs (built and validated by WiX, adopted by `seaworthy adopt-msi`) and the macOS
+disk image. Then it observes the viewer's document type where it lands: its deb installed by apt on
+Ubuntu (the MIME and menu databases updated by the distribution's own triggers, a sample read back by
+GIO by name and by magic, everything gone after removal), and its disk image's app bundle on macOS
+(the document type, the exported UTI and its icon, under the bundle's seal).
+
 ### How the lab is built
 
 - **Builds as a product's pipeline builds.** The fixture goes through `seaworthy build-plan` and
