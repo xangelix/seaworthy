@@ -170,10 +170,11 @@ macOS tree stages the bundle as `tree/<Display Name>.app` and the tool directory
 path under `tree/`.
 
 Linux binaries are stripped (`strip --strip-all`, `$STRIP` overrides the tool) and each stripped
-core's record is read back, so stripping can never cost a core its `.cpureq`. `layout.json` beside
-each tree lists every file with its install path, role, mode and SHA-256. A staging directory is
-replaced only if it carries `layout`'s marker file, and a file that changed since `verify` read it
-is refused.
+core's record is read back, so stripping can never cost a core its `.cpureq`; each stripped copy is
+then compared with the verified one ([What changes after the build](#what-changes-after-the-build)).
+`layout.json` beside each tree lists every file with its install path, role, mode and SHA-256, and
+the checked steps that changed it after the build. A staging directory is replaced only if it
+carries `layout`'s marker file, and a file that changed since `verify` read it is refused.
 
 **Data files are data.** `[[product.<id>.files]]` are read once from `seaworthy.toml`'s directory,
 without following links, and `layout` refuses links and special files, anything resolving outside
@@ -182,6 +183,26 @@ Java class files), on Windows anything Windows would run or act on (scripts, sho
 `.reg`, `desktop.ini`, a manifest beside a binary), hidden files below a directory source unless the
 entry sets `hidden = true`, and version-control directories always. Code ships as the launcher, a
 core, a sidecar or the helper: the files `verify` checks.
+
+### What changes after the build
+
+Three steps change a binary after `verify` read it, each in one known way, and each result is
+compared with its input: anything else that changed in what the loader maps fails the step, naming
+the file and the section or header field. A product whose cores carry a FIPS module can rely on
+it: no step after the build touches the bytes the module's integrity test covers (or any other
+loaded byte).
+
+| Step | Changes | Must stay the same | `layout.json` |
+|---|---|---|---|
+| `layout` strips a Linux launcher, core or helper | sections the loader doesn't map (symbols, debug information) go; the section header table is rewritten (and may be reordered) | the ELF header but the section header table's offset, count and name index; every program header; every byte a `PT_LOAD` maps from the file; every allocated section a `PT_LOAD` maps: name, type, flags, address, size, file offset, contents | `"strip": "non-alloc"` |
+| `package` stamps a Windows launcher, core or helper's version resource | a resource section is appended after every other section (initialized read-only data holding the new resource tree), or the image's trailing resource section (the last one, neither code nor writable, holding the resource directory and nothing another data directory points at) is rewritten in place; the section count, `SizeOfInitializedData`, `SizeOfImage`, the checksum and the resource data directory | every other section's header and file data; every other header byte the loader maps (the entry point, the image base, `DllCharacteristics`, every other data directory, …) | `"stamp": "resource-section"` |
+| `package` Authenticode-signs a Windows binary (a sidecar too, the FIPS DLLs included) | a certificate table appended past every section's data; the checksum and the certificate table's data directory | every section's header and file data; every other header byte | `"sign": "certificate-table"` |
+
+The checks read both images with their own bounded parsers, independent of the stamp's, and
+treat them as untrusted input (fuzzed: `dist_post_link`). The version stamp runs its check before
+it returns (`pe_version::stamp_version`); `seaworthy::post_link` holds all three for a pipeline
+that strips or signs on its own. A sidecar that arrives already signed by the product's pinned
+identity isn't signed again, so it carries no `sign`.
 
 ## Package
 

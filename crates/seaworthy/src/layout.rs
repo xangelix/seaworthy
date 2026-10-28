@@ -29,9 +29,13 @@
 //! binaries are
 //! stripped with `strip --strip-all` (`$STRIP` overrides the tool), and
 //! each stripped copy's record is read back, so stripping can never cost a
-//! core its `.cpureq`. `layout.json` beside the tree lists every file with
-//! its install path, role, mode and SHA-256: the input to packaging, and an
-//! audit record.
+//! core its `.cpureq`; then the stripped copy is compared with the verified
+//! one, and anything the loader maps that changed fails the layout
+//! ([`crate::post_link::check_strip`]). `layout.json` beside the tree lists
+//! every file with its install path, role, mode and SHA-256, and what was
+//! done to it after the build, each step checked (`"strip": "non-alloc"`;
+//! on Windows, after `package`, `"stamp": "resource-section"` and `"sign":
+//! "certificate-table"`): the input to packaging, and an audit record.
 //!
 //! Data files and icons are read once, from `seaworthy.toml`'s directory:
 //! a regular file (not a link, nothing outside that directory), at most
@@ -46,7 +50,7 @@
 //! marker file `layout` writes. `seaworthy` never deletes a directory it
 //! didn't create.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -236,7 +240,34 @@ struct ManifestFile<'a> {
     program: Option<&'a str>,
     mode: u32,
     sha256: &'a str,
+    /// Stripped, only sections the loader doesn't map changed
+    /// ([`crate::post_link::STRIPPED`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strip: Option<&'static str>,
+    /// Version-stamped, only the resource section changed
+    /// ([`crate::post_link::STAMPED`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stamp: Option<&'static str>,
+    /// Authenticode-signed here, only the certificate table added
+    /// ([`crate::post_link::SIGNED`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sign: Option<&'static str>,
 }
+
+/// What was done to a staged file after the build, each step checked by
+/// [`crate::post_link`]: `layout.json`'s `strip`, `stamp` and `sign`.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PostLink {
+    /// `layout` stripped it.
+    pub(crate) stripped: bool,
+    /// `package` stamped its version resource.
+    pub(crate) stamped: bool,
+    /// `package` Authenticode-signed it.
+    pub(crate) signed: bool,
+}
+
+/// [`PostLink`] by staged path.
+pub(crate) type PostLinks = BTreeMap<PathBuf, PostLink>;
 
 /// `layout.json`.
 #[derive(Serialize)]
@@ -340,6 +371,7 @@ pub fn layout(
             }
         };
         let (mut data_files, mut data_bytes) = (0_usize, 0_u64);
+        let mut post_link = PostLinks::new();
         let mut place = |source: &Path,
                          (root, staged_root): &(String, PathBuf),
                          relative: &str,
@@ -421,11 +453,18 @@ pub fn layout(
                 )));
             }
             let is_elf = os == Os::Linux && role != Role::Sidecar;
-            if is_elf && options.strip {
+            let bytes = if is_elf && options.strip {
                 strip(&options.strip_tool, &staged)?;
                 recheck_record(&staged, &role, "stripped")?;
-            }
-            let bytes = std::fs::read(&staged).map_err(|e| DistError::io(&staged, e))?;
+                // What the loader maps is what verify read.
+                let stripped = std::fs::read(&staged).map_err(|e| DistError::io(&staged, e))?;
+                crate::post_link::check_strip(&copied, &stripped)
+                    .map_err(|e| crate::post_link::about(&staged, e))?;
+                post_link.entry(staged.clone()).or_default().stripped = true;
+                stripped
+            } else {
+                copied
+            };
             files.push(File {
                 install_path,
                 staged,
@@ -666,20 +705,30 @@ pub fn layout(
             desktop_files,
             icon,
         };
-        write_manifest(&layout)?;
+        write_manifest_with(&layout, &post_link)?;
         layouts.push(layout);
     }
     Ok(layouts)
 }
 
+/// Writes `layout.json` beside the layout's tree, recording no post-link
+/// step ([`write_manifest_with`]).
+///
+/// # Errors
+/// As [`write_manifest_with`].
+pub(crate) fn write_manifest(layout: &Layout) -> Result<(), DistError> {
+    write_manifest_with(layout, &PostLinks::new())
+}
+
 /// Writes `layout.json` beside the layout's tree: every file with its
-/// install path, path relative to the manifest, role, mode and SHA-256. The
-/// packaging step rewrites it after stamping and signing change the files,
-/// so it always describes the shipped bytes.
+/// install path, path relative to the manifest, role, mode and SHA-256, and
+/// the checked post-link steps `post_link` names for it. The packaging step
+/// rewrites it after stamping and signing change the files, so it always
+/// describes the shipped bytes.
 ///
 /// # Errors
 /// [`DistError::Io`], or [`DistError::Layout`] when the tree has no parent.
-pub(crate) fn write_manifest(layout: &Layout) -> Result<(), DistError> {
+pub(crate) fn write_manifest_with(layout: &Layout, post_link: &PostLinks) -> Result<(), DistError> {
     let base = layout
         .tree
         .parent()
@@ -706,6 +755,15 @@ pub(crate) fn write_manifest(layout: &Layout) -> Result<(), DistError> {
                 program: f.program.as_deref(),
                 mode: f.mode,
                 sha256: &f.sha256,
+                strip: post_link
+                    .get(&f.staged)
+                    .and_then(|p| p.stripped.then_some(crate::post_link::STRIPPED)),
+                stamp: post_link
+                    .get(&f.staged)
+                    .and_then(|p| p.stamped.then_some(crate::post_link::STAMPED)),
+                sign: post_link
+                    .get(&f.staged)
+                    .and_then(|p| p.signed.then_some(crate::post_link::SIGNED)),
             })
             .collect(),
     };

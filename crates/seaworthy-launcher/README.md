@@ -136,6 +136,8 @@ launcher falls back is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
   privileged process: secure-execution mode, root on Linux and macOS
   (`sudo`, a root shell, a root service), an elevated process on Windows
   (an administrator's elevated token, LocalSystem, the service accounts).
+  `SEAWORTHY_LAUNCHER_NO_DIALOG` (below) is honoured everywhere: it can
+  only take a dialog away.
 - On Windows the launcher's first act is
   `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`: every later
   `LoadLibrary` in the process, the core's included, searches the
@@ -153,13 +155,32 @@ launcher falls back is in [`docs/cpu-levels.md`](../../docs/cpu-levels.md).
   `%ProgramData%` folders by handle (each created with its descriptor or taken back without
   following a reparse point, everything below the product's folder audited, the install refused
   over anything planted); the core never sees it, and any caller but LocalSystem is refused.
-- Everything the launcher prints, and its macOS alert, shows control
+- Everything the launcher prints, and its failure dialog, shows control
   characters and invisible or bidirectional formatting characters escaped
   (`\u{202E}`): a file name can't forge a line or reorder a message.
-- On macOS, a launcher started by LaunchServices (the Finder, the Dock,
-  `open`: no terminal) also shows its own failures in an alert
-  (CoreFoundation's `CFUserNotificationDisplayAlert`); a core's failures
-  are the core's to report.
+- **The failure dialog.** A desktop launcher has no terminal: started from
+  the Finder or Explorer, a launcher that can't run a core would seem to do
+  nothing. So when nothing else would show its lines to anyone, it also
+  shows them (at most 40 lines, 4,000 characters) in a dialog, then exits
+  with the same code; stderr is unchanged. A core's failures are the
+  core's to report.
+  - macOS: LaunchServices started it (the Finder, the Dock, `open`) and
+    stderr isn't a terminal: CoreFoundation's
+    `CFUserNotificationDisplayAlert`.
+  - Windows: it is a GUI-subsystem program (`#![windows_subsystem =
+    "windows"]` in the launcher crate, read from its own PE header), stderr
+    isn't a console, it doesn't run in session 0 (services), and its window
+    station is interactive (`WSF_VISIBLE`: an interactive logon's; a
+    service's, a scheduled task's without a logged-on user and an SSH
+    session's are not). `MessageBoxW` (error icon, in front), with
+    `user32.dll` loaded from System32 only at that point: the launcher
+    doesn't import it. A console-subsystem launcher never shows one: its
+    failures belong in its console.
+  - Never with `SEAWORTHY_LAUNCHER_NO_DIALOG` set (anything but empty or
+    `0`), or `CI` set (anything but empty, `0` or `false`): a CI runner's
+    desktop session can be interactive, and a dialog there would hold the
+    job until it timed out. `SEAWORTHY_LAUNCHER_DEBUG=1` prints the
+    decision and why.
 - `EXIT_*` — documented exit codes (below).
 
 ## Architecture diagram
@@ -236,10 +257,12 @@ install -D target/x86_64-unknown-linux-gnu/release/tool_launcher /opt/acme/tool/
 - **Client** — nothing beyond the two macros.
 - **What it injects** — a `.cpureq` section into every core (the build
   script's record) and a `.cpulist` section into the launcher; the exported
-  symbol `seaworthy_core_main`; reads `SEAWORTHY_CORE` and
-  `SEAWORTHY_LAUNCHER_DEBUG`.
+  symbol `seaworthy_core_main`; reads `SEAWORTHY_CORE`,
+  `SEAWORTHY_LAUNCHER_DEBUG`, `SEAWORTHY_LAUNCHER_NO_DIALOG` and `CI`.
 - **Configuration surface** — the macro arguments (`core`, `cpus`); the two
-  environment overrides; the layout rule (`core_path`).
+  environment overrides and the dialog's opt-out; the layout rule
+  (`core_path`); on Windows, the launcher crate's `windows_subsystem`
+  (a desktop program's launcher: `examples/desktop_launcher.rs`).
 
 ## Proper usage by circumstance
 
@@ -287,10 +310,16 @@ install -D target/x86_64-unknown-linux-gnu/release/tool_launcher /opt/acme/tool/
   recommended (services run as their service account instead); when used,
   the secure-execution trust rule (rule 4) applies.
 - **Supporting a machine:** `SEAWORTHY_LAUNCHER_DEBUG=1` prints the host's
-  features and every decision; `SEAWORTHY_CORE=<cpu>` forces a core the
-  host supports (anything else fails loudly: exit 64 for an unknown name,
-  78 for an unsupported one). Both are ignored in secure-execution mode
-  (`AT_SECURE`, `issetugid()`).
+  features and every decision (the failure dialog's too); `SEAWORTHY_CORE=<cpu>`
+  forces a core the host supports (anything else fails loudly: exit 64 for
+  an unknown name, 78 for an unsupported one). Both are ignored in
+  secure-execution mode (`AT_SECURE`, `issetugid()`).
+- **Desktop programs on Windows:** give the launcher crate
+  `#![windows_subsystem = "windows"]` (as the core's GUI needs no
+  console), so starting it opens no console window; its own failures then
+  appear in a message box. Scripts and tests that start such a launcher in
+  a desktop session and expect it to fail set
+  `SEAWORTHY_LAUNCHER_NO_DIALOG=1` (CI jobs, which set `CI`, need not).
 - **Apple Silicon:** ship `apple-m1`. Every arm64 Mac has the M1's
   features, so its core always loads; a core for a later chip carries
   `v8.5a` or later, which macOS reports no signal for, so the launcher
@@ -400,7 +429,7 @@ No cryptographic surface.
 | Platform | Status |
 | --- | --- |
 | Linux x86-64 (glibc) | Supported: `dlopen`, `AT_SECURE` (overrides ignored, the path trust rule), the AMX permission (`arch_prctl`) |
-| Windows x86-64 (MSVC) | Supported: `LoadLibraryExW` with restricted search; records checked through a cargo-xwin build (`scripts/launcher-e2e.sh`) |
+| Windows x86-64 (MSVC) | Supported: `LoadLibraryExW` with restricted search; records checked through a cargo-xwin build (`scripts/launcher-e2e.sh`); a GUI-subsystem launcher's failure dialog (`tests/windows_dialog.rs`, on CI's Windows runners) |
 | macOS, Apple Silicon | Supported: `dlopen` from the bundle's `Contents/Frameworks`, records in `__DATA,__cpureq`/`__DATA,__cpulist`, `sysctl` detection, `issetugid()` (overrides ignored, the path trust rule), the failure alert; end to end in `scripts/launcher-e2e-macos.sh` |
 | Linux aarch64, Intel macOS | No |
 | wasm | No — there is nothing to launch |
@@ -415,7 +444,9 @@ CoreFoundation framework (the failure alert). Products depend on it from their l
 crates; a packaging tool lays out and verifies what it produces. Its
 unsafe code is the loader FFI (`dlopen`/`dlsym`, `LoadLibraryExW`/
 `GetProcAddress`), the secure-execution and AMX queries, the record's link
-section and the macOS alert — each block allowed locally with its safety
+section and the failure dialog (the macOS alert; on Windows the
+executable's own mapped header, its session, and user32's window-station
+query and message box) — each block allowed locally with its safety
 argument.
 
 ## See also

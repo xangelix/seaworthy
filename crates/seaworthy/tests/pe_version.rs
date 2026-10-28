@@ -982,6 +982,16 @@ fn images_it_cannot_edit_safely_are_refused() {
         "{}",
         stamp(&overlapping)
     );
+    // Or in the file: a section's data running into the next one's, which
+    // rewriting a trailing resource section in place would cut into (found
+    // by `dist_post_link`: the stamp's own check refused the result).
+    let mut overlapping = core_dll();
+    overlapping[first + 16..first + 20].copy_from_slice(&0x300u32.to_le_bytes());
+    assert!(
+        stamp(&overlapping).contains("file data overlap"),
+        "{}",
+        stamp(&overlapping)
+    );
     // SizeOfHeaders past the first section's data (found by `dist_pe`).
     let mut headers = core_dll();
     let optional = u32_at(&headers, 0x3c) as usize + 24;

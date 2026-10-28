@@ -37,8 +37,9 @@
 //!    DLL pair is the module's own and is never stamped), every record read
 //!    back, then every Windows binary Authenticode-signed (the FIPS DLLs
 //!    included; a sidecar already carrying its publisher's signature keeps
-//!    it), each signature checked against the pins, and `layout.json`
-//!    rewritten.
+//!    it), each signature checked against the pins, each stamp and signature
+//!    checked to leave what Windows maps unchanged ([`crate::post_link`]),
+//!    and `layout.json` rewritten.
 //! 2. **The outputs**, from the prepared trees; the MSI Authenticode-
 //!    signed after WiX builds it, the rpm signed in place, the pacman
 //!    package given a detached `.sig` ([`crate::codesign`]), each signature
@@ -1404,8 +1405,9 @@ fn write_listing(
 
 /// Stamps the version resource into the Windows tree's launcher, cores and
 /// helper, reads every record back, Authenticode-signs every binary when a
-/// signer is given (checking each signature against the pins), and
-/// rewrites the tree's digests and `layout.json`. A sidecar that already
+/// signer is given (checking each signature against the pins), checks that
+/// neither changed what Windows maps ([`crate::post_link`]), and rewrites
+/// the tree's digests and `layout.json`. A sidecar that already
 /// carries a signature keeps it only when it verifies to the product's own
 /// pinned identity (`defaults.authenticode`); any other is refused: a
 /// signed release vouches for every binary it ships, and a signature
@@ -1423,6 +1425,7 @@ fn prepare_windows(
     let display = &product.display_name;
     // A product of several programs names each one's binaries by it.
     let several = product.programs().len() > 1;
+    let mut post_link = crate::layout::PostLinks::new();
     for file in &mut layout.files {
         // Data files are shipped as read: never stamped or signed (layout
         // refused any carrying code).
@@ -1462,10 +1465,12 @@ fn prepare_windows(
                 file_name: &name,
                 dll: matches!(file.role, Role::Core { .. }),
             };
+            // stamp_version checks that only the resources changed.
             let stamped = crate::pe_version::stamp_version(&bytes, release, &info)
-                .map_err(|e| DistError::Layout(format!("{}: {e}", file.staged.display())))?;
+                .map_err(|e| crate::post_link::about(&file.staged, e))?;
             write(&file.staged, &stamped)?;
             crate::layout::recheck_record(&file.staged, &file.role, "stamped")?;
+            post_link.entry(file.staged.clone()).or_default().stamped = true;
         }
         if let Some(signer) = authenticode {
             let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
@@ -1482,13 +1487,19 @@ fn prepare_windows(
             } else {
                 signer.sign(&file.staged, display)?;
                 crate::layout::recheck_record(&file.staged, &file.role, "signed")?;
+                // The signer may only have added its certificate table.
+                let signed =
+                    std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
+                crate::post_link::check_sign(&bytes, &signed)
+                    .map_err(|e| crate::post_link::about(&file.staged, e))?;
                 pins.check_authenticode(&file.staged)?;
+                post_link.entry(file.staged.clone()).or_default().signed = true;
             }
         }
         let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
         file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
     }
-    crate::layout::write_manifest(layout)
+    crate::layout::write_manifest_with(layout, &post_link)
 }
 
 /// The macOS signer: the Developer ID with its pinned team (and the main

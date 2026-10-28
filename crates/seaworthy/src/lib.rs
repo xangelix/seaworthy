@@ -18,7 +18,8 @@
 //!    file Authenticode-signed ([`codesign`]), each signature checked
 //!    against the identity `seaworthy.toml` pins.
 //! 3. **[`layout`]**: the install tree per platform, stripped, with a
-//!    manifest.
+//!    manifest. Stripping, the version stamp and signing are each checked
+//!    to leave what the loader maps unchanged ([`post_link`]).
 //! 4. **[`package`]**: every output `seaworthy.toml` names, reproducibly: deb,
 //!    rpm and pacman through nFPM ([`nfpm`], from [`linux`]'s contents and
 //!    [`scripts`]' lifecycle), the tarball and zip ([`archive`]), the MSI's
@@ -96,6 +97,7 @@ pub mod msi_check;
 pub mod nfpm;
 pub mod package;
 pub mod pe_version;
+pub mod post_link;
 pub mod process;
 #[cfg(feature = "publish-s3")]
 pub mod publish;

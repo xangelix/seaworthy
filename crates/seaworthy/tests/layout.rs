@@ -1,5 +1,6 @@
 //! `layout` over a verified synthetic tree: install paths, roles, modes,
-//! the manifest, the marker rule, and stripping that keeps every record.
+//! the manifest, the marker rule, and stripping that keeps every record and
+//! everything the loader maps.
 
 #![allow(
     clippy::expect_used,
@@ -57,20 +58,27 @@ updates.default = "off"
 }
 
 fn run(out: &Path, strip: bool) -> Result<Vec<seaworthy::layout::Layout>, DistError> {
-    let input = tempfile::tempdir().unwrap();
-    artifacts(input.path());
-    let config = config();
-    let verified = seaworthy::verify::verify(&config, "tool", input.path()).expect("verifies");
-    layout(
-        &config,
-        "tool",
-        &verified,
+    run_from(
         out,
+        artifacts,
         Options {
             strip,
             ..Options::default()
         },
     )
+}
+
+/// `layout` over the artifacts `make` writes, with `options`.
+fn run_from(
+    out: &Path,
+    make: fn(&Path),
+    options: Options,
+) -> Result<Vec<seaworthy::layout::Layout>, DistError> {
+    let input = tempfile::tempdir().unwrap();
+    make(input.path());
+    let config = config();
+    let verified = seaworthy::verify::verify(&config, "tool", input.path()).expect("verifies");
+    layout(&config, "tool", &verified, out, options)
 }
 
 #[test]
@@ -215,6 +223,62 @@ fn stripping_removes_symbols_and_keeps_every_record() {
             _ => {}
         }
     }
+    // layout.json records the checked step for every stripped file, and
+    // none for the Windows tree's, which isn't stripped.
+    for tree in &trees {
+        let listing: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(tree.tree.parent().unwrap().join("layout.json")).unwrap(),
+        )
+        .unwrap();
+        for file in listing["files"].as_array().unwrap() {
+            let expected = (tree.triple == LINUX).then_some(seaworthy::post_link::STRIPPED);
+            assert_eq!(
+                file.get("strip").and_then(|s| s.as_str()),
+                expected,
+                "{file}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_strip_that_changes_what_the_loader_maps_is_refused() {
+    if !have("strip") || !have("objcopy") {
+        eprintln!("SKIP: strip and objcopy (binutils) not installed");
+        return;
+    }
+    // Strips, then rewrites .text (same size, other bytes).
+    let tools = tempfile::tempdir().unwrap();
+    let patch = tools.path().join("text.bin");
+    std::fs::write(&patch, [0x90u8; 16]).unwrap();
+    let bad_strip = tools.path().join("strip-and-patch");
+    std::fs::write(
+        &bad_strip,
+        format!(
+            "#!/bin/sh\n# $1 = --strip-all, $2 = the file\nstrip --strip-all \"$2\" && exec objcopy --update-section .text='{}' \"$2\"\n",
+            patch.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bad_strip, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = tempfile::tempdir().unwrap();
+    let options = Options {
+        strip: true,
+        strip_tool: bad_strip,
+    };
+    let err = run_from(out.path(), artifacts, options)
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        err.contains(
+            r#"/AcmeTool: stripping changed what the loader maps: section ".text"'s contents, at byte 0x0"#
+        ),
+        "{err}"
+    );
 }
 
 #[cfg(unix)]

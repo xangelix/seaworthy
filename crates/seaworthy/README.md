@@ -124,7 +124,10 @@ for tree in seaworthy::layout::layout(
    `.N`); the tests prove it against the real `dpkg`, `rpm` and `vercmp`.
 4. **Never delete what it didn't create; never ship what wasn't verified.** A staging directory is
    replaced only if it carries `layout`'s marker; a file that changed since `verify` read it, and
-   two files landing on one install path, are refused.
+   two files landing on one install path, are refused. Stripping, the Windows version stamp and
+   Authenticode signing are each checked against their input: anything they changed in what the
+   loader maps beyond their own part (non-allocated sections, the resource section, the
+   certificate table) fails the build (`post_link`; `layout.json` records each checked step).
 5. **The same inputs give the same bytes.** Every timestamp is `SOURCE_DATE_EPOCH`, entries are
    sorted, owners are root, and with the pinned nFPM a rebuild is byte-identical (the tests build
    everything twice). The MSI and the dmg are the exceptions: WiX and `hdiutil` write fresh codes

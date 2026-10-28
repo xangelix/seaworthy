@@ -99,10 +99,15 @@ fn elf_hash(name: &str) -> u32 {
 }
 
 impl Elf {
-    /// An ELF64 x86-64 shared object.
+    /// An ELF64 x86-64 shared object, laid out as a linker lays out a
+    /// program: the allocated sections first, each at an address equal to
+    /// its file offset, mapped by one `PT_LOAD` (with a `PT_DYNAMIC`), and
+    /// the symbol tables after them, so a real `strip` removes only what
+    /// isn't loaded.
     pub(crate) fn build(&self) -> Vec<u8> {
-        // Sections, in order: null, user sections, .text, [.symtab, .strtab],
-        // .dynstr, .dynamic, .shstrtab.
+        // Sections, in order: null, user sections, [.interp], .data, .text,
+        // .dynstr, [.dynsym, .gnu.version], [.gnu.version_r], .dynamic,
+        // [.symtab, .strtab], .shstrtab.
         struct Section {
             name: u32,
             kind: u32,
@@ -163,6 +168,32 @@ impl Elf {
             || !self.files.is_empty()
             || !self.data_symbols.is_empty()
             || !self.weak_symbols.is_empty();
+        // `.symtab` and `.strtab`, pushed after every allocated section.
+        let mut symbol_tables = None;
+        let push_symbol_tables =
+            |sections: &mut Vec<Section>,
+             shstrtab: &mut Strtab,
+             (symtab, strtab, first_global): (Vec<u8>, Vec<u8>, usize)| {
+                let strtab_index = sections.len() + 2;
+                sections.push(Section {
+                    name: shstrtab.add(".symtab"),
+                    kind: 2,
+                    flags: 0,
+                    data: symtab,
+                    link: n32(strtab_index),
+                    info: n32(first_global),
+                    entsize: 24,
+                });
+                sections.push(Section {
+                    name: shstrtab.add(".strtab"),
+                    kind: 3,
+                    flags: 0,
+                    data: strtab,
+                    link: 0,
+                    info: 0,
+                    entsize: 0,
+                });
+            };
         if any_symbols {
             let mut strtab = Strtab::new();
             let mut symtab = vec![0u8; 24]; // the null symbol
@@ -198,25 +229,7 @@ impl Elf {
             for name in &self.weak_symbols {
                 symbol(name, (2 << 4) | 2, text_index); // STB_WEAK
             }
-            let strtab_index = sections.len() + 2;
-            sections.push(Section {
-                name: shstrtab.add(".symtab"),
-                kind: 2,
-                flags: 0,
-                data: symtab,
-                link: n32(strtab_index),
-                info: n32(first_global),
-                entsize: 24,
-            });
-            sections.push(Section {
-                name: shstrtab.add(".strtab"),
-                kind: 3,
-                flags: 0,
-                data: strtab.0,
-                link: 0,
-                info: 0,
-                entsize: 0,
-            });
+            symbol_tables = Some((symtab, strtab.0, first_global));
         }
         let mut dynstr = Strtab::new();
         let mut dynamic = Vec::new();
@@ -323,6 +336,10 @@ impl Elf {
             info: 0,
             entsize: 16,
         });
+        let dynamic_index = sections.len();
+        if let Some(tables) = symbol_tables.take() {
+            push_symbol_tables(&mut sections, &mut shstrtab, tables);
+        }
         let shstrtab_name = shstrtab.add(".shstrtab");
         sections.push(Section {
             name: shstrtab_name,
@@ -336,9 +353,10 @@ impl Elf {
         let last = sections.len() - 1;
         sections[last].data = shstrtab.0;
 
-        // A program header table (one PT_INTERP entry) right after the ELF
-        // header, when there is an interpreter.
-        let phsize = if interp_index.is_some() { 56 } else { 0 };
+        // A program header table right after the ELF header: PT_INTERP when
+        // there is an interpreter, then PT_LOAD and PT_DYNAMIC.
+        let phnum = usize::from(interp_index.is_some()) + 2;
+        let phsize = 56 * phnum;
         let mut body = Vec::new();
         let mut offsets = Vec::new();
         for section in &sections {
@@ -347,18 +365,27 @@ impl Elf {
             body.extend_from_slice(&section.data);
         }
         let shoff = (64 + phsize + body.len()).next_multiple_of(8);
+        // Everything allocated, from the ELF header on: what PT_LOAD maps.
+        let load_end = sections
+            .iter()
+            .zip(&offsets)
+            .filter(|(section, _)| section.flags & 2 != 0)
+            .map(|(section, offset)| offset + section.data.len())
+            .max()
+            .unwrap_or(64 + phsize);
+        let address = |flags: u64, offset: usize| if flags & 2 != 0 { n64(offset) } else { 0 };
         let count = sections.len() + 1;
         let mut out = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         put16(&mut out, 3); // ET_DYN
         put16(&mut out, 62); // EM_X86_64
         put32(&mut out, 1);
         put64(&mut out, 0); // e_entry
-        put64(&mut out, if phsize == 0 { 0 } else { 64 }); // e_phoff
+        put64(&mut out, 64); // e_phoff
         put64(&mut out, n64(shoff));
         put32(&mut out, 0);
         put16(&mut out, 64);
         put16(&mut out, 56);
-        put16(&mut out, if phsize == 0 { 0 } else { 1 }); // e_phnum
+        put16(&mut out, u16::try_from(phnum).unwrap()); // e_phnum
         put16(&mut out, 64);
         put16(&mut out, u16::try_from(count).unwrap());
         put16(&mut out, u16::try_from(count - 1).unwrap()); // .shstrtab is last
@@ -367,11 +394,33 @@ impl Elf {
             put32(&mut out, 3); // PT_INTERP
             put32(&mut out, 4); // PF_R
             put64(&mut out, n64(offset));
-            put64(&mut out, 0);
-            put64(&mut out, 0);
+            put64(&mut out, address(2, offset));
+            put64(&mut out, address(2, offset));
             put64(&mut out, n64(size));
             put64(&mut out, n64(size));
             put64(&mut out, 1);
+        }
+        {
+            put32(&mut out, 1); // PT_LOAD
+            put32(&mut out, 7); // PF_R | PF_W | PF_X
+            put64(&mut out, 0);
+            put64(&mut out, 0);
+            put64(&mut out, 0);
+            put64(&mut out, n64(load_end));
+            put64(&mut out, n64(load_end));
+            put64(&mut out, 0x1000);
+            let (offset, size) = (
+                offsets[dynamic_index - 1],
+                sections[dynamic_index - 1].data.len(),
+            );
+            put32(&mut out, 2); // PT_DYNAMIC
+            put32(&mut out, 6); // PF_R | PF_W
+            put64(&mut out, n64(offset));
+            put64(&mut out, n64(offset));
+            put64(&mut out, n64(offset));
+            put64(&mut out, n64(size));
+            put64(&mut out, n64(size));
+            put64(&mut out, 8);
         }
         out.extend_from_slice(&body);
         out.resize(shoff, 0);
@@ -380,7 +429,7 @@ impl Elf {
             put32(&mut out, section.name);
             put32(&mut out, section.kind);
             put64(&mut out, section.flags);
-            put64(&mut out, 0);
+            put64(&mut out, address(section.flags, *offset));
             put64(&mut out, n64(*offset));
             put64(&mut out, n64(section.data.len()));
             put32(&mut out, section.link);
