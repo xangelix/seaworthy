@@ -244,7 +244,8 @@ function Assert-Installed([string]$Version, [string]$Scope = 'machine') {
     # Programs and Features' icon: an MSI's Uninstall key carries no DisplayIcon;
     # Windows Installer caches ARPPRODUCTICON's Icon table entry and registers it as the
     # product's ProductIcon.
-    $icon = [string](Get-ProductInfo $entries[0].Code 'ProductIcon') -replace ',-?\d+$', ''
+    # A per-user product's path is recorded unexpanded (%APPDATA%\Microsoft\Installer\{code}\...).
+    $icon = [Environment]::ExpandEnvironmentVariables([string](Get-ProductInfo $entries[0].Code 'ProductIcon')) -replace ',-?\d+$', ''
     Assert-True ($icon -and (Test-Path -LiteralPath $icon -PathType Leaf)) "the product's icon (ProductIcon, from ARPPRODUCTICON) is registered and cached (it is '$icon')"
     Assert-True ((Get-FileHash -LiteralPath $icon).Hash -eq (Get-FileHash -LiteralPath $treeIcon).Hash) "the cached icon $icon is the package's ($treeIcon)"
     Assert-WerExcluded $at.Hive
