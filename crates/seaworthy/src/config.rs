@@ -664,7 +664,250 @@ pub struct Product {
     /// its scope, a licence page, `PATH`, Windows Error Reporting.
     #[serde(default)]
     pub msi: Option<MsiOptions>,
+    /// `[[product.<id>.file-types]]`: the document types the product's
+    /// `gui` program opens, registered on every platform it installs on.
+    #[serde(default)]
+    pub file_types: Vec<FileType>,
 }
+
+/// `[[product.<id>.file-types]]`: a document type the product's `gui`
+/// program opens: on Linux its shared-mime-info definition, document icons
+/// and the menu entry's `MimeType` (and KDE service menus for its other
+/// verbs); on Windows its ProgID, extensions and verbs in the registry; on
+/// macOS the app bundle's `CFBundleDocumentTypes` and the type's UTI
+/// declaration.
+///
+/// ```toml
+/// [[product.trove.file-types]]
+/// name = "Acme Trove archive"
+/// extensions = ["trove"]
+/// mime-type = "application/x-acme-trove"
+/// role = "owner"
+/// magic = [{ offset = 0, string = "TROVE" }]
+/// linux-icons = ["icons/trove-doc-48.png", "icons/trove-doc.svg"]
+/// windows-icon = "icons/trove-doc.ico"
+/// macos-icon = "icons/trove-doc.icns"
+/// progid = "Acme.TroveArchive"
+/// uti = { identifier = "com.example.trove-archive", conforms-to = ["public.data", "public.archive"] }
+/// verbs = [
+///     { id = "open", label = "Open", default = true, arguments = ["--", "{path}"] },
+///     { id = "extract", label = "Extract here", arguments = ["--extract", "--", "{path}"] },
+/// ]
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct FileType {
+    /// The type's name, as people see it (`Acme Trove archive`): the
+    /// shared-mime-info comment, the ProgID's description, the bundle's
+    /// document type name.
+    pub name: String,
+    /// The file name extensions, without the dot (`["trove"]`), each
+    /// `[a-z0-9][a-z0-9+_-]*`, at most 16 bytes.
+    pub extensions: Vec<String>,
+    /// The media type (`application/x-acme-trove`).
+    pub mime_type: String,
+    /// The program that opens it, by executable (default: the product's
+    /// `gui` program, the only one allowed).
+    #[serde(default)]
+    pub program: Option<String>,
+    /// How the program relates to the type ([`FileTypeRole`], default
+    /// `owner`).
+    #[serde(default)]
+    pub role: FileTypeRole,
+    /// shared-mime-info magic: content that identifies the type whatever
+    /// the file's name (an `owner` type only).
+    #[serde(default)]
+    pub magic: Vec<Magic>,
+    /// Linux document icons, relative to `seaworthy.toml`: square PNGs of
+    /// the hicolor sizes, one per size, and at most one SVG (an `owner`
+    /// type only; required with a Linux package).
+    #[serde(default)]
+    pub linux_icons: Vec<PathBuf>,
+    /// The Windows document icon (`.ico`), the ProgID's `DefaultIcon`
+    /// (required with an `msi` output).
+    #[serde(default)]
+    pub windows_icon: Option<PathBuf>,
+    /// The macOS document icon (`.icns`), in the bundle's
+    /// `Contents/Resources` (required with a macOS output).
+    #[serde(default)]
+    pub macos_icon: Option<PathBuf>,
+    /// The Windows ProgID (`Acme.TroveArchive`: `Vendor.Type`, or
+    /// `Vendor.Type.Version`; required with an `msi` output).
+    #[serde(default)]
+    pub progid: Option<String>,
+    /// The macOS uniform type identifier (required with a macOS output).
+    #[serde(default)]
+    pub uti: Option<Uti>,
+    /// What people can do with such a file from the file manager. Default:
+    /// one verb, `open`, the default, with `["--", "{path}"]`.
+    #[serde(default)]
+    pub verbs: Vec<Verb>,
+}
+
+/// How a program relates to a file type (`role`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FileTypeRole {
+    /// The program's own format: it defines the type (the shared-mime-info
+    /// definition, its magic and icons, the extension's default ProgID,
+    /// `Content Type` and MIME database entry on Windows, an exported UTI
+    /// and `LSHandlerRank = Owner` on macOS).
+    #[default]
+    Owner,
+    /// It edits files of a type something else defines: offered for them
+    /// (`MimeType`, `OpenWithProgids`, an imported UTI, `Editor` with
+    /// `LSHandlerRank = Default`), never their default handler by itself.
+    Editor,
+    /// It views them: as `editor`, with macOS's `Viewer` role and
+    /// `LSHandlerRank = Alternate`.
+    Viewer,
+}
+
+impl FileTypeRole {
+    /// Its name in `seaworthy.toml`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Editor => "editor",
+            Self::Viewer => "viewer",
+        }
+    }
+}
+
+/// One shared-mime-info magic match: `string` (printable ASCII) or `bytes`
+/// (hex) at `offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Magic {
+    /// Where the content starts, in bytes (at most 65535).
+    pub offset: u32,
+    /// The content as text: 1 to 64 printable ASCII characters, no `\`.
+    #[serde(default)]
+    pub string: Option<String>,
+    /// The content as hex: 1 to 64 bytes.
+    #[serde(default)]
+    pub bytes: Option<String>,
+}
+
+/// A macOS uniform type identifier and what it conforms to.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Uti {
+    /// The identifier, reverse-DNS (`com.example.trove-archive`).
+    pub identifier: String,
+    /// The types it conforms to (`["public.data", "public.archive"]`), at
+    /// least one.
+    pub conforms_to: Vec<String>,
+}
+
+/// A file manager action on a file type (`verbs`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Verb {
+    /// Its id (`open`, `extract`): `[a-z][a-z0-9-]*`, at most 32 bytes.
+    pub id: String,
+    /// What the menu shows (`Extract here`).
+    pub label: String,
+    /// The action a double-click takes: exactly one verb per type.
+    #[serde(default)]
+    pub default: bool,
+    /// The program's arguments, ending with `"--"` and `"{path}"` (the
+    /// file), so nothing after `--` is ever read as an option: every other
+    /// argument of `[A-Za-z0-9_.,:=+@/-]`, at most 64 bytes, at most 16.
+    pub arguments: Vec<String>,
+}
+
+/// A file type's file placeholder in a verb's arguments.
+pub const PATH_PLACEHOLDER: &str = "{path}";
+
+/// The verbs a file type without `verbs` gets: `open`, the default.
+#[must_use]
+pub fn default_verbs() -> Vec<Verb> {
+    vec![Verb {
+        id: "open".to_owned(),
+        label: "Open".to_owned(),
+        default: true,
+        arguments: vec!["--".to_owned(), PATH_PLACEHOLDER.to_owned()],
+    }]
+}
+
+impl FileType {
+    /// Its verbs: `verbs`, or [`default_verbs`].
+    #[must_use]
+    pub fn verbs(&self) -> Vec<Verb> {
+        if self.verbs.is_empty() {
+            default_verbs()
+        } else {
+            self.verbs.clone()
+        }
+    }
+
+    /// Its default verb (validation keeps exactly one).
+    #[must_use]
+    pub fn default_verb(&self) -> Verb {
+        let verbs = self.verbs();
+        verbs
+            .iter()
+            .find(|v| v.default)
+            .or(verbs.first())
+            .cloned()
+            .unwrap_or_else(|| default_verbs().remove(0))
+    }
+
+    /// The name of its document icons in an icon theme (shared-mime-info's
+    /// default for the type): the media type with `/` as `-`.
+    #[must_use]
+    pub fn icon_name(&self) -> String {
+        self.mime_type.replace('/', "-")
+    }
+}
+
+/// Extensions Windows runs or acts on: no file type may claim one (an
+/// owner would take over executables, shortcuts or scripts).
+pub const ACTIVE_EXTENSIONS: [&str; 41] = [
+    "exe",
+    "dll",
+    "sys",
+    "ocx",
+    "cpl",
+    "scr",
+    "com",
+    "pif",
+    "msi",
+    "msp",
+    "mst",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "ps1",
+    "psm1",
+    "psd1",
+    "ps1xml",
+    "bat",
+    "cmd",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "hta",
+    "lnk",
+    "url",
+    "reg",
+    "scf",
+    "inf",
+    "jar",
+    "msc",
+    "application",
+    "appref-ms",
+    "gadget",
+    "sct",
+    "wsc",
+    "settingcontent-ms",
+];
 
 /// `[product.<id>.msi]`: the MSI's installation options.
 ///
@@ -1626,6 +1869,96 @@ fn is_mime_type(text: &str) -> bool {
         .is_some_and(|(kind, subtype)| name(kind) && name(subtype))
 }
 
+/// A file type's or a verb's name: 1 to 128 characters of plain text,
+/// without the characters a registry value (MSI formatted text: `[ ] {
+/// }`), a desktop entry (`;`, `\\`, `%`), a plist or a shell would read
+/// specially (`" < > &`).
+fn is_type_label(text: &str) -> bool {
+    is_plain_text(text)
+        && text.chars().count() <= 128
+        && !text.starts_with(' ')
+        && !text.ends_with(' ')
+        && !text.contains(['[', ']', '{', '}', '%', '"', '\\', ';', '<', '>', '&'])
+}
+
+/// A file name extension without its dot: `[a-z0-9][a-z0-9+_-]*`, at most
+/// 16 bytes.
+fn is_extension(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    text.len() <= 16
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+_-".contains(&b))
+}
+
+/// A Windows ProgID: `Vendor.Type` or `Vendor.Type.Version`, each part
+/// letters and digits starting with a letter (a version may be digits
+/// alone), at most 39 characters (Microsoft's ProgID rules: no punctuation
+/// but the dots, not starting with a digit).
+fn is_progid(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    let count = parts.len();
+    text.len() <= 39
+        && (2..=3).contains(&count)
+        && parts.iter().enumerate().all(|(i, part)| {
+            let version = count == 3 && i == 2;
+            !part.is_empty()
+                && part.bytes().all(|b| b.is_ascii_alphanumeric())
+                && (version || part.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()))
+        })
+}
+
+/// A verb's id: `[a-z][a-z0-9-]*`, at most 32 bytes (a registry key, a
+/// desktop action's name).
+fn is_verb_id(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    text.len() <= 32
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A verb's arguments: at most 16, ending with `--` and the file's
+/// placeholder (`{path}`), neither of them anywhere else, every other one
+/// 1 to 64 characters of `[A-Za-z0-9_.,:=+@/-]` (nothing a shell, a desktop
+/// entry's `Exec`, a registry command line or MSI formatted text would
+/// read specially, and no space, so no quoting is ever needed).
+///
+/// # Errors
+/// What's wrong with them.
+pub fn verb_arguments(arguments: &[String]) -> Result<(), String> {
+    if arguments.len() > 16 {
+        return Err("at most 16 arguments".to_owned());
+    }
+    let ends = arguments.len() >= 2
+        && arguments
+            .get(arguments.len().saturating_sub(2))
+            .is_some_and(|a| a == "--")
+        && arguments.last().is_some_and(|a| a == PATH_PLACEHOLDER);
+    let once = |word: &str| arguments.iter().filter(|a| *a == word).count() == 1;
+    if !ends || !once("--") || !once(PATH_PLACEHOLDER) {
+        return Err(format!(
+            "the arguments must end with \"--\", \"{PATH_PLACEHOLDER}\" (the file, after --, so it's never read as an option), each once"
+        ));
+    }
+    for argument in arguments {
+        if argument == "--" || argument == PATH_PLACEHOLDER {
+            continue;
+        }
+        if argument.is_empty()
+            || argument.len() > 64
+            || !argument
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.,:=+@/-".contains(&b))
+        {
+            return Err(format!(
+                "{argument:?} must be 1 to 64 characters of [A-Za-z0-9_.,:=+@/-]"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A `.desktop` category name: `[A-Za-z0-9-]`, at most 64 bytes.
 fn is_category(text: &str) -> bool {
     !text.is_empty()
@@ -2145,11 +2478,15 @@ impl Config {
         // (one product per crypto build, each the tool's one install);
         // nothing else is shared, the UpgradeCode least of all (it would
         // make one an upgrade of the other).
-        const SHAREABLE: [&str; 4] = [
+        const SHAREABLE: [&str; 8] = [
             "windows-directory",
             "linux.command",
             "desktop.app-id",
             "display-name (the MSI's shortcut)",
+            "file-types.extensions",
+            "file-types.mime-type",
+            "file-types.progid",
+            "file-types.uti",
         ];
         let mut seen: BTreeMap<(&str, String), Vec<&str>> = BTreeMap::new();
         for (id, p) in &self.products {
@@ -2199,6 +2536,21 @@ impl Config {
                         "display-name (the MSI's shortcut)",
                         p.display_name.to_lowercase(),
                     ));
+                }
+            }
+            // A file type is one product's: two that both register `.trove`
+            // would each take it from the other, and one's removal would
+            // remove the other's registration.
+            for ft in &p.file_types {
+                for extension in &ft.extensions {
+                    claims.push(("file-types.extensions", extension.clone()));
+                }
+                claims.push(("file-types.mime-type", ft.mime_type.clone()));
+                if let Some(progid) = &ft.progid {
+                    claims.push(("file-types.progid", progid.to_ascii_lowercase()));
+                }
+                if let Some(uti) = &ft.uti {
+                    claims.push(("file-types.uti", uti.identifier.to_ascii_lowercase()));
                 }
             }
             let conflicting = self.conflicting_products(id);
@@ -2627,7 +2979,367 @@ impl Config {
                 })?;
             }
         }
-        self.validate_desktop_and_files(id, p)
+        self.validate_desktop_and_files(id, p)?;
+        self.validate_file_types(id, p)
+    }
+
+    /// `[[product.<id>.file-types]]`: each opened by the product's `gui`
+    /// program, which needs its menu entry (`[product.<id>.desktop]`); names,
+    /// extensions, media types, magic, ProgIDs, UTIs and verbs well formed,
+    /// none claimed twice in the product; the identity and the icons each
+    /// platform the product installs on needs, and none it doesn't.
+    fn validate_file_types(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        if p.file_types.is_empty() {
+            return Ok(());
+        }
+        let gui = p.gui_program();
+        let linux = p
+            .outputs
+            .iter()
+            .any(|o| matches!(o, Output::Deb | Output::Rpm | Output::Pacman));
+        let msi = p.outputs.contains(&Output::Msi);
+        let macos = p.outputs.iter().any(|o| o.is_macos());
+        let mut extensions: BTreeSet<&str> = BTreeSet::new();
+        let mut mime_types: BTreeSet<&str> = BTreeSet::new();
+        let mut progids: BTreeSet<String> = BTreeSet::new();
+        let mut utis: BTreeSet<String> = BTreeSet::new();
+        // The menu entry has one Exec: every type's default verb starts
+        // the program alike. Other verbs of one id say the same.
+        let mut default_arguments: Option<Vec<String>> = None;
+        let mut verbs_by_id: BTreeMap<String, Verb> = BTreeMap::new();
+        for (n, ft) in p.file_types.iter().enumerate() {
+            let at = |key: &str, why: &str| {
+                DistError::Config(format!("product.{id}.file-types[{n}].{key}: {why}"))
+            };
+            match (&ft.program, &gui) {
+                (Some(program), _) if !p.programs().iter().any(|q| q.executable == *program) => {
+                    return Err(at(
+                        "program",
+                        &format!("{program:?} names no program of the product"),
+                    ));
+                }
+                (_, None) => {
+                    return Err(at(
+                        "program",
+                        "a file type opens in the product's gui program (its menu entry, its app bundle, its Windows verbs), and the product has none",
+                    ));
+                }
+                (Some(program), Some(gui)) if *program != gui.executable => {
+                    return Err(at(
+                        "program",
+                        &format!(
+                            "{program:?} isn't the product's gui program ({:?}), the one whose menu entry and app bundle a file type opens in",
+                            gui.executable
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+            if p.desktop.is_none() {
+                return Err(at(
+                    "program",
+                    "the gui program's menu entry opens it: set [product.<id>.desktop]",
+                ));
+            }
+            if !is_type_label(&ft.name) {
+                return Err(at(
+                    "name",
+                    "1 to 128 characters of text, without control characters or $ [ ] { } % \" \\ ; < > &",
+                ));
+            }
+            if ft.extensions.is_empty() {
+                return Err(at("extensions", "at least one"));
+            }
+            for extension in &ft.extensions {
+                if !is_extension(extension) {
+                    return Err(at(
+                        "extensions",
+                        &format!(
+                            "{extension:?} must be [a-z0-9][a-z0-9+_-]*, at most 16 bytes, without the dot"
+                        ),
+                    ));
+                }
+                if ACTIVE_EXTENSIONS.contains(&extension.as_str()) {
+                    return Err(at(
+                        "extensions",
+                        &format!(
+                            "{extension:?} is a type Windows runs or acts on (a program, a script, a shortcut, an installer): no product may claim it"
+                        ),
+                    ));
+                }
+                if !extensions.insert(extension) {
+                    return Err(at(
+                        "extensions",
+                        &format!("{extension:?} is claimed twice in the product"),
+                    ));
+                }
+            }
+            if !is_mime_type(&ft.mime_type) || ft.mime_type != ft.mime_type.to_ascii_lowercase() {
+                return Err(at(
+                    "mime-type",
+                    &format!(
+                        "{:?} must be a lowercase media type (type/subtype)",
+                        ft.mime_type
+                    ),
+                ));
+            }
+            let subtype = ft
+                .mime_type
+                .split_once('/')
+                .map(|(_, s)| s)
+                .unwrap_or_default();
+            if ft.role == FileTypeRole::Owner
+                && !["x-", "vnd.", "prs."]
+                    .iter()
+                    .any(|tree| subtype.starts_with(tree))
+            {
+                return Err(at(
+                    "mime-type",
+                    &format!(
+                        "{:?}: an owner defines its type everywhere, so only a type of its own: a vendor (vnd.), personal (prs.) or unregistered (x-) subtype; claim a registered type as an editor or viewer",
+                        ft.mime_type
+                    ),
+                ));
+            }
+            if !mime_types.insert(&ft.mime_type)
+                || p.desktop
+                    .as_ref()
+                    .is_some_and(|d| d.mime_types.contains(&ft.mime_type))
+            {
+                return Err(at(
+                    "mime-type",
+                    &format!(
+                        "{:?} is claimed twice in the product (a file type, or desktop.mime-types)",
+                        ft.mime_type
+                    ),
+                ));
+            }
+            if !ft.magic.is_empty() && ft.role != FileTypeRole::Owner {
+                return Err(at(
+                    "magic",
+                    "only an owner defines how its type's content looks",
+                ));
+            }
+            if ft.magic.len() > 8 {
+                return Err(at("magic", "at most 8 matches"));
+            }
+            for magic in &ft.magic {
+                let ok = magic.offset <= 65535
+                    && match (&magic.string, &magic.bytes) {
+                        (Some(text), None) => {
+                            (1..=64).contains(&text.len())
+                                && text
+                                    .bytes()
+                                    .all(|b| (0x20..0x7F).contains(&b) && b != b'\\')
+                        }
+                        (None, Some(hex)) => {
+                            (2..=128).contains(&hex.len())
+                                && hex.len() % 2 == 0
+                                && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                        }
+                        _ => false,
+                    };
+                if !ok {
+                    return Err(at(
+                        "magic",
+                        "each an offset (at most 65535) and either string (1 to 64 printable ASCII characters, no \\) or bytes (1 to 64 bytes of hex)",
+                    ));
+                }
+            }
+            // Icons, for exactly the platforms the product installs on.
+            let mut svgs = 0;
+            for icon in &ft.linux_icons {
+                let extension = extension_of(icon);
+                if !is_relative_path(icon) || !matches!(extension.as_str(), "png" | "svg") {
+                    return Err(at(
+                        "linux-icons",
+                        &format!(
+                            "{} must be a .png or .svg path relative to seaworthy.toml (no `..`, no `$`)",
+                            icon.display()
+                        ),
+                    ));
+                }
+                svgs += usize::from(extension == "svg");
+            }
+            if svgs > 1 {
+                return Err(at("linux-icons", "at most one SVG"));
+            }
+            match (
+                ft.role == FileTypeRole::Owner && linux,
+                ft.linux_icons.is_empty(),
+            ) {
+                (true, true) => {
+                    return Err(at(
+                        "linux-icons",
+                        "required with a Linux package: the type's document icons (shared-mime-info names them for the type)",
+                    ));
+                }
+                (false, false) => {
+                    return Err(at(
+                        "linux-icons",
+                        "set, but only an owner's Linux package installs the type's icons (and this product has none, or isn't the type's owner)",
+                    ));
+                }
+                _ => {}
+            }
+            for (key, path, wanted, needed, platform) in [
+                ("windows-icon", &ft.windows_icon, "ico", msi, "msi"),
+                ("macos-icon", &ft.macos_icon, "icns", macos, "macOS"),
+            ] {
+                match (path, needed) {
+                    (None, true) => {
+                        let article = if platform == "msi" { "an" } else { "a" };
+                        return Err(at(
+                            key,
+                            &format!("required with {article} {platform} output"),
+                        ));
+                    }
+                    (Some(_), false) => {
+                        return Err(at(
+                            key,
+                            &format!("set, but the product has no {platform} output"),
+                        ));
+                    }
+                    (Some(icon), true)
+                        if !is_relative_path(icon) || extension_of(icon) != wanted =>
+                    {
+                        return Err(at(
+                            key,
+                            &format!(
+                                "{} must be a .{wanted} path relative to seaworthy.toml (no `..`, no `$`)",
+                                icon.display()
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            match (&ft.progid, msi) {
+                (None, true) => return Err(at("progid", "required with an msi output")),
+                (Some(_), false) => {
+                    return Err(at("progid", "set, but the product has no msi output"));
+                }
+                (Some(progid), true) => {
+                    if !is_progid(progid) {
+                        return Err(at(
+                            "progid",
+                            &format!(
+                                "{progid:?} must be Vendor.Type or Vendor.Type.Version: two or three dot-separated parts of letters and digits, each starting with a letter (a version may be digits alone), at most 39 characters"
+                            ),
+                        ));
+                    }
+                    if !progids.insert(progid.to_ascii_lowercase()) {
+                        return Err(at(
+                            "progid",
+                            &format!("{progid:?} is claimed twice in the product"),
+                        ));
+                    }
+                }
+                (None, false) => {}
+            }
+            match (&ft.uti, macos) {
+                (None, true) => return Err(at("uti", "required with a macOS output")),
+                (Some(_), false) => {
+                    return Err(at("uti", "set, but the product has no macOS output"));
+                }
+                (Some(uti), true) => {
+                    if !is_bundle_id(&uti.identifier) {
+                        return Err(at(
+                            "uti.identifier",
+                            "a reverse-DNS identifier (com.example.archive): two or more dot-separated labels of [A-Za-z0-9-]",
+                        ));
+                    }
+                    let lower = uti.identifier.to_ascii_lowercase();
+                    if ft.role == FileTypeRole::Owner
+                        && (lower.starts_with("public.") || lower.starts_with("com.apple."))
+                    {
+                        return Err(at(
+                            "uti.identifier",
+                            "an owner exports its type, and public.* and com.apple.* are Apple's: claim one of them as an editor or viewer",
+                        ));
+                    }
+                    if !utis.insert(lower) {
+                        return Err(at(
+                            "uti.identifier",
+                            &format!("{:?} is claimed twice in the product", uti.identifier),
+                        ));
+                    }
+                    let mut seen = BTreeSet::new();
+                    if uti.conforms_to.is_empty()
+                        || uti
+                            .conforms_to
+                            .iter()
+                            .any(|c| !is_bundle_id(c) || !seen.insert(c.as_str()))
+                    {
+                        return Err(at(
+                            "uti.conforms-to",
+                            "at least one type identifier (public.data), each once",
+                        ));
+                    }
+                }
+                (None, false) => {}
+            }
+            let verbs = ft.verbs();
+            if verbs.len() > 8 {
+                return Err(at("verbs", "at most 8"));
+            }
+            if verbs.iter().filter(|v| v.default).count() != 1 {
+                return Err(at("verbs", "exactly one is the default"));
+            }
+            for (i, verb) in verbs.iter().enumerate() {
+                if !is_verb_id(&verb.id)
+                    || verbs
+                        .get(..i)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|v| v.id == verb.id)
+                {
+                    return Err(at(
+                        "verbs",
+                        &format!(
+                            "{:?} must be an id of [a-z][a-z0-9-]*, at most 32 bytes, each once",
+                            verb.id
+                        ),
+                    ));
+                }
+                if !is_type_label(&verb.label) {
+                    return Err(at(
+                        "verbs",
+                        &format!(
+                            "{}'s label must be 1 to 128 characters of text, without control characters or $ [ ] {{ }} % \" \\ ; < > &",
+                            verb.id
+                        ),
+                    ));
+                }
+                verb_arguments(&verb.arguments)
+                    .map_err(|why| at("verbs", &format!("{}: {why}", verb.id)))?;
+                if verb.default {
+                    match &default_arguments {
+                        Some(arguments) if *arguments != verb.arguments => {
+                            return Err(at(
+                                "verbs",
+                                &format!(
+                                    "{}: the menu entry has one Exec, so every file type's default verb takes the same arguments ({arguments:?})",
+                                    verb.id
+                                ),
+                            ));
+                        }
+                        _ => default_arguments = Some(verb.arguments.clone()),
+                    }
+                } else if let Some(other) = verbs_by_id.insert(verb.id.clone(), verb.clone())
+                    && (other.label != verb.label || other.arguments != verb.arguments)
+                {
+                    return Err(at(
+                        "verbs",
+                        &format!(
+                            "{}: another file type's verb of that id says otherwise; one id, one action (its file manager entry is one)",
+                            verb.id
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `[product.<id>.msi]`: only with an `msi` output; a per-user scope

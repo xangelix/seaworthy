@@ -35,10 +35,13 @@
 //! Desktop Entry Specification 1.5, starting the `gui` program), and its
 //! hicolor icons; each program's command (`linux.command`, or a
 //! `[[programs]]` entry's) adds `/usr/bin/<command>`, a link to its
-//! launcher. Those directories
-//! belong to the system (the icon theme, the menu), so the package owns
-//! only its files there; the distributions' triggers refresh the menu and
-//! the icon cache.
+//! launcher. Its file types (`[[product.<id>.file-types]]`) add the
+//! menu entry's `MimeType` and `Exec` (the default verb), the owned types'
+//! shared-mime-info package ([`mime_info`]) and document icons, and a KDE
+//! service menu for each other verb ([`service_menus`]). Those directories
+//! belong to the system (the icon theme, the menu, the MIME database), so
+//! the package owns only its files there; the distributions' triggers
+//! refresh the menu, the MIME database and the icon cache.
 //!
 //! The package owns `/opt/<vendor>` and every directory below it that
 //! holds its files, so removal leaves nothing behind (rpm removes only
@@ -160,17 +163,31 @@ pub fn linux_package(
     };
     if let (Some(desktop), Some(gui)) = (&product.desktop, product.gui_program()) {
         let app_id = desktop.app_id(config, id);
-        let icon = (!layout.desktop_files.is_empty()).then_some(app_id.as_str());
+        let icon = layout
+            .desktop_files
+            .iter()
+            .any(|f| f.role == crate::layout::Role::Icon)
+            .then_some(app_id.as_str());
+        let launcher = launcher_path(&gui.executable)?;
         files.push(PackagedFile {
             dst: format!("/usr/share/applications/{app_id}.desktop"),
             mode: 0o644,
-            source: Source::Generated(desktop_entry(
-                product,
-                desktop,
-                &launcher_path(&gui.executable)?,
-                icon,
-            )),
+            source: Source::Generated(desktop_entry(product, desktop, &launcher, icon)),
         });
+        if let Some(xml) = mime_info(product) {
+            files.push(PackagedFile {
+                dst: format!("{MIME_PACKAGES_DIR}/{app_id}.xml"),
+                mode: 0o644,
+                source: Source::Generated(xml),
+            });
+        }
+        for (verb, text) in service_menus(product, &launcher, icon) {
+            files.push(PackagedFile {
+                dst: format!("{SERVICE_MENUS_DIR}/{app_id}-{verb}.desktop"),
+                mode: 0o644,
+                source: Source::Generated(text),
+            });
+        }
     }
     let mut links = Vec::new();
     for program in product.programs() {
@@ -294,12 +311,53 @@ pub fn linux_package(
     })
 }
 
+/// Where shared-mime-info reads packages' type definitions:
+/// `update-mime-database`, which each distribution's shared-mime-info runs
+/// from its package manager's trigger or hook when a package changes this
+/// directory, compiles them into the database.
+pub const MIME_PACKAGES_DIR: &str = "/usr/share/mime/packages";
+
+/// Where KDE's file manager (KF 5.85 and later, KF 6) reads the service
+/// menus packages install.
+pub const SERVICE_MENUS_DIR: &str = "/usr/share/kio/servicemenus";
+
+/// Every media type the menu entry opens: `desktop.mime-types`, then each
+/// file type's.
+fn mime_types(product: &Product, desktop: &Desktop) -> Vec<String> {
+    desktop
+        .mime_types
+        .iter()
+        .cloned()
+        .chain(product.file_types.iter().map(|ft| ft.mime_type.clone()))
+        .collect()
+}
+
+/// A verb's arguments as a desktop entry's `Exec` takes them after the
+/// program: the file placeholder as `%f` (one file per launch). `config`
+/// keeps every other argument to characters no `Exec` quoting rule
+/// touches, and puts `--` before the file.
+fn exec_arguments(arguments: &[String]) -> String {
+    arguments
+        .iter()
+        .map(|a| {
+            if a == crate::config::PATH_PLACEHOLDER {
+                "%f"
+            } else {
+                a.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// A desktop product's menu entry (Desktop Entry Specification 1.5):
 /// `exec`, the launcher's absolute install path (its characters need no
 /// quoting: `config` limits the vendor, product id and executable to
-/// `[A-Za-z0-9._-]`), taking the file it's opened with (`%f`, one per
-/// launch) when the entry names media types, and the icon name when the
-/// package ships icons.
+/// `[A-Za-z0-9._-]`), and, when the entry opens media types (its
+/// `MimeType`: `desktop.mime-types` and every file type's), the default
+/// verb's arguments with the file it's opened with (`-- %f`: one file per
+/// launch, after `--` so it's never read as an option); the icon name when
+/// the package ships icons.
 #[must_use]
 pub fn desktop_entry(
     product: &Product,
@@ -310,10 +368,17 @@ pub fn desktop_entry(
     let mut text = String::from("[Desktop Entry]\nType=Application\nVersion=1.5\n");
     text.push_str(&format!("Name={}\n", entry_string(&product.display_name)));
     text.push_str(&format!("Comment={}\n", entry_string(&product.description)));
-    let files = if desktop.mime_types.is_empty() {
-        ""
+    let mime_types = mime_types(product, desktop);
+    let files = if mime_types.is_empty() {
+        String::new()
     } else {
-        " %f"
+        // Every file type's default verb takes the same arguments
+        // (`config`); without one, the file after `--`.
+        let arguments = product.file_types.first().map_or_else(
+            || crate::config::default_verbs().remove(0).arguments,
+            |ft| ft.default_verb().arguments,
+        );
+        format!(" {}", exec_arguments(&arguments))
     };
     text.push_str(&format!("Exec={exec}{files}\nTryExec={exec}\n"));
     if let Some(icon) = icon {
@@ -325,13 +390,124 @@ pub fn desktop_entry(
         let keywords: Vec<String> = desktop.keywords.iter().map(|k| entry_string(k)).collect();
         text.push_str(&format!("Keywords={};\n", keywords.join(";")));
     }
-    if !desktop.mime_types.is_empty() {
-        text.push_str(&format!("MimeType={};\n", desktop.mime_types.join(";")));
+    if !mime_types.is_empty() {
+        text.push_str(&format!("MimeType={};\n", mime_types.join(";")));
     }
     if let Some(class) = &desktop.wm_class {
         text.push_str(&format!("StartupWMClass={class}\n"));
     }
     text
+}
+
+/// The product's shared-mime-info package (`<app-id>.xml` in
+/// [`MIME_PACKAGES_DIR`]): each type it owns, with its name, a glob per
+/// extension and its magic; `None` when it owns none (an editor's or a
+/// viewer's types are defined by their owners). Each type's icon is
+/// shared-mime-info's default for it (the type with `/` as `-`), which the
+/// package installs in the hicolor theme's `mimetypes` context.
+#[must_use]
+pub fn mime_info(product: &Product) -> Option<String> {
+    let owned: Vec<&crate::config::FileType> = product
+        .file_types
+        .iter()
+        .filter(|ft| ft.role == crate::config::FileTypeRole::Owner)
+        .collect();
+    if owned.is_empty() {
+        return None;
+    }
+    let mut text = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n",
+    );
+    for ft in owned {
+        text.push_str(&format!(
+            "  <mime-type type=\"{}\">\n",
+            xml_text(&ft.mime_type)
+        ));
+        text.push_str(&format!("    <comment>{}</comment>\n", xml_text(&ft.name)));
+        for extension in &ft.extensions {
+            text.push_str(&format!(
+                "    <glob pattern=\"*.{}\"/>\n",
+                xml_text(extension)
+            ));
+        }
+        if !ft.magic.is_empty() {
+            text.push_str("    <magic priority=\"50\">\n");
+            for magic in &ft.magic {
+                // A string as itself; bytes as shared-mime-info's \xHH
+                // escapes (config keeps `\` out of a string).
+                let value = match (&magic.string, &magic.bytes) {
+                    (Some(text), _) => xml_text(text),
+                    (None, Some(hex)) => hex
+                        .as_bytes()
+                        .chunks(2)
+                        .map(|pair| {
+                            format!("\\x{}", String::from_utf8_lossy(pair).to_ascii_lowercase())
+                        })
+                        .collect(),
+                    (None, None) => continue,
+                };
+                text.push_str(&format!(
+                    "      <match type=\"string\" offset=\"{}\" value=\"{value}\"/>\n",
+                    magic.offset
+                ));
+            }
+            text.push_str("    </magic>\n");
+        }
+        text.push_str("  </mime-type>\n");
+    }
+    text.push_str("</mime-info>\n");
+    Some(text)
+}
+
+/// KDE service menus for the file types' verbs other than the default
+/// (the menu entry's): `(verb id, file)`, one per verb id (`config` makes
+/// one id mean one action), each for every type that has it. A service
+/// menu's `Exec` follows the desktop entry's rules (the launcher, the
+/// verb's arguments, `%f` after `--`). desktop-file-validate doesn't read
+/// `Type=Service` files, so they're generated from validated parts only.
+/// Nemo's actions aren't written: Nemo substitutes the file into a command
+/// line it then splits as a shell would, and documents no quoting of it.
+#[must_use]
+pub fn service_menus(product: &Product, exec: &str, icon: Option<&str>) -> Vec<(String, String)> {
+    let mut verbs: std::collections::BTreeMap<String, (crate::config::Verb, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for ft in &product.file_types {
+        for verb in ft.verbs().into_iter().filter(|v| !v.default) {
+            verbs
+                .entry(verb.id.clone())
+                .or_insert_with(|| (verb, Vec::new()))
+                .1
+                .push(ft.mime_type.clone());
+        }
+    }
+    verbs
+        .into_iter()
+        .map(|(id, (verb, mime_types))| {
+            let mut text = String::from("[Desktop Entry]\nType=Service\n");
+            text.push_str(&format!("MimeType={};\n", mime_types.join(";")));
+            text.push_str(&format!("Actions={id};\n"));
+            text.push_str("X-KDE-ServiceTypes=KonqPopupMenu/Plugin\n\n");
+            text.push_str(&format!("[Desktop Action {id}]\n"));
+            text.push_str(&format!("Name={}\n", entry_string(&verb.label)));
+            if let Some(icon) = icon {
+                text.push_str(&format!("Icon={icon}\n"));
+            }
+            text.push_str(&format!(
+                "Exec={exec} {}\n",
+                exec_arguments(&verb.arguments)
+            ));
+            (id, text)
+        })
+        .collect()
+}
+
+/// `text` escaped for XML (an element's text or an attribute's value).
+fn xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Runs `desktop-file-validate` (desktop-file-utils) over the package's

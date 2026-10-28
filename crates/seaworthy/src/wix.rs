@@ -161,6 +161,13 @@
 //!   DWORD 1 named for each excluded program's executable under
 //!   `…\Windows Error Reporting\ExcludedApplications` ([`WER_EXCLUDED_KEY`]),
 //!   in `HKLM`, or `HKMU` for a package that may install per user.
+//! - **File types** (`[[product.<id>.file-types]]`): each type's ProgID
+//!   (its name, `DefaultIcon` the installed `<ProgID>.ico`, its verbs'
+//!   labels and commands: the `gui` launcher, the file as `"%1"` after
+//!   `--`) and each extension's `OpenWithProgids` entry, plus an owner's
+//!   extension default, `Content Type` and MIME database entry: plain HKCR
+//!   values (HKLM's or HKCU's classes, as the install's scope is), as WiX's
+//!   non-advertised `<ProgId>` compiles, so no advertising table is used.
 //! - **Data files** (`[[product.<id>.files]]`) in their subdirectories of
 //!   the install directory, one component each like every file.
 //! - **Programs and Features:** the entry can't be modified
@@ -1309,9 +1316,30 @@ pub fn wxs(
         ),
     );
 
-    // The shortcuts start the gui program's launcher.
+    // The shortcuts and the file types' verbs start the gui program's
+    // launcher.
     let gui = product.gui_program().map(|p| p.executable);
     let mut launcher_id = None;
+    // Every file's install path, role and File id (as the loop below
+    // names it).
+    let file_ids: Vec<(String, Role, String)> = layout
+        .files
+        .iter()
+        .zip(&relatives)
+        .enumerate()
+        .map(|(n, (file, relative))| {
+            (
+                file.install_path.clone(),
+                file.role.clone(),
+                identifier("f", relative, n),
+            )
+        })
+        .collect();
+    let gui_launcher_id = file_ids
+        .iter()
+        .zip(&layout.files)
+        .find(|(_, file)| file.role == Role::Launcher && file.program == gui)
+        .map(|((_, _, id), _)| id.clone());
     for (n, (file, relative)) in layout.files.iter().zip(&relatives).enumerate() {
         let file_id = identifier("f", relative, n);
         let component_id = identifier("c", relative, n);
@@ -1588,6 +1616,141 @@ pub fn wxs(
                     xml(&registry_key)
                 ),
             );
+            line(6, "</Component>");
+        }
+    }
+    // The file types: each its ProgID with its document icon and verbs,
+    // offered for each extension (OpenWithProgids), and an owner's the
+    // extension's default, content type and MIME database entry. Plain
+    // HKCR registry values, which Windows Installer writes under
+    // HKLM\Software\Classes for a machine-wide install and
+    // HKCU\Software\Classes for a per-user one: what WiX's non-advertised
+    // <ProgId> compiles to (Compiler_Package.cs ParseProgIdElement), so the
+    // ProgId, Extension, Verb and MIME tables (advertising) stay empty.
+    if !product.file_types.is_empty() {
+        let gui = gui_launcher_id.clone().ok_or_else(|| {
+            DistError::Config(format!(
+                "product {id}'s Windows layout has no gui launcher for its file types"
+            ))
+        })?;
+        for (n, ft) in product.file_types.iter().enumerate() {
+            let progid = ft.progid.as_deref().ok_or_else(|| {
+                DistError::Config(format!("product.{id}.file-types[{n}]: no progid"))
+            })?;
+            let icon = file_ids
+                .iter()
+                .find(|(path, role, _)| {
+                    *role == Role::DocumentIcon && path.ends_with(&format!("\\{progid}.ico"))
+                })
+                .map(|(_, _, file)| file.clone())
+                .ok_or_else(|| {
+                    DistError::Config(format!(
+                        "product {id}'s Windows layout has no document icon for {progid}"
+                    ))
+                })?;
+            let component = format!("FileType{n:03}");
+            line(
+                6,
+                &format!(
+                    "<Component Id=\"{component}\" Directory=\"InstallDir\" Guid=\"{}\" Bitness=\"always64\">",
+                    component_guid(&format!("FileType\0{progid}"))
+                ),
+            );
+            let value = |key: &str, name: Option<&str>, value: &str, key_path: bool| {
+                format!(
+                    "<RegistryValue Root=\"HKCR\" Key=\"{}\"{} Type=\"string\" Value=\"{}\"{} />",
+                    xml(key),
+                    name.map(|n| format!(" Name=\"{}\"", xml(n)))
+                        .unwrap_or_default(),
+                    xml(value),
+                    if key_path { " KeyPath=\"yes\"" } else { "" }
+                )
+            };
+            line(8, &value(progid, None, &ft.name, true));
+            line(
+                8,
+                &value(
+                    &format!("{progid}\\DefaultIcon"),
+                    None,
+                    &format!("\"[#{icon}]\",0"),
+                    false,
+                ),
+            );
+            let verbs = ft.verbs();
+            line(
+                8,
+                &value(
+                    &format!("{progid}\\shell"),
+                    None,
+                    &ft.default_verb().id,
+                    false,
+                ),
+            );
+            for verb in &verbs {
+                let key = format!("{progid}\\shell\\{}", verb.id);
+                line(8, &value(&key, None, &verb.label, false));
+                // The file in quotes, after --; config keeps every other
+                // argument to characters needing no quotes.
+                let arguments: Vec<&str> = verb
+                    .arguments
+                    .iter()
+                    .map(|a| {
+                        if a == crate::config::PATH_PLACEHOLDER {
+                            "\"%1\""
+                        } else {
+                            a.as_str()
+                        }
+                    })
+                    .collect();
+                line(
+                    8,
+                    &value(
+                        &format!("{key}\\command"),
+                        None,
+                        &format!("\"[#{gui}]\" {}", arguments.join(" ")),
+                        false,
+                    ),
+                );
+            }
+            for extension in &ft.extensions {
+                // The shell reads OpenWithProgids' value names alone; the
+                // data is the type's name, since Windows Installer writes
+                // no empty string.
+                line(
+                    8,
+                    &value(
+                        &format!(".{extension}\\OpenWithProgids"),
+                        Some(progid),
+                        &ft.name,
+                        false,
+                    ),
+                );
+                if ft.role == crate::config::FileTypeRole::Owner {
+                    line(8, &value(&format!(".{extension}"), None, progid, false));
+                    line(
+                        8,
+                        &value(
+                            &format!(".{extension}"),
+                            Some("Content Type"),
+                            &ft.mime_type,
+                            false,
+                        ),
+                    );
+                }
+            }
+            if let (crate::config::FileTypeRole::Owner, Some(first)) =
+                (ft.role, ft.extensions.first())
+            {
+                line(
+                    8,
+                    &value(
+                        &format!("MIME\\Database\\Content Type\\{}", ft.mime_type),
+                        Some("Extension"),
+                        &format!(".{first}"),
+                        false,
+                    ),
+                );
+            }
             line(6, "</Component>");
         }
     }

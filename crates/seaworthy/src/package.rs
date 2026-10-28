@@ -1427,7 +1427,7 @@ fn prepare_windows(
     for file in &mut layout.files {
         // Data files are shipped as read: never stamped or signed (layout
         // refused any carrying code).
-        if matches!(file.role, Role::Asset | Role::Icon) {
+        if matches!(file.role, Role::Asset | Role::Icon | Role::DocumentIcon) {
             continue;
         }
         let name = file
@@ -1451,7 +1451,8 @@ fn prepare_windows(
                 | Role::BundleInfo
                 | Role::CodeSignature
                 | Role::Uninstaller
-                | Role::License,
+                | Role::License
+                | Role::DocumentIcon,
                 _,
             ) => None,
         };

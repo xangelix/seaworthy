@@ -160,7 +160,8 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `windows-directory` | with `msi` | The Windows install directory under the vendor's (default: the display name's last word). It also names the state directory, the policy registry key and the Group Policy namespace, so it must never follow a display-name change. |
 | `conflicts` | no | What this product can't be installed beside. A product id of this `seaworthy.toml`: on every platform both build for, the Linux packages conflict (deb `Conflicts:`, rpm `Conflicts:`, pacman `conflict`),, the MSI refuses to install while the other's MSI is installed (found by its UpgradeCode, never removed), and the macOS pkg while the other's pkg is (its receipt); it holds both ways, so listing it on one product is enough. Anything else is a plain Linux package name (`[a-z0-9][a-z0-9.-]+`), which the Linux packages alone conflict with (so a Linux package must be an output); never a package this file builds (name its product) or one `linux.replaces` names. Unlike `linux.replaces`, nothing is replaced: an upgrade never swaps one product for another. Products that conflict may share a command, `windows-directory`, `desktop.app-id` and their shortcuts' name, which only one installation holds (never `macos.bundle-id`); no product conflicts with itself. |
 | `fips` | no | Whether this product's cores carry the AWS-LC FIPS module (default: `defaults.fips`): `verify` applies the FIPS checks to its binaries alone, so one `seaworthy.toml` can list a product per crypto build (`trove-fips` with `fips = true`, `trove-portable` with `fips = false`), each program's `features` choosing the build. |
-| `msi` | no | `[product.<id>.msi]`: who the MSI installs for, `PATH`, Windows Error Reporting ([below](#productidmsi)). |
+| `msi` | no | `[product.<id>.msi]`: who the MSI installs for, a licence page, `PATH`, Windows Error Reporting ([below](#productidmsi)). |
+| `file-types` | no | `[[product.<id>.file-types]]`: the document types the `gui` program opens, registered on every platform ([below](#productidfile-types)). |
 | `upgrade-code` | no | The MSI's UpgradeCode, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, which ties every release together. Default: derived from the vendor and the id; set it to keep an existing code before renaming either, and to the code a product's earlier MSIs carry when another tool built them ([packaging.md](packaging.md#migrating-an-existing-product)). `seaworthy check` notes an `msi` product without one. |
 | `updates.default` | no | The install-time update policy: `auto` (the default), `notify` or `off`. |
 | `sidecars.windows` | no | File-name globs (`*` only) matched in each Windows core build: each matches exactly one file, identical in every build, shipped beside the cores (the FIPS module's DLL). |
@@ -271,7 +272,7 @@ drop every directive. See [services.md](services.md) for what each platform's re
 | `desktop-shortcut` | `false` | A shortcut on every user's desktop. |
 | `categories` | `["Utility"]` | The `.desktop` entry's `Categories`: at least one freedesktop main category. |
 | `keywords` | `[]` | The `.desktop` entry's `Keywords`. |
-| `mime-types` | `[]` | The `.desktop` entry's `MimeType`: the media types the app opens (`["inode/directory"]` for folders), which file managers offer it for. With any, `Exec` takes the file it's opened with (`%f`: one per launch, so an app that takes one path starts once per file picked). |
+| `mime-types` | `[]` | The `.desktop` entry's `MimeType`: the media types the app opens (`["inode/directory"]` for folders), which file managers offer it for, beside its file types' (`[[product.<id>.file-types]]`, which define their own). With any, `Exec` takes the file it's opened with after `--` (`-- %f`: one per launch, so an app that takes one path starts once per file picked, and the path is never read as an option). |
 | `wm-class` | — | `StartupWMClass`: the window class (X11) or app id (Wayland) the app's windows carry. |
 
 `[product.<id>.macos]` (required with a macOS output; `icon`, `category` and `localizations`
@@ -302,6 +303,46 @@ wer-exclude = ["TroveGui"]      # Windows Error Reporting leaves this program al
 | `license` | — | An RTF file (relative to `seaworthy.toml`, inside its directory, starting `{\rtf`, at most 1 MiB): an interactive install first shows it, and installs only once the person installing accepts it. With `install-scope = "either"` the same dialog offers the scope. A quiet or basic-UI install (`msiexec /qn`, `/qb`, the update helper's) shows no dialog, as Windows Installer does: accepting the licence is then the deployer's business. |
 | `path` | `false` | Append the install directory to `PATH`, the system's for a machine-wide install and the user's for a per-user one, and take it out again on removal, so the product's `cli` programs run by name (every program of the product installs in that one directory, so each runs by its executable's name). Needs a `cli` program. |
 | `wer-exclude` | `[]` | Programs, by executable, that Windows Error Reporting leaves alone (no crash report, no "stopped working" dialog): a value under `ExcludedApplications`, in `HKLM` for a machine-wide install and `HKCU` for a per-user one. Windows matches the executable's file name, so the exclusion covers any program of that name. Each a program of the product, once. |
+
+`[[product.<id>.file-types]]`: a document type the product's `gui` program opens (it needs
+`[product.<id>.desktop]`, the program's menu entry), registered by each installer the product
+builds ([packaging.md](packaging.md#file-types)):
+
+```toml
+[[product.trove.file-types]]
+name = "Acme Trove archive"
+extensions = ["trove"]
+mime-type = "application/x-acme-trove"
+role = "owner"                                  # the default
+magic = [{ offset = 0, string = "TROVE" }]       # or { offset = 0, bytes = "89545256" }
+linux-icons = ["icons/trove-doc-48.png", "icons/trove-doc.svg"]
+windows-icon = "icons/trove-doc.ico"
+macos-icon = "icons/trove-doc.icns"
+progid = "Acme.TroveArchive"
+uti = { identifier = "com.example.trove-archive", conforms-to = ["public.data", "public.archive"] }
+verbs = [
+    { id = "open", label = "Open", default = true, arguments = ["--", "{path}"] },
+    { id = "extract", label = "Extract here", arguments = ["--extract", "--", "{path}"] },
+]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `name` | required | The type's name as people see it: 1 to 128 characters, none of `$ [ ] { } % " \ ; < > &`. |
+| `extensions` | required | File name extensions without the dot, `[a-z0-9][a-z0-9+_-]*`, at most 16 bytes, each claimed once in the product. Never one Windows runs or acts on (`exe`, `lnk`, `ps1`, `msi`, `url`, …). |
+| `mime-type` | required | The media type, lowercase. An owner's is its own: a vendor (`vnd.`), personal (`prs.`) or unregistered (`x-`) subtype. |
+| `role` | `"owner"` | `owner`: the program's own format, which it defines everywhere (the shared-mime-info definition with its magic and icons, the extension's default ProgID, content type and MIME database entry on Windows, an exported UTI and `LSHandlerRank = Owner` on macOS). `editor`, `viewer`: a type something else defines, which the program is offered for (`MimeType`, `OpenWithProgids`, an imported UTI; macOS's `Editor` at `Default`, `Viewer` at `Alternate`), never its default by itself. |
+| `program` | the `gui` program | The program that opens it, by executable: only the `gui` program (the one with a menu entry and an app bundle). |
+| `magic` | `[]` | An owner's shared-mime-info content matches (at most 8, any one matching): `offset` (at most 65535) and `string` (1 to 64 printable ASCII characters, no `\`) or `bytes` (1 to 64 bytes of hex). |
+| `linux-icons` | — | The document icons (an owner's, required with a Linux package): square PNGs of the hicolor sizes, one per size, and at most one SVG. |
+| `windows-icon` | — | The `.ico` the ProgID shows (required with an `msi` output). |
+| `macos-icon` | — | The `.icns` the bundle shows for the type (required with a macOS output). |
+| `progid` | — | The Windows ProgID, `Vendor.Type` or `Vendor.Type.Version` (letters and digits, at most 39 characters; required with an `msi` output). |
+| `uti` | — | The macOS type: `identifier`, reverse-DNS (an owner's never `public.*` or `com.apple.*`), and `conforms-to`, at least one UTI (`public.data`). Required with a macOS output. |
+| `verbs` | one, `open`, the default, `["--", "{path}"]` | What the file manager offers: `id` (`[a-z][a-z0-9-]*`), `label`, `default` (exactly one), and `arguments`, which end with `"--", "{path}"` (the file, after `--`, so it's never read as an option), every other one of `[A-Za-z0-9_.,:=+@/-]` (so nothing ever needs quoting). Every file type's default verb takes the same arguments (the menu entry has one `Exec`), and one verb id means one action across them. |
+
+Two products of one `seaworthy.toml` may not claim one extension, media type, ProgID or UTI, unless
+they conflict (`conflicts`: never installed together).
 
 `[[product.<id>.files]]`: a data file, or a directory with everything below it, installed under the
 install root (data only: see [packaging.md](packaging.md#layout)):

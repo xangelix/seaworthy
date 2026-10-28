@@ -979,8 +979,9 @@ fn xml_text(text: &str) -> String {
 /// launcher as its executable, the release as its version
 /// (`CFBundleShortVersionString` is `MAJOR.MINOR.PATCH`, the three integers
 /// Apple allows; `CFBundleVersion` the release sequence, which only grows),
-/// `defaults.macos-minimum` as `LSMinimumSystemVersion`, and the app's
-/// languages as `CFBundleLocalizations`.
+/// `defaults.macos-minimum` as `LSMinimumSystemVersion`, the app's
+/// languages as `CFBundleLocalizations`, and its file types
+/// ([`document_types`]).
 ///
 /// # Errors
 /// [`DistError::Config`] when the product has no `[macos]` section.
@@ -1044,8 +1045,107 @@ pub fn info_plist(
         }
         text.push_str("\t</array>\n");
     }
+    text.push_str(&document_types(product));
     text.push_str("\t<key>NSHighResolutionCapable</key>\n\t<true/>\n</dict>\n</plist>\n");
     Ok(text)
+}
+
+/// The bundle's file types (`[[product.<id>.file-types]]`, each with its
+/// UTI): `CFBundleDocumentTypes` (the type's name, the app's role, its
+/// handler rank, the UTI, the document icon in `Contents/Resources`), and
+/// each UTI's declaration: exported by its owner, imported by an editor or
+/// viewer (the system or another app defines it), with what it conforms to
+/// and its extensions and media type. An owner is the type's `Editor` with
+/// `LSHandlerRank = Owner`, an editor its `Editor` at `Default`, a viewer
+/// its `Viewer` at `Alternate`. macOS hands the app the documents to open
+/// (an Apple event), not a command line: the verbs are Linux's and
+/// Windows'. Empty without file types.
+fn document_types(product: &Product) -> String {
+    use crate::config::FileTypeRole;
+    let types: Vec<(&crate::config::FileType, &crate::config::Uti)> = product
+        .file_types
+        .iter()
+        .filter_map(|ft| ft.uti.as_ref().map(|uti| (ft, uti)))
+        .collect();
+    if types.is_empty() {
+        return String::new();
+    }
+    let string = |indent: &str, key: &str, value: &str| {
+        format!(
+            "{indent}<key>{key}</key>\n{indent}<string>{}</string>\n",
+            xml_text(value)
+        )
+    };
+    let array = |indent: &str, key: &str, values: &[String]| {
+        let mut text = format!("{indent}<key>{key}</key>\n{indent}<array>\n");
+        for value in values {
+            text.push_str(&format!("{indent}\t<string>{}</string>\n", xml_text(value)));
+        }
+        text.push_str(&format!("{indent}</array>\n"));
+        text
+    };
+    let icon = |uti: &crate::config::Uti| format!("{}.icns", uti.identifier);
+    let mut text = String::from("\t<key>CFBundleDocumentTypes</key>\n\t<array>\n");
+    for (ft, uti) in &types {
+        let (role, rank) = match ft.role {
+            FileTypeRole::Owner => ("Editor", "Owner"),
+            FileTypeRole::Editor => ("Editor", "Default"),
+            FileTypeRole::Viewer => ("Viewer", "Alternate"),
+        };
+        text.push_str("\t\t<dict>\n");
+        text.push_str(&string("\t\t\t", "CFBundleTypeIconFile", &icon(uti)));
+        text.push_str(&string("\t\t\t", "CFBundleTypeName", &ft.name));
+        text.push_str(&string("\t\t\t", "CFBundleTypeRole", role));
+        text.push_str(&string("\t\t\t", "LSHandlerRank", rank));
+        text.push_str(&array(
+            "\t\t\t",
+            "LSItemContentTypes",
+            std::slice::from_ref(&uti.identifier),
+        ));
+        text.push_str("\t\t</dict>\n");
+    }
+    text.push_str("\t</array>\n");
+    for (key, owned) in [
+        ("UTExportedTypeDeclarations", true),
+        ("UTImportedTypeDeclarations", false),
+    ] {
+        // Apple declares its own types (public.*, com.apple.*): never
+        // imported again.
+        let declared: Vec<_> = types
+            .iter()
+            .filter(|(ft, uti)| {
+                let apple = ["public.", "com.apple."]
+                    .iter()
+                    .any(|p| uti.identifier.to_ascii_lowercase().starts_with(p));
+                (ft.role == FileTypeRole::Owner) == owned && !(apple && !owned)
+            })
+            .collect();
+        if declared.is_empty() {
+            continue;
+        }
+        text.push_str(&format!("\t<key>{key}</key>\n\t<array>\n"));
+        for (ft, uti) in declared {
+            text.push_str("\t\t<dict>\n");
+            text.push_str(&array("\t\t\t", "UTTypeConformsTo", &uti.conforms_to));
+            text.push_str(&string("\t\t\t", "UTTypeDescription", &ft.name));
+            text.push_str(&string("\t\t\t", "UTTypeIconFile", &icon(uti)));
+            text.push_str(&string("\t\t\t", "UTTypeIdentifier", &uti.identifier));
+            text.push_str("\t\t\t<key>UTTypeTagSpecification</key>\n\t\t\t<dict>\n");
+            text.push_str(&array(
+                "\t\t\t\t",
+                "public.filename-extension",
+                &ft.extensions,
+            ));
+            text.push_str(&array(
+                "\t\t\t\t",
+                "public.mime-type",
+                std::slice::from_ref(&ft.mime_type),
+            ));
+            text.push_str("\t\t\t</dict>\n\t\t</dict>\n");
+        }
+        text.push_str("\t</array>\n");
+    }
+    text
 }
 
 fn run(tool: &Path, args: &[&std::ffi::OsStr], what: &str) -> Result<String, DistError> {

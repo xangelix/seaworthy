@@ -333,7 +333,8 @@ and its security-relevant tables must be exactly what the `.wxs` declares (read 
 `msiinfo export -s`, compared by what each row resolves to, never by the ids a tool chose):
 
 - every custom action (its type, source and command line), service (name, account, start type,
-  type, error control, arguments and the binary it runs), service control, registry value,
+  type, error control, arguments and the binary it runs), service control, registry value (the file
+  types' `HKCR` values among them),
   `MsiLockPermissionsEx` descriptor (the directory or service it's on, and its SDDL), shortcut
   (folder, name, target, arguments, working directory) and environment change (`PATH` alone,
   appended, removed on uninstall, the system's or the user's, the directory it adds and its
@@ -407,6 +408,38 @@ same way
 ([configuration.md](configuration.md#signingtoml)). The ticket is stapled to the dmg or pkg, the
 outermost container; an app copied out of the dmg is checked against the notary service online.
 A dmg isn't byte-reproducible (`hdiutil` writes timestamps and a UUID).
+
+### File types
+
+`[[product.<id>.file-types]]` registers each document type the product's `gui` program opens, as each
+platform's installer registers one:
+
+| | Linux (deb, rpm, pacman) | Windows (MSI) | macOS (the app bundle) |
+|---|---|---|---|
+| The type | an owner's shared-mime-info package, `/usr/share/mime/packages/<app-id>.xml`: its name, a glob per extension, its magic | an owner's `HKCR\.<ext>` default (the ProgID), `Content Type`, and `HKCR\MIME\Database\Content Type\<type>`'s `Extension` | `UTExportedTypeDeclarations` (an owner), `UTImportedTypeDeclarations` (an editor or viewer of a type that isn't Apple's): the UTI, what it conforms to, its extensions and media type |
+| Its icon | an owner's `/usr/share/icons/hicolor/<size>/mimetypes/<type with / as ->.png` (and `scalable/….svg`), the name shared-mime-info gives the type | the ProgID's `DefaultIcon`, `<ProgID>.ico` in the install directory | `Contents/Resources/<UTI>.icns`, the document type's and the UTI's icon |
+| The program | the menu entry's `MimeType` (every type) and `Exec` (the default verb's arguments, `%f` for the file) | `HKCR\<ProgID>` and `HKCR\.<ext>\OpenWithProgids\<ProgID>` (every role) | `CFBundleDocumentTypes`: the name, `CFBundleTypeRole`, `LSHandlerRank`, the UTI, the icon |
+| Other verbs | a KDE service menu each, `/usr/share/kio/servicemenus/<app-id>-<verb>.desktop` | `HKCR\<ProgID>\shell\<verb>`, its label and `command` (`"<launcher>" <arguments>`, the file as `"%1"`); `shell`'s default the default verb | — (macOS hands an app its documents as an Apple event, not a command line) |
+
+On Windows these are plain `HKCR` registry values, which Windows Installer writes under
+`HKLM\Software\Classes` for a machine-wide install and `HKCU\Software\Classes` for a per-user one,
+and removes with the product: what WiX's `<ProgId Advertise="no">` compiles to, so no advertised
+`ProgId`, `Extension`, `Verb` or `MIME` row (nor COM's `Class`) is ever in the MSI, and adopt-msi
+compares every one of these values, as every registry value. `OpenWithProgids`' value carries the
+type's name: the shell reads the value names alone, and Windows Installer writes no empty string.
+Windows Installer doesn't tell the shell the associations changed (`SHChangeNotify`): opening a file
+works at once, while Explorer may show the new document icon only after it refreshes.
+
+On Linux nothing runs at install: shared-mime-info's, desktop-file-utils' and the icon theme's own
+triggers (dpkg triggers, rpm file triggers, pacman hooks) compile the MIME database, the menu's
+MIME cache and the icon cache whenever a package changes their directories, and again when it's
+removed; deb and rpm recommend `shared-mime-info` beside `hicolor-icon-theme`. desktop-file-validate
+checks the menu entry; it doesn't read KDE's `Type=Service` menus, which are generated from the
+validated verbs alone. Nemo's actions aren't written: Nemo puts the file into a command line it then
+splits as a shell would, and documents no quoting of it.
+
+A product's file types are its alone in a `seaworthy.toml` (two products registering `.trove` would
+each take it from the other, and one's removal would remove the other's), unless the two conflict.
 
 ### Release versions
 

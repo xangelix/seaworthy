@@ -274,8 +274,8 @@ fn the_linux_packages_carry_the_menu_entry_the_icons_and_the_link() {
 }
 
 /// With media types, the menu entry names them (`MimeType`) and the
-/// launcher takes the file it's opened with (`%f`); desktop-file-validate
-/// accepts it.
+/// launcher takes the file it's opened with (`%f`), after `--` so it's
+/// never read as an option; desktop-file-validate accepts it.
 #[test]
 fn a_menu_entry_with_media_types_opens_the_chosen_files() {
     let text = CONFIG.replacen(
@@ -299,7 +299,7 @@ fn a_menu_entry_with_media_types_opens_the_chosen_files() {
         panic!("generated")
     };
     assert!(
-        text.contains("Exec=/opt/acme/viewer/AcmeTool %f\nTryExec=/opt/acme/viewer/AcmeTool\n"),
+        text.contains("Exec=/opt/acme/viewer/AcmeTool -- %f\nTryExec=/opt/acme/viewer/AcmeTool\n"),
         "{text}"
     );
     assert!(

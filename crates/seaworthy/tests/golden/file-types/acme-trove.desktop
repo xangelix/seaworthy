@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Acme Trove
+Comment=Packs and unpacks Trove archives.
+Exec=/opt/acme/trove/TroveGui -- %f
+TryExec=/opt/acme/trove/TroveGui
+Icon=acme-trove
+Terminal=false
+Categories=Utility;
+MimeType=application/x-acme-trove;text/csv;

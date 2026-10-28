@@ -28,7 +28,10 @@
 //! the update helper depends on `ca-certificates` (the package's name on
 //! every supported family): the helper's TLS client loads the system's CA
 //! store before any request, so on a minimal host without one every
-//! update run would fail. A desktop app shipping its helper's unit depends
+//! update run would fail. A product with menu icons or file types
+//! recommends `hicolor-icon-theme` and `shared-mime-info` (deb, rpm),
+//! whose own triggers update the icon cache and the MIME database: the
+//! packages carry no script for them. A desktop app shipping its helper's unit depends
 //! on `systemd` too, and on polkit (`polkitd | policykit-1` for deb,
 //! `polkit` for rpm and pacman), which reads the rule letting the session
 //! start it.
@@ -263,16 +266,18 @@ pub fn write_config(
     // directories, which its package owns: deb and rpm recommend it (a weak
     // dependency: installed when the host's repositories carry it, never
     // failing an install from a mirror without it).
-    let recommends: Vec<&str> = if format != Output::Pacman
-        && package
-            .files
-            .iter()
-            .any(|f| f.dst.starts_with("/usr/share/icons/hicolor/"))
-    {
-        vec!["hicolor-icon-theme"]
-    } else {
-        Vec::new()
-    };
+    // A product defining file types (shared-mime-info packages) recommends
+    // shared-mime-info the same way: its trigger compiles them.
+    let mut recommends: Vec<&str> = Vec::new();
+    let ships = |prefix: &str| package.files.iter().any(|f| f.dst.starts_with(prefix));
+    if format != Output::Pacman {
+        if ships("/usr/share/icons/hicolor/") {
+            recommends.push("hicolor-icon-theme");
+        }
+        if ships(crate::linux::MIME_PACKAGES_DIR) {
+            recommends.push("shared-mime-info");
+        }
+    }
     let mut archlinux = json!({"packager": d.maintainer});
     let mut scripts_json = None;
     if let Some(scripts) = crate::scripts::scripts(format, &package.name, &package.units) {
