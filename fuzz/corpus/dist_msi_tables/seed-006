@@ -1,0 +1,2 @@
+CREATE TABLE `Environment` (`Environment` CHAR(72) NOT NULL, `Name` CHAR(255) NOT NULL, `Value` CHAR(255), `Component_` CHAR(72) NOT NULL PRIMARY KEY `Environment`)
+INSERT INTO `Environment` (`Environment`, `Name`, `Value`, `Component_`) VALUES ('PathMachine', '=-*PATH', '[~];[InstallDir]', 'PathMachine')

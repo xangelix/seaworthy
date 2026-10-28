@@ -1,0 +1,3 @@
+CREATE TABLE `ControlEvent` (`Dialog_` CHAR(72) NOT NULL, `Control_` CHAR(50) NOT NULL, `Event` CHAR(50) NOT NULL, `Argument` CHAR(255) NOT NULL, `Condition` CHAR(255), `Ordering` INT PRIMARY KEY `Dialog_`, `Control_`, `Event`, `Argument`, `Condition`)
+INSERT INTO `ControlEvent` (`Dialog_`, `Control_`, `Event`, `Argument`, `Condition`, `Ordering`) VALUES ('SetupDlg', 'Install', 'EndDialog', 'Return', 'LICENSEACCEPTED = "1"', 1)
+INSERT INTO `ControlEvent` (`Dialog_`, `Control_`, `Event`, `Argument`, `Condition`, `Ordering`) VALUES ('SetupDlg', 'Install', 'DoAction', 'Evil', '1', 2)

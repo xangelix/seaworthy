@@ -4,7 +4,14 @@
 # has, unsigned, on GitHub-hosted runners: the Linux, Windows and macOS
 # builds per CPU target, the Linux packages, the Windows zip and MSI (built
 # with WiX and adopted), the macOS disk image, and the verified packages
-# artifact. It grants contents: read alone, as every caller that doesn't
+# artifact. The viewer's MSI is for either scope with a licence page and a
+# document type, viewer-lite's puts its directory on PATH: WiX builds them,
+# validates them (ICEs) and adopt-msi checks their dialog, property,
+# environment and registry tables. The viewer's document type is then
+# observed where the packages land: installed from its deb on Ubuntu (the
+# distribution's own triggers compile it into the MIME and desktop
+# databases, and remove it again), and declared in the disk image's app
+# bundle on macOS. It grants contents: read alone, as every caller that doesn't
 # sign through Azure does (dist.yml refuses id-token: write without the
 # azure-* inputs). On pull requests too (unsigned, read-only, no secrets):
 # a change reaches main only after every pipeline a push to main runs has
@@ -65,6 +72,113 @@ jobs:
           for kind in deb zip msi dmg tar.zst; do
             find . -name "*.$kind" | grep -q . || { echo "::error::no .$kind in the packages artifact"; exit 1; }
           done
+
+  # The viewer's document type on Linux: its deb installed by apt on a
+  # throwaway runner, with nothing but the distribution's triggers to
+  # register it (the package has no scripts for it).
+  linux-file-types:
+    name: The viewer's file type, installed (Ubuntu)
+    needs: dist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.dist.outputs.packages-artifact }}
+          path: packages
+      - name: Install the viewer, read its type back, remove it
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          type=application/x-acme-viewer-doc
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            shared-mime-info desktop-file-utils libglib2.0-bin
+          deb="$(find packages -name 'acme-viewer_*_amd64.deb' | head -n 1)"
+          [ -n "$deb" ] || fail "no acme-viewer deb in the packages artifact"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "./$deb"
+          for file in /usr/share/mime/packages/acme-viewer.xml \
+              /usr/share/icons/hicolor/48x48/mimetypes/application-x-acme-viewer-doc.png \
+              /usr/share/icons/hicolor/scalable/mimetypes/application-x-acme-viewer-doc.svg \
+              /usr/share/kio/servicemenus/acme-viewer-inspect.desktop; do
+            [ -f "$file" ] || fail "the package installed no $file"
+          done
+          [ -f "/usr/share/mime/$type.xml" ] \
+            || fail "shared-mime-info's trigger didn't compile $type into the MIME database"
+          grep -q ":$type:\*\.acmeview$" /usr/share/mime/globs2 || fail "no *.acmeview glob in globs2"
+          grep -q "^$type=.*acme-viewer\.desktop" /usr/share/applications/mimeinfo.cache \
+            || fail "desktop-file-utils' trigger didn't list acme-viewer.desktop for $type"
+          desktop-file-validate /usr/share/applications/acme-viewer.desktop
+          grep -qx 'Exec=/opt/acme/viewer/demo -- %f' /usr/share/applications/acme-viewer.desktop \
+            || fail "the menu entry's Exec isn't the default verb's"
+          work="$(mktemp -d)"
+          printf 'any content' > "$work/sample.acmeview"
+          printf 'ACMEVIEW, then data' > "$work/no-extension"
+          for sample in sample.acmeview no-extension; do
+            got="$(gio info -a standard::content-type "$work/$sample" | sed -n 's/^ *standard::content-type: //p')"
+            [ "$got" = "$type" ] || fail "GIO reads $sample as '$got', not $type (by its name, or its magic)"
+          done
+          gio mime "$type" | tee "$work/handlers"
+          grep -q 'acme-viewer.desktop' "$work/handlers" || fail "GIO lists no acme-viewer.desktop for $type"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y -q acme-viewer
+          [ ! -e "/usr/share/mime/$type.xml" ] || fail "$type is still in the MIME database after the removal"
+          ! grep -q ":$type:" /usr/share/mime/globs2 || fail "globs2 still names $type after the removal"
+          ! grep -q "^$type=" /usr/share/applications/mimeinfo.cache \
+            || fail "mimeinfo.cache still lists $type after the removal"
+          echo "registered by the distribution's triggers, read back by GIO by name and by magic, removed"
+
+  # The viewer's document type on macOS: the disk image's app bundle
+  # declares it, with its icon, and its seal covers both.
+  macos-file-types:
+    name: The viewer's file type, in its app bundle (macOS)
+    needs: dist
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.dist.outputs.packages-artifact }}
+          path: packages
+      - name: Read the bundle's document types
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          dmg="$(find packages -name 'acme-viewer-*-macos-arm64.dmg' | head -n 1)"
+          [ -n "$dmg" ] || fail "no acme-viewer dmg in the packages artifact"
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
+          trap 'hdiutil detach "$mount" -quiet || true' EXIT
+          app="$mount/Acme Viewer.app"
+          plutil -lint "$app/Contents/Info.plist"
+          /usr/bin/python3 -I - "$app/Contents/Info.plist" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              info = plistlib.load(f)
+          uti = "com.example.acme.viewer-document"
+          doc = info["CFBundleDocumentTypes"][0]
+          exported = info["UTExportedTypeDeclarations"][0]
+          tags = exported["UTTypeTagSpecification"]
+          for what, got, wanted in [
+              ("LSItemContentTypes", doc["LSItemContentTypes"], [uti]),
+              ("CFBundleTypeRole", doc["CFBundleTypeRole"], "Editor"),
+              ("LSHandlerRank", doc["LSHandlerRank"], "Owner"),
+              ("UTTypeIdentifier", exported["UTTypeIdentifier"], uti),
+              ("UTTypeConformsTo", exported["UTTypeConformsTo"], ["public.data"]),
+              ("public.filename-extension", tags["public.filename-extension"], ["acmeview"]),
+              ("public.mime-type", tags["public.mime-type"], ["application/x-acme-viewer-doc"]),
+          ]:
+              if got != wanted:
+                  sys.exit(f"::error::{what} is {got!r}, not {wanted!r}")
+          print("the bundle declares", uti)
+          PY
+          [ -f "$app/Contents/Resources/com.example.acme.viewer-document.icns" ] \
+            || fail "the bundle carries no com.example.acme.viewer-document.icns"
+          codesign --verify --strict "$app" || fail "the bundle's seal doesn't cover its Info.plist and resources"
 
   # After the last job that downloads them, as a caller deletes its
   # artifacts. A pull request's run from a fork, or Dependabot's, has a

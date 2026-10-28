@@ -1,6 +1,7 @@
 # The desktop fixture: a client-only desktop product — the e2e launcher
 # fixture (`demo`) and its per-CPU cores (`demo_core`), data files beside
-# them, icons, a menu entry and shortcuts, no update helper and so no
+# them, icons, a menu entry and shortcuts, a document type of its own, an
+# MSI for either scope with a licence page, no update helper and so no
 # release manifests. The packaging lanes build, package and install it as a
 # product's pipeline does: Linux packages, the Windows MSI and zip, and on
 # Apple Silicon an ad hoc-signed app in a disk image. Paths are relative to
@@ -66,6 +67,36 @@ category = "public.app-category.utilities"
 source = "data"
 destination = "share"
 
+# The MSI installs for the current user by default, or for everyone on
+# request (the setup dialog's choice, or ALLUSERS=1 MSIINSTALLPERUSER="" on
+# the command line), shows a licence to accept in an interactive install,
+# and keeps Windows Error Reporting away from the launcher.
+[product.viewer.msi]
+install-scope = "either"
+license = "license.rtf"
+wer-exclude = ["demo"]
+
+# Its own document type, registered on every platform it installs on: a
+# shared-mime-info definition (globs and magic), document icons and the
+# menu entry's MimeType on Linux, with a KDE service menu for the second
+# verb; the ProgID, its verbs and the extension under the install scope's
+# Classes on Windows; the bundle's document type and exported UTI on macOS.
+# (The fixture's own icons, reused as document icons.)
+[[product.viewer.file-types]]
+name = "Acme Viewer document"
+extensions = ["acmeview"]
+mime-type = "application/x-acme-viewer-doc"
+magic = [{ offset = 0, string = "ACMEVIEW" }]
+linux-icons = ["icons/viewer-48.png", "icons/viewer.svg"]
+windows-icon = "icons/viewer.ico"
+macos-icon = "icons/viewer.icns"
+progid = "Acme.ViewerDocument"
+uti = { identifier = "com.example.acme.viewer-document", conforms-to = ["public.data"] }
+verbs = [
+    { id = "open", label = "Open", default = true, arguments = ["--", "{path}"] },
+    { id = "inspect", label = "Inspect", arguments = ["--inspect", "--", "{path}"] },
+]
+
 # The same launcher and cores as a command-line tool, in the several-programs
 # form, that can't be installed beside the viewer: the self-test builds,
 # packages and adopts both MSIs, each searching for the other's UpgradeCode
@@ -87,6 +118,12 @@ launcher = "demo"
 core = "demo_core"
 role = "cli"
 command = "acme-viewer-lite"
+
+# Its install directory on PATH: the user's for a per-user install (the
+# default), the system's for one for everyone.
+[product.viewer-lite.msi]
+install-scope = "either"
+path = true
 
 # The lab's service fixture on Linux: deb, rpm and pacman packages, the
 # service under its own account, and the update helper, which takes its

@@ -18,10 +18,26 @@ use std::collections::BTreeMap;
 
 use seaworthy::msi_check::{self, Table};
 
-/// A `.wxs` of a service with a helper and a shortcut, as `seaworthy
-/// package` writes it, for the comparison.
+/// A `.wxs` of a service with a helper and a shortcut, a setup dialog,
+/// `PATH` and a file type's registry values, as `seaworthy package` writes
+/// them, for the comparison.
 const WXS: &str = r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Acme" Manufacturer="Acme" Version="1.0.0" UpgradeCode="{6A1F0C2E-3B4D-4E5F-9A6B-7C8D9E0F1A2B}">
+  <Package Name="Acme" Manufacturer="Acme" Version="1.0.0" UpgradeCode="{6A1F0C2E-3B4D-4E5F-9A6B-7C8D9E0F1A2B}" Scope="perMachine" Language="1033">
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <UI>
+      <TextStyle Id="SeaworthyText" FaceName="Segoe UI" Size="9" />
+      <Property Id="DefaultUIFont" Value="SeaworthyText" />
+      <Dialog Id="SetupDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Accept" Type="CheckBox" X="15" Y="36" Width="340" Height="15" Property="LICENSEACCEPTED" CheckBoxValue="1" Text="I accept" />
+        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install" EnableCondition="LICENSEACCEPTED = &quot;1&quot;">
+          <Publish Event="EndDialog" Value="Return" Condition="LICENSEACCEPTED = &quot;1&quot;" Order="1" />
+        </Control>
+      </Dialog>
+      <InstallUISequence>
+        <Show Dialog="SetupDlg" Before="ExecuteAction" Condition="NOT Installed" />
+      </InstallUISequence>
+    </UI>
     <SetProperty Id="ARPINSTALLLOCATION" Value="[InstallDir]" After="CostFinalize" Sequence="execute" />
     <StandardDirectory Id="System64Folder" />
     <CustomAction Id="ServiceRecovery" Directory="System64Folder" ExeCommand="sc.exe failure AcmeAgent" Execute="deferred" Impersonate="no" Return="check" />
@@ -36,6 +52,14 @@ const WXS: &str = r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
           <PermissionEx Sddl="D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)" />
         </ServiceInstall>
         <ServiceControl Id="ServiceControl" Name="AcmeAgent" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+      <Component Id="PathMachine" Directory="InstallDir">
+        <CreateFolder />
+        <Environment Id="PathMachine" Name="PATH" Value="[InstallDir]" Action="set" Part="last" System="yes" />
+      </Component>
+      <Component Id="FileType000" Directory="InstallDir">
+        <RegistryValue Root="HKCR" Key="Acme.Doc" Type="string" Value="Acme document" KeyPath="yes" />
+        <RegistryValue Root="HKCR" Key="Acme.Doc\shell\open\command" Type="string" Value="&quot;[#f000]&quot; -- &quot;%1&quot;" />
       </Component>
       <Component Id="Shortcut" Directory="ProgramMenuFolder">
         <Shortcut Id="Shortcut" Name="Acme" Target="[#f000]" WorkingDirectory="InstallDir" />

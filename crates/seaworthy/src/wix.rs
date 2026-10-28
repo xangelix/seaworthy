@@ -16,6 +16,16 @@
 //!
 //! What the package does:
 //!
+//! - **Scope** (`[product.<id>.msi] install-scope`): machine-wide (WiX's
+//!   `perMachine`, `ALLUSERS=1`), or Windows Installer 5's dual-purpose
+//!   package (`perUserOrMachine`: `ALLUSERS=2`, `MSIINSTALLPERUSER=1`),
+//!   which installs per user (`ProgramFiles64Folder` redirected to
+//!   `%LocalAppData%\Programs`, `HKMU` and `HKCR` rows to `HKCU`, the
+//!   shortcuts to the user's folders) unless `ALLUSERS=1
+//!   MSIINSTALLPERUSER=""` asks for everyone; `user` adds a launch
+//!   condition refusing that. Nothing else in the package changes with
+//!   the scope but `PATH` (below); validation keeps a service and the
+//!   update helper, and so every machine-wide part, out of a per-user one.
 //! - **Files:** the tree under `%ProgramFiles%\<Vendor>\<Directory>`, one
 //!   component per file (Rust binaries carry no version resource until
 //!   [`crate::pe_version`] stamps one, and WiX derives a stable component
@@ -136,6 +146,28 @@
 //!   all-users folders (`ALLUSERS=1`); the value lands in the installing
 //!   user's hive. Non-advertised, they never start a repair for another
 //!   user; another administrator's removal leaves that one value behind.
+//! - **Setup dialogs** (`[product.<id>.msi] license`, or `install-scope
+//!   = "either"`): seaworthy's own text-only dialog set (`setup_ui`): the
+//!   licence to accept (`license`, staged as `tree/<Vendor>/<Directory>.rtf`
+//!   for WiX to read) and the scope to choose, progress, a cancel
+//!   confirmation, and Windows Installer's standard error, files-in-use and
+//!   exit dialogs. No event runs code; a quiet install shows none.
+//! - **`PATH`** (`[product.<id>.msi] path`): the install directory
+//!   appended to the system's `PATH` (machine-wide) or the user's (per
+//!   user), removed on uninstall; for `either`, one component each,
+//!   conditioned on the scope Windows Installer chose (`ALLUSERS = 1`,
+//!   `NOT ALLUSERS`), since WiX's `System` is fixed at build time.
+//! - **Windows Error Reporting** (`[product.<id>.msi] wer-exclude`): a
+//!   DWORD 1 named for each excluded program's executable under
+//!   `…\Windows Error Reporting\ExcludedApplications` ([`WER_EXCLUDED_KEY`]),
+//!   in `HKLM`, or `HKMU` for a package that may install per user.
+//! - **File types** (`[[product.<id>.file-types]]`): each type's ProgID
+//!   (its name, `DefaultIcon` the installed `<ProgID>.ico`, its verbs'
+//!   labels and commands: the `gui` launcher, the file as `"%1"` after
+//!   `--`) and each extension's `OpenWithProgids` entry, plus an owner's
+//!   extension default, `Content Type` and MIME database entry: plain HKCR
+//!   values (HKLM's or HKCU's classes, as the install's scope is), as WiX's
+//!   non-advertised `<ProgId>` compiles, so no advertising table is used.
 //! - **Data files** (`[[product.<id>.files]]`) in their subdirectories of
 //!   the install directory, one component each like every file.
 //! - **Programs and Features:** the entry can't be modified
@@ -170,7 +202,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::DistError;
-use crate::config::{Config, UpdatePolicy};
+use crate::config::{Config, InstallScope, UpdatePolicy};
 use crate::layout::{Layout, Role};
 use crate::version::Release;
 use seaworthy_service::render::windows::{self as win, HelperGrantee};
@@ -184,6 +216,11 @@ use seaworthy_service::render::windows::{self as win, HelperGrantee};
 /// `updates_dir_sddl`, `helper_log_dir_sddl`). Short, because Windows
 /// Installer's `CustomAction` target column holds 255 characters.
 pub const PROGRAMDATA_ARGUMENT: &str = "--seaworthy-install-programdata";
+
+/// Where Windows Error Reporting reads the programs it leaves alone
+/// (`[product.<id>.msi] wer-exclude`), under `HKLM` or `HKCU`.
+pub const WER_EXCLUDED_KEY: &str =
+    "Software\\Microsoft\\Windows\\Windows Error Reporting\\ExcludedApplications";
 
 /// A deterministic GUID (an RFC 9562 version 8 UUID) from SHA-256 of
 /// `parts`, NUL-joined, in registry form (`{…}`, uppercase).
@@ -287,6 +324,365 @@ fn formatted_literal(text: &str) -> String {
     out
 }
 
+/// The setup dialogs a product's MSI shows in a full-UI install, when it
+/// has a licence page or lets the person installing choose the scope
+/// (`either`): seaworthy's own text-only set, in place of WiX's WixUI
+/// sets, whose licence page carries a Print button running a native DLL
+/// custom action from the `Binary` table (`WixUIPrintEula`) and whose
+/// Advanced set adds a folder browser and path validation the same way.
+/// Nothing here runs code: every event ends, opens or spawns a dialog, or
+/// (the scope choice) sets `ALLUSERS` and `MSIINSTALLPERUSER`, as
+/// Microsoft's single-package authoring describes. Windows Installer's
+/// standard dialogs are all there (an error dialog, files in use, and the
+/// exit, user-exit and fatal-error dialogs in both UI sequences, as ICE20
+/// wants), plus a progress dialog and a cancel confirmation. A quiet or
+/// basic-UI install (`/qn`, `/qb`) shows none of them.
+///
+/// `license` is the licence RTF's `!(bindpath.tree)` path (an attribute
+/// value, escaped), `choose`
+/// whether the first dialog offers the scope. Returns `(indent, line)`
+/// pairs under `<Package>`.
+fn setup_ui(license: Option<&str>, choose: bool) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut add = |indent: usize, text: &str| out.push((indent, text.to_owned()));
+    let push = |dialog: &str| format!("<Control Id=\"{dialog}\"");
+    let button = |id: &str, x: u32, text: &str, extra: &str| {
+        format!(
+            "{} Type=\"PushButton\" X=\"{x}\" Y=\"243\" Width=\"56\" Height=\"17\" Text=\"{text}\"{extra}>",
+            push(id)
+        )
+    };
+    let publish = |event: &str, value: &str, condition: &str, order: u32| {
+        format!(
+            "<Publish Event=\"{event}\" Value=\"{value}\" Condition=\"{condition}\" Order=\"{order}\" />"
+        )
+    };
+    let title = |dialog: &str| {
+        format!(
+            "<Control Id=\"Title\" Type=\"Text\" X=\"15\" Y=\"10\" Width=\"340\" Height=\"20\" Transparent=\"yes\" NoPrefix=\"yes\" Text=\"{{\\SeaworthyTitle}}{dialog}\" />"
+        )
+    };
+    let text = |id: &str, y: u32, height: u32, value: &str| {
+        format!(
+            "<Control Id=\"{id}\" Type=\"Text\" X=\"15\" Y=\"{y}\" Width=\"340\" Height=\"{height}\" NoPrefix=\"yes\" Text=\"{value}\" />"
+        )
+    };
+    add(4, "");
+    add(
+        4,
+        "<!-- The setup dialogs (a full-UI install only): seaworthy's own, text only; no event runs code. -->",
+    );
+    add(4, "<UI>");
+    add(
+        6,
+        "<TextStyle Id=\"SeaworthyText\" FaceName=\"Segoe UI\" Size=\"9\" />",
+    );
+    add(
+        6,
+        "<TextStyle Id=\"SeaworthyTitle\" FaceName=\"Segoe UI\" Size=\"12\" Bold=\"yes\" />",
+    );
+    add(
+        6,
+        "<Property Id=\"DefaultUIFont\" Value=\"SeaworthyText\" />",
+    );
+    add(6, "<Property Id=\"ErrorDialog\" Value=\"ErrorDlg\" />");
+    if choose {
+        add(6, "<Property Id=\"INSTALLSCOPE\" Value=\"user\" />");
+    }
+
+    // The first dialog: the licence to accept, the scope to choose.
+    add(
+        6,
+        "<Dialog Id=\"SetupDlg\" Width=\"370\" Height=\"270\" Title=\"[ProductName] Setup\">",
+    );
+    add(8, &title("[ProductName]"));
+    let mut y = 36;
+    if let Some(source) = license {
+        let height = if choose { 128 } else { 168 };
+        add(
+            8,
+            &format!(
+                "<Control Id=\"LicenseText\" Type=\"ScrollableText\" X=\"15\" Y=\"{y}\" Width=\"340\" Height=\"{height}\" Sunken=\"yes\" TabSkip=\"no\">"
+            ),
+        );
+        add(10, &format!("<Text SourceFile=\"{source}\" />"));
+        add(8, "</Control>");
+        y += height + 6;
+        add(
+            8,
+            &format!(
+                "<Control Id=\"Accept\" Type=\"CheckBox\" X=\"15\" Y=\"{y}\" Width=\"340\" Height=\"15\" Property=\"LICENSEACCEPTED\" CheckBoxValue=\"1\" Text=\"I &amp;accept the terms of the license agreement\" />"
+            ),
+        );
+        y += 21;
+    } else {
+        add(
+            8,
+            &text(
+                "Description",
+                y,
+                15,
+                "Choose who [ProductName] is installed for.",
+            ),
+        );
+        y += 21;
+    }
+    if choose {
+        add(
+            8,
+            &format!(
+                "<Control Id=\"Scope\" Type=\"RadioButtonGroup\" X=\"15\" Y=\"{y}\" Width=\"340\" Height=\"34\" Property=\"INSTALLSCOPE\">"
+            ),
+        );
+        add(10, "<RadioButtonGroup Property=\"INSTALLSCOPE\">");
+        add(
+            12,
+            "<RadioButton Value=\"user\" X=\"0\" Y=\"0\" Width=\"340\" Height=\"15\" Text=\"Install just for &amp;me\" />",
+        );
+        add(
+            12,
+            "<RadioButton Value=\"machine\" X=\"0\" Y=\"17\" Width=\"340\" Height=\"15\" Text=\"Install for &amp;everyone on this computer (needs administrator rights)\" />",
+        );
+        add(10, "</RadioButtonGroup>");
+        add(8, "</Control>");
+    }
+    let accepted = "LICENSEACCEPTED = &quot;1&quot;";
+    let enable = if license.is_some() {
+        format!(
+            " DisableCondition=\"LICENSEACCEPTED &lt;&gt; &quot;1&quot;\" EnableCondition=\"{accepted}\""
+        )
+    } else {
+        String::new()
+    };
+    add(
+        8,
+        &button(
+            "Install",
+            236,
+            "&amp;Install",
+            &format!(" Default=\"yes\"{enable}"),
+        ),
+    );
+    let mut order = 0;
+    if choose {
+        // Microsoft's single-package authoring: ALLUSERS=2, and
+        // MSIINSTALLPERUSER 1 for the user alone or empty for everyone.
+        for (property, value, condition) in [
+            ("ALLUSERS", "2", "1"),
+            ("MSIINSTALLPERUSER", "1", "INSTALLSCOPE = &quot;user&quot;"),
+            (
+                "MSIINSTALLPERUSER",
+                "{}",
+                "INSTALLSCOPE = &quot;machine&quot;",
+            ),
+        ] {
+            order += 1;
+            add(
+                10,
+                &format!(
+                    "<Publish Property=\"{property}\" Value=\"{value}\" Condition=\"{condition}\" Order=\"{order}\" />"
+                ),
+            );
+        }
+    }
+    order += 1;
+    let go = if license.is_some() { accepted } else { "1" };
+    add(10, &publish("EndDialog", "Return", go, order));
+    add(8, "</Control>");
+    add(8, &button("Cancel", 304, "Cancel", " Cancel=\"yes\""));
+    add(10, &publish("SpawnDialog", "CancelDlg", "1", 1));
+    add(8, "</Control>");
+    add(6, "</Dialog>");
+
+    // Progress, while the install runs.
+    add(
+        6,
+        "<Dialog Id=\"ProgressDlg\" Width=\"370\" Height=\"270\" Title=\"[ProductName] Setup\" Modeless=\"yes\">",
+    );
+    add(8, &title("[ProductName]"));
+    add(
+        8,
+        "<Control Id=\"ActionText\" Type=\"Text\" X=\"15\" Y=\"60\" Width=\"340\" Height=\"15\" NoPrefix=\"yes\">",
+    );
+    add(10, "<Subscribe Event=\"ActionText\" Attribute=\"Text\" />");
+    add(8, "</Control>");
+    add(
+        8,
+        "<Control Id=\"ProgressBar\" Type=\"ProgressBar\" X=\"15\" Y=\"80\" Width=\"340\" Height=\"10\" ProgressBlocks=\"yes\" Text=\"Progress\">",
+    );
+    add(
+        10,
+        "<Subscribe Event=\"SetProgress\" Attribute=\"Progress\" />",
+    );
+    add(8, "</Control>");
+    add(
+        8,
+        &button("Cancel", 304, "Cancel", " Default=\"yes\" Cancel=\"yes\""),
+    );
+    add(10, &publish("SpawnDialog", "CancelDlg", "1", 1));
+    add(8, "</Control>");
+    add(6, "</Dialog>");
+
+    // Cancelling: asked once.
+    add(
+        6,
+        "<Dialog Id=\"CancelDlg\" Width=\"260\" Height=\"85\" Title=\"[ProductName] Setup\" NoMinimize=\"yes\">",
+    );
+    add(
+        8,
+        "<Control Id=\"No\" Type=\"PushButton\" X=\"132\" Y=\"57\" Width=\"56\" Height=\"17\" Default=\"yes\" Cancel=\"yes\" Text=\"&amp;No\">",
+    );
+    add(10, &publish("EndDialog", "Return", "1", 1));
+    add(8, "</Control>");
+    add(
+        8,
+        "<Control Id=\"Yes\" Type=\"PushButton\" X=\"72\" Y=\"57\" Width=\"56\" Height=\"17\" Text=\"&amp;Yes\">",
+    );
+    add(10, &publish("EndDialog", "Exit", "1", 1));
+    add(8, "</Control>");
+    add(
+        8,
+        "<Control Id=\"Text\" Type=\"Text\" X=\"15\" Y=\"15\" Width=\"230\" Height=\"30\" NoPrefix=\"yes\" Text=\"Cancel the setup of [ProductName]?\" />",
+    );
+    add(6, "</Dialog>");
+
+    // The end of setup: done, cancelled, failed.
+    for (dialog, message, end) in [
+        ("ExitDlg", "Setup has finished.", "Return"),
+        (
+            "UserExitDlg",
+            "Setup was cancelled: nothing was changed.",
+            "Exit",
+        ),
+        (
+            "FatalErrorDlg",
+            "Setup ended because of an error: nothing was changed.",
+            "Exit",
+        ),
+    ] {
+        add(
+            6,
+            &format!(
+                "<Dialog Id=\"{dialog}\" Width=\"370\" Height=\"270\" Title=\"[ProductName] Setup\">"
+            ),
+        );
+        add(
+            8,
+            &button(
+                "Finish",
+                304,
+                "&amp;Finish",
+                " Default=\"yes\" Cancel=\"yes\"",
+            ),
+        );
+        add(10, &publish("EndDialog", end, "1", 1));
+        add(8, "</Control>");
+        add(8, &title("[ProductName]"));
+        add(8, &text("Description", 40, 30, message));
+        add(6, "</Dialog>");
+    }
+
+    // Windows Installer's error dialog (ICE20: ErrorText first, then the
+    // buttons A, C, I, N, O, R and Y, which it shows as an error needs).
+    add(
+        6,
+        "<Dialog Id=\"ErrorDlg\" Width=\"270\" Height=\"105\" Title=\"[ProductName] Setup\" ErrorDialog=\"yes\">",
+    );
+    add(
+        8,
+        "<Control Id=\"ErrorText\" Type=\"Text\" X=\"15\" Y=\"15\" Width=\"240\" Height=\"60\" TabSkip=\"no\" NoPrefix=\"yes\" Text=\"Information text\" />",
+    );
+    for (control, text, end) in [
+        ("A", "Cancel", "ErrorAbort"),
+        ("C", "Cancel", "ErrorCancel"),
+        ("I", "Ignore", "ErrorIgnore"),
+        ("N", "No", "ErrorNo"),
+        ("O", "OK", "ErrorOk"),
+        ("R", "Retry", "ErrorRetry"),
+        ("Y", "Yes", "ErrorYes"),
+    ] {
+        add(
+            8,
+            &format!(
+                "<Control Id=\"{control}\" Type=\"PushButton\" X=\"100\" Y=\"80\" Width=\"56\" Height=\"17\" TabSkip=\"yes\" Text=\"{text}\">"
+            ),
+        );
+        add(10, &publish("EndDialog", end, "1", 1));
+        add(8, "</Control>");
+    }
+    add(6, "</Dialog>");
+
+    // Files in use (ICE20: the FileInUseProcess list, and Retry, Ignore
+    // and Exit).
+    add(
+        6,
+        "<Dialog Id=\"FilesInUse\" Width=\"370\" Height=\"270\" Title=\"[ProductName] Setup\" KeepModeless=\"yes\">",
+    );
+    for (control, x, text, extra) in [
+        (
+            "Retry",
+            304,
+            "&amp;Retry",
+            " Default=\"yes\" Cancel=\"yes\"",
+        ),
+        ("Ignore", 236, "&amp;Ignore", ""),
+        ("Exit", 168, "E&amp;xit", ""),
+    ] {
+        add(8, &button(control, x, text, extra));
+        add(10, &publish("EndDialog", control, "1", 1));
+        add(8, "</Control>");
+    }
+    add(8, &title("Files in use"));
+    add(
+        8,
+        &text(
+            "Text",
+            36,
+            30,
+            "These applications use files Setup needs to change. Close them and choose Retry, or choose Ignore to go on (a restart may be needed).",
+        ),
+    );
+    add(
+        8,
+        "<Control Id=\"List\" Type=\"ListBox\" X=\"15\" Y=\"72\" Width=\"340\" Height=\"150\" Property=\"FileInUseProcess\" Sunken=\"yes\" TabSkip=\"yes\" />",
+    );
+    add(6, "</Dialog>");
+
+    for table in ["InstallUISequence", "AdminUISequence"] {
+        add(6, &format!("<{table}>"));
+        if table == "InstallUISequence" {
+            if choose {
+                // An install asked for everyone (ALLUSERS=1, or
+                // MSIINSTALLPERUSER cleared) starts with that chosen.
+                add(
+                    8,
+                    "<Custom Action=\"SetInstallScopeMachine\" After=\"CostFinalize\" Condition=\"ALLUSERS = 1\" />",
+                );
+            }
+            add(
+                8,
+                "<Show Dialog=\"SetupDlg\" Before=\"ProgressDlg\" Condition=\"NOT Installed\" />",
+            );
+            add(
+                8,
+                "<Show Dialog=\"ProgressDlg\" Before=\"ExecuteAction\" />",
+            );
+        }
+        add(8, "<Show Dialog=\"ExitDlg\" OnExit=\"success\" />");
+        add(8, "<Show Dialog=\"UserExitDlg\" OnExit=\"cancel\" />");
+        add(8, "<Show Dialog=\"FatalErrorDlg\" OnExit=\"error\" />");
+        add(6, &format!("</{table}>"));
+    }
+    add(4, "</UI>");
+    if choose {
+        add(
+            4,
+            "<CustomAction Id=\"SetInstallScopeMachine\" Property=\"INSTALLSCOPE\" Value=\"machine\" />",
+        );
+    }
+    out
+}
+
 fn policy_value(policy: UpdatePolicy) -> &'static str {
     match policy {
         UpdatePolicy::Auto => "auto",
@@ -330,6 +726,25 @@ pub fn wxs(
         DistError::Config(format!("product.{id}.service: {e}"))
     };
     let helper_ships = layout.helper().is_some();
+    let options = product.msi_options();
+    // Windows Installer 5's dual-purpose package for anything but a
+    // machine-wide one: ALLUSERS=2 and MSIINSTALLPERUSER=1 (WiX's
+    // perUserOrMachine), so a per-user install puts ProgramFiles64Folder
+    // in %LocalAppData%\Programs and HKCR in HKCU\Software\Classes, with
+    // every component keyed as it is for a machine-wide one. (WiX's
+    // `perUser` sets no ALLUSERS: Program Files would stay the machine's.)
+    let scope = match options.install_scope {
+        InstallScope::Machine => "perMachine",
+        InstallScope::User | InstallScope::Either => "perUserOrMachine",
+    };
+    if options.install_scope != InstallScope::Machine && (product.service.is_some() || helper_ships)
+    {
+        // Validation refuses this; the .wxs never holds machine-wide state
+        // in a per-user package.
+        return Err(DistError::Config(format!(
+            "product.{id}.msi.install-scope: a service or the update helper installs machine-wide only"
+        )));
+    }
     // A desktop product's helper service: its name and the DACL that
     // lets interactive users start it.
     let desktop_helper = if helper_ships && product.kind == crate::config::Kind::Desktop {
@@ -397,7 +812,7 @@ pub fn wxs(
     line(
         2,
         &format!(
-            "<Package Name=\"{}\" Manufacturer=\"{}\" Version=\"{}\" UpgradeCode=\"{upgrade}\" Scope=\"perMachine\" Language=\"1033\" Codepage=\"65001\" Compressed=\"yes\" InstallerVersion=\"500\">",
+            "<Package Name=\"{}\" Manufacturer=\"{}\" Version=\"{}\" UpgradeCode=\"{upgrade}\" Scope=\"{scope}\" Language=\"1033\" Codepage=\"65001\" Compressed=\"yes\" InstallerVersion=\"500\">",
             xml(&product.display_name),
             xml(vendor),
             xml(msi_version)
@@ -455,6 +870,17 @@ pub fn wxs(
         4,
         "<Launch Condition=\"VersionNT64\" Message=\"[ProductName] requires 64-bit Windows.\" />",
     );
+    if options.install_scope == InstallScope::User {
+        // Per user only. With ALLUSERS=2, Windows Installer resets ALLUSERS
+        // to "" for a per-user install and to 1 for a per-machine one (the
+        // ALLUSERS property's documentation); ALLUSERS=1, or
+        // MSIINSTALLPERUSER cleared, would install for everyone, which this
+        // product doesn't. A removal is never refused.
+        line(
+            4,
+            "<Launch Condition=\"Installed OR NOT ALLUSERS\" Message=\"[ProductName] installs for the current user only: leave ALLUSERS and MSIINSTALLPERUSER as they are.\" />",
+        );
+    }
     line(4, "<Property Id=\"ARPNOMODIFY\" Value=\"1\" />");
     // Programs and Features' install location (the Uninstall key's
     // `InstallLocation`), which inventory tools read; an MSI leaves it
@@ -463,6 +889,22 @@ pub fn wxs(
         4,
         "<SetProperty Id=\"ARPINSTALLLOCATION\" Value=\"[InstallDir]\" After=\"CostFinalize\" Sequence=\"execute\" />",
     );
+    let choose = options.install_scope == InstallScope::Either;
+    if options.license.is_some() && layout.license.is_none() {
+        return Err(DistError::Config(format!(
+            "product {id}'s Windows layout has no licence to show (msi.license)"
+        )));
+    }
+    if let Some(license) = &layout.license {
+        let source = format!("!(bindpath.tree)\\{}", xml(&license.install_path));
+        for (indent, text) in setup_ui(Some(&source), choose) {
+            line(indent, &text);
+        }
+    } else if choose {
+        for (indent, text) in setup_ui(None, true) {
+            line(indent, &text);
+        }
+    }
     if let Some(icon) = &layout.icon {
         line(
             4,
@@ -874,9 +1316,30 @@ pub fn wxs(
         ),
     );
 
-    // The shortcuts start the gui program's launcher.
+    // The shortcuts and the file types' verbs start the gui program's
+    // launcher.
     let gui = product.gui_program().map(|p| p.executable);
     let mut launcher_id = None;
+    // Every file's install path, role and File id (as the loop below
+    // names it).
+    let file_ids: Vec<(String, Role, String)> = layout
+        .files
+        .iter()
+        .zip(&relatives)
+        .enumerate()
+        .map(|(n, (file, relative))| {
+            (
+                file.install_path.clone(),
+                file.role.clone(),
+                identifier("f", relative, n),
+            )
+        })
+        .collect();
+    let gui_launcher_id = file_ids
+        .iter()
+        .zip(&layout.files)
+        .find(|(_, file)| file.role == Role::Launcher && file.program == gui)
+        .map(|((_, _, id), _)| id.clone());
     for (n, (file, relative)) in layout.files.iter().zip(&relatives).enumerate() {
         let file_id = identifier("f", relative, n);
         let component_id = identifier("c", relative, n);
@@ -1043,6 +1506,73 @@ pub fn wxs(
         );
         line(6, "</Component>");
     }
+    // Windows Error Reporting leaves these programs alone: a value per
+    // executable under ExcludedApplications, as WerAddExcludedApplication
+    // writes it (REG_DWORD 1 named for the executable), in HKLM for a
+    // machine-wide install and HKCU for a per-user one (HKMU follows the
+    // install's context). The value names an executable file name, not a
+    // path: Windows matches every program of that name.
+    let wer_root = match options.install_scope {
+        InstallScope::Machine => "HKLM",
+        InstallScope::User | InstallScope::Either => "HKMU",
+    };
+    for executable in &options.wer_exclude {
+        let name = format!("{executable}.exe");
+        line(
+            6,
+            &format!(
+                "<Component Id=\"{}\" Directory=\"InstallDir\" Guid=\"{}\" Bitness=\"always64\">",
+                identifier("WerExclude", executable, 0),
+                component_guid(&format!("WerExclude\0{executable}"))
+            ),
+        );
+        line(
+            8,
+            &format!(
+                "<RegistryValue Root=\"{wer_root}\" Key=\"{WER_EXCLUDED_KEY}\" Name=\"{}\" Type=\"integer\" Value=\"1\" KeyPath=\"yes\" />",
+                xml(&name)
+            ),
+        );
+        line(6, "</Component>");
+    }
+    // The install directory on PATH, appended (never ahead of the system's
+    // own directories) and taken out again on uninstall: the system PATH
+    // for a machine-wide install, the user's for a per-user one. WiX's
+    // Environment/@System is fixed at build time, so a package for either
+    // scope carries both, each conditioned on the scope the install runs
+    // in (ALLUSERS is 1 or empty once Windows Installer has chosen).
+    if options.path {
+        let entries: &[(&str, &str, Option<&str>)] = match options.install_scope {
+            InstallScope::Machine => &[("PathMachine", "yes", None)],
+            InstallScope::User => &[("PathUser", "no", None)],
+            InstallScope::Either => &[
+                ("PathMachine", "yes", Some("ALLUSERS = 1")),
+                ("PathUser", "no", Some("NOT ALLUSERS")),
+            ],
+        };
+        for (component, system, condition) in entries {
+            let condition = condition
+                .map(|c| format!(" Condition=\"{c}\""))
+                .unwrap_or_default();
+            line(
+                6,
+                &format!(
+                    "<Component Id=\"{component}\" Directory=\"InstallDir\" Guid=\"{}\" Bitness=\"always64\"{condition}>",
+                    component_guid(component)
+                ),
+            );
+            // No file or registry value of its own: the directory is the
+            // key path, which ICE18 wants listed in CreateFolder.
+            line(8, "<CreateFolder />");
+            line(
+                8,
+                &format!(
+                    "<Environment Id=\"{component}\" Name=\"PATH\" Value=\"[InstallDir]\" Action=\"set\" Part=\"last\" System=\"{system}\" />"
+                ),
+            );
+            line(6, "</Component>");
+        }
+    }
     if !shortcuts.is_empty() {
         let target = launcher_id.ok_or_else(|| {
             DistError::Config(format!(
@@ -1086,6 +1616,141 @@ pub fn wxs(
                     xml(&registry_key)
                 ),
             );
+            line(6, "</Component>");
+        }
+    }
+    // The file types: each its ProgID with its document icon and verbs,
+    // offered for each extension (OpenWithProgids), and an owner's the
+    // extension's default, content type and MIME database entry. Plain
+    // HKCR registry values, which Windows Installer writes under
+    // HKLM\Software\Classes for a machine-wide install and
+    // HKCU\Software\Classes for a per-user one: what WiX's non-advertised
+    // <ProgId> compiles to (Compiler_Package.cs ParseProgIdElement), so the
+    // ProgId, Extension, Verb and MIME tables (advertising) stay empty.
+    if !product.file_types.is_empty() {
+        let gui = gui_launcher_id.clone().ok_or_else(|| {
+            DistError::Config(format!(
+                "product {id}'s Windows layout has no gui launcher for its file types"
+            ))
+        })?;
+        for (n, ft) in product.file_types.iter().enumerate() {
+            let progid = ft.progid.as_deref().ok_or_else(|| {
+                DistError::Config(format!("product.{id}.file-types[{n}]: no progid"))
+            })?;
+            let icon = file_ids
+                .iter()
+                .find(|(path, role, _)| {
+                    *role == Role::DocumentIcon && path.ends_with(&format!("\\{progid}.ico"))
+                })
+                .map(|(_, _, file)| file.clone())
+                .ok_or_else(|| {
+                    DistError::Config(format!(
+                        "product {id}'s Windows layout has no document icon for {progid}"
+                    ))
+                })?;
+            let component = format!("FileType{n:03}");
+            line(
+                6,
+                &format!(
+                    "<Component Id=\"{component}\" Directory=\"InstallDir\" Guid=\"{}\" Bitness=\"always64\">",
+                    component_guid(&format!("FileType\0{progid}"))
+                ),
+            );
+            let value = |key: &str, name: Option<&str>, value: &str, key_path: bool| {
+                format!(
+                    "<RegistryValue Root=\"HKCR\" Key=\"{}\"{} Type=\"string\" Value=\"{}\"{} />",
+                    xml(key),
+                    name.map(|n| format!(" Name=\"{}\"", xml(n)))
+                        .unwrap_or_default(),
+                    xml(value),
+                    if key_path { " KeyPath=\"yes\"" } else { "" }
+                )
+            };
+            line(8, &value(progid, None, &ft.name, true));
+            line(
+                8,
+                &value(
+                    &format!("{progid}\\DefaultIcon"),
+                    None,
+                    &format!("\"[#{icon}]\",0"),
+                    false,
+                ),
+            );
+            let verbs = ft.verbs();
+            line(
+                8,
+                &value(
+                    &format!("{progid}\\shell"),
+                    None,
+                    &ft.default_verb().id,
+                    false,
+                ),
+            );
+            for verb in &verbs {
+                let key = format!("{progid}\\shell\\{}", verb.id);
+                line(8, &value(&key, None, &verb.label, false));
+                // The file in quotes, after --; config keeps every other
+                // argument to characters needing no quotes.
+                let arguments: Vec<&str> = verb
+                    .arguments
+                    .iter()
+                    .map(|a| {
+                        if a == crate::config::PATH_PLACEHOLDER {
+                            "\"%1\""
+                        } else {
+                            a.as_str()
+                        }
+                    })
+                    .collect();
+                line(
+                    8,
+                    &value(
+                        &format!("{key}\\command"),
+                        None,
+                        &format!("\"[#{gui}]\" {}", arguments.join(" ")),
+                        false,
+                    ),
+                );
+            }
+            for extension in &ft.extensions {
+                // The shell reads OpenWithProgids' value names alone; the
+                // data is the type's name, since Windows Installer writes
+                // no empty string.
+                line(
+                    8,
+                    &value(
+                        &format!(".{extension}\\OpenWithProgids"),
+                        Some(progid),
+                        &ft.name,
+                        false,
+                    ),
+                );
+                if ft.role == crate::config::FileTypeRole::Owner {
+                    line(8, &value(&format!(".{extension}"), None, progid, false));
+                    line(
+                        8,
+                        &value(
+                            &format!(".{extension}"),
+                            Some("Content Type"),
+                            &ft.mime_type,
+                            false,
+                        ),
+                    );
+                }
+            }
+            if let (crate::config::FileTypeRole::Owner, Some(first)) =
+                (ft.role, ft.extensions.first())
+            {
+                line(
+                    8,
+                    &value(
+                        &format!("MIME\\Database\\Content Type\\{}", ft.mime_type),
+                        Some("Extension"),
+                        &format!(".{first}"),
+                        false,
+                    ),
+                );
+            }
             line(6, "</Component>");
         }
     }

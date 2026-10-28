@@ -34,7 +34,9 @@ The products:
 - `scm/seaworthy-fips.toml`: `[product.scm]` with its cores on the AWS-LC FIPS module
   (`fips = true`, the module's DLL as a Windows sidecar).
 - `desktop/seaworthy.toml`: `[product.viewer]`, a desktop product with data files, an icon and
-  shortcuts (no helper, unsigned).
+  shortcuts, its MSI for either scope with a licence page and a Windows Error Reporting exclusion
+  (no helper, unsigned), and `[product.viewer-lite]`, the same launcher as a command-line tool
+  whose MSI (either scope) puts its directory on `PATH`.
 
 ## The build
 
@@ -64,7 +66,8 @@ leaves a bundle for the lanes:
 5. **Packages, by `seaworthy package` with `SEAWORTHY_WIX`**: the SCM product 1.0.0; the agent
    1.0.0-rc.1 (sequence 1) and 1.0.0 (sequence 2), Authenticode-signed with release manifests;
    the agent 1.0.1 (sequence 3), whose `.wxs` gets a custom action failing right after the
-   recovery actions (past `InstallServices`), built by WiX directly; the viewer 1.0.0 and 1.0.1.
+   recovery actions (past `InstallServices`), built by WiX directly; the viewer 1.0.0 and 1.0.1;
+   viewer-lite 1.0.0.
    Every MSI passes Windows Installer's validation (`wix msi validate`): an ICE error fails the
    build.
 6. **The upgrade candidate**: the plan built again with seaworthy-formats' CI test-key switch
@@ -91,7 +94,7 @@ a failed lane uploads its reports and evidence.
 
 | Job | Script | What it proves |
 |---|---|---|
-| `install` | `scripts/windows-msi-install.ps1` | The desktop MSI installs its launcher, cores and data files, the Start-menu and desktop shortcuts, one Programs and Features entry with its install location and the product icon Windows Installer caches; the launcher runs a core; 1.0.1 upgrades it in place; the removal leaves nothing. |
+| `install` | `scripts/windows-msi-install.ps1` | The desktop MSI (either scope, with its licence page), installed for everyone (`ALLUSERS=1 MSIINSTALLPERUSER=""`), puts its launcher, cores and data files under Program Files, the all-users Start-menu and desktop shortcuts, one Programs and Features entry with its install location and the product icon Windows Installer caches, and the launcher's Windows Error Reporting exclusion under HKLM (of the kind and value `WerAddExcludedApplication` writes); the launcher runs a core; 1.0.1 upgrades it in place; the removal leaves nothing. Installed with nothing set, it installs for the current user alone (`%LocalAppData%\Programs`, the user's shortcuts, entry and exclusion, nothing machine-wide), runs, and is removed. viewer-lite's directory joins the user's `PATH` installed per user and the system's installed for everyone, where a new process finds its launcher, and leaves it on removal. |
 | `update` | `scripts/windows-msi-update.ps1` | See below. |
 | `upgrade` | `scripts/windows-upgrade-previous.ps1`, `scripts/windows-upgrade.ps1` | The previous lab build updated to this run's by its own helper, over TLS from the lab: see below. |
 | `scm` | `scripts/windows-scm-e2e.ps1 -Phase Service` | The SCM product's MSI registers the service under its virtual account with its recovery actions and DACLs; the service runs as `NT SERVICE\acme-e2e`; a fatal outcome, a panic and a crash are each restarted by the SCM after the configured delay; a version rejection (running or at connect) asks for an update and keeps the service running, and a stop during the connect wait is a clean exit; a clean stop isn't restarted; the uninstall removes the service. Every start runs past the runtime's audit of the MSI's state directory (the guard made it; the suite's own files there are an administrator's). `tests/windows_scm.rs` (`SEAWORTHY_WINDOWS_SCM_E2E=1`, `--ignored`, one thread) runs inside it. |

@@ -258,7 +258,8 @@ Each Windows binary (the launcher, every core, the helper; never a sidecar) gets
 stamped after linking, then every Windows binary is Authenticode-signed, then the zip and the MSI's
 `.wxs` are written over the signed tree. The MSI:
 
-- installs to a fixed `%ProgramFiles%\<Vendor>\<Directory>` (no command-line relocation);
+- installs to a fixed `%ProgramFiles%\<Vendor>\<Directory>` (no command-line relocation), or
+  `%LocalAppData%\Programs\<Vendor>\<Directory>` per user ([Install scope](#install-scope));
 - applies the service renderers' DACLs with `MsiLockPermissionsEx`, registers the service and the
   update helper with `ServiceInstall`, and grants the service's account only the right to start the
   helper (a desktop product grants that to interactive users);
@@ -282,10 +283,70 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
 - refuses a first install while a product it conflicts with (`conflicts`, either way) is installed
   by its MSI: a detect-only search for that product's UpgradeCode (`FindRelatedProducts`, never
   removing it) and a launch condition naming it. A repair or a removal is never refused;
+- with `[product.<id>.msi] path = true`, appends the install directory to `PATH` (the system's,
+  or the user's for a per-user install) and takes it out again on removal; with `wer-exclude`,
+  writes each named program's Windows Error Reporting exclusion
+  (`…\Windows Error Reporting\ExcludedApplications`, a DWORD 1 named for the executable, as
+  `WerAddExcludedApplication` writes it) under `HKLM`, or `HKCU` per user;
 - allows two builds of one version (the sequence orders them) and refuses downgrades. Its
   UpgradeCode is `upgrade-code`, else derived from the vendor and the product id: pin it before
   renaming either, and to the code earlier MSIs carry when another tool built them
   ([Migrating an existing product](#migrating-an-existing-product)).
+
+#### Install scope
+
+`[product.<id>.msi] install-scope` chooses who an MSI installs for:
+
+| Scope | Package | A plain `msiexec /i` | Files | Registry (`HKMU`, `HKCR`), shortcuts |
+|---|---|---|---|---|
+| `machine` (default) | `ALLUSERS=1` (WiX `perMachine`) | every user; needs administrator rights | `%ProgramFiles%\<Vendor>\<Directory>` | `HKLM`, `HKLM\Software\Classes`; all users' Start menu and desktop |
+| `user` | Windows Installer 5's dual-purpose package, `ALLUSERS=2` and `MSIINSTALLPERUSER=1` (WiX `perUserOrMachine`), and a launch condition refusing a machine-wide install | the installing user; no administrator rights, no UAC prompt | `%LocalAppData%\Programs\<Vendor>\<Directory>` | `HKCU`, `HKCU\Software\Classes`; the user's Start menu and desktop |
+| `either` | the same dual-purpose package | the installing user, as `user`; `ALLUSERS=1 MSIINSTALLPERUSER=""` installs for every user, as `machine` (a UAC prompt) | either | either |
+
+With `install-scope = "either"`, or a `license`, an interactive install shows seaworthy's setup
+dialogs ([Setup dialogs](#setup-dialogs)): `either` offers "just for me" (the default) or "everyone on
+this computer" there, which sets `ALLUSERS=2` and `MSIINSTALLPERUSER` (1, or empty) as Microsoft's
+single-package authoring describes, and preselects "everyone" when the command line asked for it.
+
+A per-user install is Windows Installer's own: with `ALLUSERS=2` and `MSIINSTALLPERUSER=1` it
+redirects `ProgramFiles64Folder` to the user's Programs folder, writes `HKMU` and `HKCR` rows under
+`HKCU`, puts the shortcuts in the user's folders, and resets `ALLUSERS` to empty (to 1 for a
+machine-wide install), which the components that differ by scope (`PATH`) are conditioned on. The
+package is otherwise the same: no component, key path or custom action changes, and adopt-msi checks
+it the same way. WiX's own `perUser` isn't used: it sets no `ALLUSERS`, so Program Files would stay
+the machine's.
+
+A per-user scope is refused for anything only a machine-wide install can do, so a per-user package
+holds nothing that needs administrator rights (Microsoft's single-package authoring rules): a
+service (registered with the service control manager, with its directories' descriptors and its
+recovery actions run as LocalSystem) and the update helper (a LocalSystem service, its
+`%ProgramData%` folders made by a custom action running as SYSTEM, and the update policy under
+`HKLM`). A per-user product therefore updates through a new MSI, not the helper.
+
+Windows Installer upgrades a product in the context it was installed in: install a new release of an
+`either` product the way the installed one was installed (`ALLUSERS=1 MSIINSTALLPERUSER=""` again for
+a machine-wide one), or the new one installs beside it. A conflict's detect-only search
+(`conflicts`) is Windows Installer's same related-product search, so don't rely on it to see a
+conflicting product installed in the other context.
+
+#### Setup dialogs
+
+A product with `[product.<id>.msi] license`, or `install-scope = "either"`, gets a full-UI setup:
+a first dialog with the licence (an accept check box enabling Install) and/or the scope choice, a
+progress dialog, a cancel confirmation, and Windows Installer's standard dialogs (errors, files in
+use, and the finished, cancelled and failed dialogs, in the install and the administrative UI
+sequences, as ICE20 requires). A quiet or basic-UI install shows none of them. Without either option
+the MSI has no dialogs at all.
+
+They are seaworthy's own, written into the `.wxs`, not WiX's WixUI sets: WixUI_Minimal's licence page
+has a Print button that runs a native DLL from the `Binary` table (`WixUIPrintEula`), and
+WixUI_Advanced adds a folder browser (`SetTargetPath`, so a person could install the product anywhere)
+and another DLL action (`WixUIValidatePath`); both need the UI extension downloaded into the build.
+seaworthy's dialogs are text only and run no code: every event ends a dialog, opens one, or sets the
+scope's two properties. Their appearance is plain (no banner bitmaps) and their text English.
+
+adopt-msi models them exactly (below), so a built MSI's dialogs can't do more than the `.wxs`
+declares, and the `.wxs` itself is refused if a dialog would do more than that.
 
 With `SEAWORTHY_WIX` naming WiX v5.0.2, `package` builds the MSI itself. Otherwise a Windows runner
 builds it from the `.wxs` (`wix build -arch x64 -bindpath tree=<tree> -o <name>.msi <name>.wxs`, then
@@ -295,19 +356,33 @@ and its security-relevant tables must be exactly what the `.wxs` declares (read 
 `msiinfo export -s`, compared by what each row resolves to, never by the ids a tool chose):
 
 - every custom action (its type, source and command line), service (name, account, start type,
-  type, error control, arguments and the binary it runs), service control, registry value,
-  `MsiLockPermissionsEx` descriptor (the directory or service it's on, and its SDDL) and shortcut
-  (folder, name, target, arguments, working directory): no row more, none less, none other;
+  type, error control, arguments and the binary it runs), service control, registry value (the file
+  types' `HKCR` values among them),
+  `MsiLockPermissionsEx` descriptor (the directory or service it's on, and its SDDL), shortcut
+  (folder, name, target, arguments, working directory) and environment change (`PATH` alone,
+  appended, removed on uninstall, the system's or the user's, the directory it adds and its
+  component's condition): no row more, none less, none other;
+- every `Property` row: the `.wxs`'s values (the product's name, manufacturer, version, language and
+  UpgradeCode, its scope's `ALLUSERS` and `MSIINSTALLPERUSER`, every `<Property Value=>`), WiX's
+  ProductCode, and `SecureCustomProperties` naming only properties the `.wxs` marks secure, so no
+  property the install would act on (an update server, a scope) is planted;
+- the setup dialogs' tables, row for row, by every column that decides what a dialog does: each
+  dialog, each control's type and the property it's bound to, each control event (event, argument,
+  condition, order), control condition, event subscription, radio button and check box value, text
+  style, and where the sequences show each dialog; a `.wxs` whose dialogs would run a custom action
+  (`DoAction`), point the install elsewhere (`SetTargetPath`), change features, set any property
+  but the scope's, or use a control a person can type a value into, a bitmap or an icon, is refused;
 - every sequence action is a standard action (never `ForceReboot` or `ScheduleReboot`) or a custom
   action the `.wxs` schedules in that sequence, on its condition;
 - no row in a table a seaworthy MSI never uses (`Binary`, `SelfReg`, `MsiEmbeddedChainer`,
-  `MsiEmbeddedUI`, COM and file-type registrations, `Environment`, INI files, `MoveFile`,
+  `MsiEmbeddedUI`, COM and advertised file-type registrations, INI files, `MoveFile`,
   `DuplicateFile`, `RemoveFile`, ODBC, `LockPermissions`, the service failure-action tables,
-  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode or is
+  `Font`, `RemoveRegistry`, list, combo and list-view items, billboards, `UIText`, `ActionText`,
+  `Error`), and every `Upgrade` row names the product's UpgradeCode or is
   a detect-only search the `.wxs` declares for a product it conflicts with (that product's
   UpgradeCode and property, never removing it);
-- a `.wxs` with an element the check doesn't model (a WiX extension's, `Environment`, …) is
-  refused, so the check grows with the `.wxs`, never behind it.
+- a `.wxs` with an element the check doesn't model (a WiX extension's, an `Environment` other than
+  an appended `PATH`, …) is refused, so the check grows with the `.wxs`, never behind it.
 
 Then it's signed with the same signers, its manifest and SBOM are written, and it joins
 `packages.json`. The Windows runner still builds the binaries that are signed, so it's trusted for a
@@ -356,6 +431,38 @@ same way
 ([configuration.md](configuration.md#signingtoml)). The ticket is stapled to the dmg or pkg, the
 outermost container; an app copied out of the dmg is checked against the notary service online.
 A dmg isn't byte-reproducible (`hdiutil` writes timestamps and a UUID).
+
+### File types
+
+`[[product.<id>.file-types]]` registers each document type the product's `gui` program opens, as each
+platform's installer registers one:
+
+| | Linux (deb, rpm, pacman) | Windows (MSI) | macOS (the app bundle) |
+|---|---|---|---|
+| The type | an owner's shared-mime-info package, `/usr/share/mime/packages/<app-id>.xml`: its name, a glob per extension, its magic | an owner's `HKCR\.<ext>` default (the ProgID), `Content Type`, and `HKCR\MIME\Database\Content Type\<type>`'s `Extension` | `UTExportedTypeDeclarations` (an owner), `UTImportedTypeDeclarations` (an editor or viewer of a type that isn't Apple's): the UTI, what it conforms to, its extensions and media type |
+| Its icon | an owner's `/usr/share/icons/hicolor/<size>/mimetypes/<type with / as ->.png` (and `scalable/….svg`), the name shared-mime-info gives the type | the ProgID's `DefaultIcon`, `<ProgID>.ico` in the install directory | `Contents/Resources/<UTI>.icns`, the document type's and the UTI's icon |
+| The program | the menu entry's `MimeType` (every type) and `Exec` (the default verb's arguments, `%f` for the file) | `HKCR\<ProgID>` and `HKCR\.<ext>\OpenWithProgids\<ProgID>` (every role) | `CFBundleDocumentTypes`: the name, `CFBundleTypeRole`, `LSHandlerRank`, the UTI, the icon |
+| Other verbs | a KDE service menu each, `/usr/share/kio/servicemenus/<app-id>-<verb>.desktop` | `HKCR\<ProgID>\shell\<verb>`, its label and `command` (`"<launcher>" <arguments>`, the file as `"%1"`); `shell`'s default the default verb | — (macOS hands an app its documents as an Apple event, not a command line) |
+
+On Windows these are plain `HKCR` registry values, which Windows Installer writes under
+`HKLM\Software\Classes` for a machine-wide install and `HKCU\Software\Classes` for a per-user one,
+and removes with the product: what WiX's `<ProgId Advertise="no">` compiles to, so no advertised
+`ProgId`, `Extension`, `Verb` or `MIME` row (nor COM's `Class`) is ever in the MSI, and adopt-msi
+compares every one of these values, as every registry value. `OpenWithProgids`' value carries the
+type's name: the shell reads the value names alone, and Windows Installer writes no empty string.
+Windows Installer doesn't tell the shell the associations changed (`SHChangeNotify`): opening a file
+works at once, while Explorer may show the new document icon only after it refreshes.
+
+On Linux nothing runs at install: shared-mime-info's, desktop-file-utils' and the icon theme's own
+triggers (dpkg triggers, rpm file triggers, pacman hooks) compile the MIME database, the menu's
+MIME cache and the icon cache whenever a package changes their directories, and again when it's
+removed; deb and rpm recommend `shared-mime-info` beside `hicolor-icon-theme`. desktop-file-validate
+checks the menu entry; it doesn't read KDE's `Type=Service` menus, which are generated from the
+validated verbs alone. Nemo's actions aren't written: Nemo puts the file into a command line it then
+splits as a shell would, and documents no quoting of it.
+
+A product's file types are its alone in a `seaworthy.toml` (two products registering `.trove` would
+each take it from the other, and one's removal would remove the other's), unless the two conflict.
 
 ### Release versions
 
@@ -621,7 +728,7 @@ instead of upgrading it, or never reaches the machines at all. Check every row b
 | MSI UpgradeCode | `upgrade-code`, else a code derived from the vendor and the product id. Another tool derives its codes another way, so the derived one is never the code its MSIs carry. | The MSI installs beside the old product: two entries in Programs and Features, two copies of the service. **Pin `upgrade-code`** to the code the shipped MSIs carry (`msiinfo export <old>.msi Property` with msitools, or the `Property` table in Orca). `seaworthy check` notes every product with an `msi` output and no `upgrade-code`. |
 | MSI ProductVersion | `MAJOR.MINOR.PATCH`; Windows Installer compares the first three fields only, allows the same version again and refuses a downgrade. | The first release is refused as a downgrade unless its version compares at or above the installed one on those three fields (a build counter the old versions kept in the third field, say). |
 | MSI component GUIDs | Derived from the UpgradeCode and each file. | Nothing to do: the major upgrade removes the old product before it installs (`afterInstallInitialize`), so the two never share a component. |
-| MSI scope | Per machine. | A per-user installation of the old product isn't found by the upgrade: remove it first. |
+| MSI scope | `[product.<id>.msi] install-scope`: per machine by default; `user` or `either` installs per user ([Install scope](#install-scope)). | Windows Installer upgrades a product only in the context it was installed in: a per-user installation of the old product isn't found by a machine-wide upgrade (or the other way round), and the two stay installed side by side. Keep the old product's scope, or remove the old installations first. |
 | Package names | `<vendor>-<id>` in lowercase, for deb, rpm and pacman. | apt, dnf and pacman see an unrelated package: both stay installed and collide on shared paths (`/usr/bin/<command>`, units), and the update helper doesn't find the installed release. Choose `vendor` and the product id so the name is the old one, or name the old package in `linux.replaces` (every format then conflicts with it and replaces it), or retire it on each machine. |
 | Service names | `[product.<id>.service]`'s `name`: the SCM name, the systemd unit's basename, the LaunchDaemon's label; with `state-directory` (systemd `StateDirectory=`) and the sandbox `user`. | The old service keeps running beside the new one wherever the old package or product survives, and a new state directory or user starts the service without its state, or without the right to it. Keep all three. |
 | Install directories | `/opt/<vendor>/<id>` (lowercase), `%ProgramFiles%\<Vendor>\<windows-directory>`, `/Applications/<Display Name>.app`, `/usr/local/<vendor>/<id>` (lowercase); state, staging and logs under `%ProgramData%\<Vendor>\<windows-directory>`. | Files move: whatever names the old paths (scripts, firewall rules, monitoring, allow-lists) stops matching, and state left under the old directory isn't carried over. |

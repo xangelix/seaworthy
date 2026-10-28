@@ -139,6 +139,14 @@ pub enum Role {
     /// A macOS service's uninstaller, `Contents/Resources/uninstall`
     /// (`package` writes it for a pkg).
     Uninstaller,
+    /// Windows: the MSI's licence page (`[product.<id>.msi] license`),
+    /// staged beside the tree for WiX to read, never installed.
+    License,
+    /// A file type's document icon (`[[product.<id>.file-types]]`): a
+    /// Linux hicolor `mimetypes` icon, the Windows `.ico` its ProgID's
+    /// `DefaultIcon` names (in the install directory), the macOS `.icns`
+    /// in the bundle's `Contents/Resources`. Data, never stamped or signed.
+    DocumentIcon,
 }
 
 /// One file in a laid-out tree.
@@ -181,6 +189,10 @@ pub struct Layout {
     /// (its `install_path`, the MSI's `!(bindpath.tree)` reference) for the
     /// MSI's Icon table; never installed as a file.
     pub icon: Option<File>,
+    /// Windows: the MSI's licence (RTF), staged as
+    /// `tree/<Vendor>/<Directory>.rtf` (its `install_path`) for the setup
+    /// dialog's text; never installed as a file.
+    pub license: Option<File>,
 }
 
 impl Layout {
@@ -622,6 +634,58 @@ pub fn layout(
                 sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
             });
         }
+        // File types' document icons: the Windows .ico in the install
+        // directory (`<ProgID>.ico`, the ProgID's DefaultIcon), the macOS
+        // .icns in the bundle's resources (`<UTI>.icns`); the Linux ones
+        // below, with the menu entry's icons.
+        for ft in &product.file_types {
+            let (path, name, root, check): (_, String, _, fn(&[u8]) -> bool) = match os {
+                Os::Windows => match (&ft.windows_icon, &ft.progid) {
+                    (Some(path), Some(progid)) => {
+                        (path, format!("{progid}.ico"), &main_root, is_ico)
+                    }
+                    _ => continue,
+                },
+                Os::Macos => match (&ft.macos_icon, &ft.uti, &bundle_root) {
+                    (Some(path), Some(uti), Some(bundle)) => (
+                        path,
+                        format!("Contents/Resources/{}.icns", uti.identifier),
+                        bundle,
+                        |bytes: &[u8]| bytes.get(..4) == Some(b"icns".as_slice()),
+                    ),
+                    _ => continue,
+                },
+                Os::Linux => continue,
+            };
+            let source = inside(&config.dir, path)?;
+            let bytes = read_data(&source)?;
+            if !check(&bytes) {
+                return Err(DistError::Layout(format!(
+                    "{}: not an {} file (file-types' document icon)",
+                    source.display(),
+                    if windows { "ICO" } else { "ICNS" }
+                )));
+            }
+            let install_path = join_install(&root.0, &name);
+            let key = fold(&install_path);
+            if claimed_dirs.contains(&key)
+                || files.iter().any(|f: &File| fold(&f.install_path) == key)
+            {
+                return Err(DistError::Layout(format!(
+                    "{install_path} (a file type's document icon) would install over another file"
+                )));
+            }
+            let staged = root.1.join(&name);
+            write_data(&staged, &bytes)?;
+            files.push(File {
+                install_path,
+                staged,
+                role: Role::DocumentIcon,
+                program: None,
+                mode: 0o644,
+                sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
+            });
+        }
         let mut desktop_files = Vec::new();
         let mut icon = None;
         if let Some(desktop) = product.desktop.as_ref().filter(|_| !macos) {
@@ -654,33 +718,7 @@ pub fn layout(
                     let source = inside(&config.dir, path)?;
                     let bytes = read_data(&source)?;
                     let extension = crate::config::extension_of(path);
-                    let size_dir = if extension == "svg" {
-                        if !is_svg(&bytes) {
-                            return Err(DistError::Layout(format!(
-                                "{}: not an SVG image (desktop.linux-icons)",
-                                source.display()
-                            )));
-                        }
-                        "scalable".to_owned()
-                    } else {
-                        let size = png_size(&bytes)
-                            .filter(|(w, h)| w == h && HICOLOR_SIZES.contains(w))
-                            .map(|(w, _)| w)
-                            .ok_or_else(|| {
-                                DistError::Layout(format!(
-                                    "{}: a Linux icon is a square PNG of a hicolor size ({})",
-                                    source.display(),
-                                    HICOLOR_SIZES.map(|s| s.to_string()).join(", ")
-                                ))
-                            })?;
-                        if !sizes.insert(size) {
-                            return Err(DistError::Layout(format!(
-                                "{}: a second {size}x{size} icon (desktop.linux-icons: one per size)",
-                                source.display()
-                            )));
-                        }
-                        format!("{size}x{size}")
-                    };
+                    let size_dir = linux_icon_size(&source, &bytes, &extension, &mut sizes)?;
                     let install_path =
                         format!("/usr/share/icons/hicolor/{size_dir}/apps/{app_id}.{extension}");
                     let staged = tree.join(install_path.trim_start_matches('/'));
@@ -696,6 +734,71 @@ pub fn layout(
                 }
             }
         }
+        // An owner's document icons, named for its type as shared-mime-info
+        // names them (`application-x-acme-trove`), in the theme's
+        // `mimetypes` context.
+        if os == Os::Linux {
+            for ft in product
+                .file_types
+                .iter()
+                .filter(|ft| ft.role == crate::config::FileTypeRole::Owner)
+            {
+                let mut sizes = BTreeSet::new();
+                for path in &ft.linux_icons {
+                    let source = inside(&config.dir, path)?;
+                    let bytes = read_data(&source)?;
+                    let extension = crate::config::extension_of(path);
+                    let size_dir = linux_icon_size(&source, &bytes, &extension, &mut sizes)?;
+                    let install_path = format!(
+                        "/usr/share/icons/hicolor/{size_dir}/mimetypes/{}.{extension}",
+                        ft.icon_name()
+                    );
+                    let staged = tree.join(install_path.trim_start_matches('/'));
+                    write_data(&staged, &bytes)?;
+                    desktop_files.push(File {
+                        install_path,
+                        staged,
+                        role: Role::DocumentIcon,
+                        program: None,
+                        mode: 0o644,
+                        sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
+                    });
+                }
+            }
+        }
+        let mut license = None;
+        if let (true, Some(path)) = (
+            windows,
+            product.msi.as_ref().and_then(|msi| msi.license.as_ref()),
+        ) {
+            let source = inside(&config.dir, path)?;
+            let bytes = read_data(&source)?;
+            if !bytes.starts_with(b"{\\rtf") {
+                return Err(DistError::Layout(format!(
+                    "{}: not an RTF document (it must start with {{\\rtf): msi.license",
+                    source.display()
+                )));
+            }
+            if bytes.len() as u64 > crate::config::MAX_LICENSE_BYTES {
+                return Err(DistError::Layout(format!(
+                    "{}: {} bytes, past the {} a licence may have (msi.license)",
+                    source.display(),
+                    bytes.len(),
+                    crate::config::MAX_LICENSE_BYTES
+                )));
+            }
+            let name = format!("{}.rtf", product.windows_directory());
+            let staged = tree.join(&config.defaults.vendor).join(&name);
+            write_data(&staged, &bytes)?;
+            license = Some(File {
+                install_path: format!("{}\\{name}", config.defaults.vendor),
+                staged,
+                role: Role::License,
+                program: None,
+                mode: 0o644,
+                sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
+            });
+        }
         let layout = Layout {
             product: id.to_owned(),
             triple: triple.to_owned(),
@@ -704,6 +807,7 @@ pub fn layout(
             files,
             desktop_files,
             icon,
+            license,
         };
         write_manifest_with(&layout, &post_link)?;
         layouts.push(layout);
@@ -743,6 +847,7 @@ pub(crate) fn write_manifest_with(layout: &Layout, post_link: &PostLinks) -> Res
             .iter()
             .chain(&layout.desktop_files)
             .chain(&layout.icon)
+            .chain(&layout.license)
             .map(|f| ManifestFile {
                 install_path: &f.install_path,
                 path: f
@@ -842,7 +947,9 @@ pub(crate) fn recheck_record(path: &Path, role: &Role, when: &str) -> Result<(),
         | Role::Icon
         | Role::BundleInfo
         | Role::CodeSignature
-        | Role::Uninstaller => Ok(()),
+        | Role::Uninstaller
+        | Role::License
+        | Role::DocumentIcon => Ok(()),
     };
     result.map_err(|e| {
         DistError::Layout(format!(
@@ -1101,6 +1208,42 @@ fn code_kind(bytes: &[u8]) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// A Linux icon's hicolor directory: `scalable` for an SVG, `<n>x<n>` for
+/// a square PNG of a hicolor size not seen yet (`sizes`).
+fn linux_icon_size(
+    source: &Path,
+    bytes: &[u8],
+    extension: &str,
+    sizes: &mut BTreeSet<u32>,
+) -> Result<String, DistError> {
+    if extension == "svg" {
+        if !is_svg(bytes) {
+            return Err(DistError::Layout(format!(
+                "{}: not an SVG image (a Linux icon)",
+                source.display()
+            )));
+        }
+        return Ok("scalable".to_owned());
+    }
+    let size = png_size(bytes)
+        .filter(|(w, h)| w == h && HICOLOR_SIZES.contains(w))
+        .map(|(w, _)| w)
+        .ok_or_else(|| {
+            DistError::Layout(format!(
+                "{}: a Linux icon is a square PNG of a hicolor size ({})",
+                source.display(),
+                HICOLOR_SIZES.map(|s| s.to_string()).join(", ")
+            ))
+        })?;
+    if !sizes.insert(size) {
+        return Err(DistError::Layout(format!(
+            "{}: a second {size}x{size} icon (one per size)",
+            source.display()
+        )));
+    }
+    Ok(format!("{size}x{size}"))
 }
 
 /// A PNG's width and height, from its IHDR chunk.
