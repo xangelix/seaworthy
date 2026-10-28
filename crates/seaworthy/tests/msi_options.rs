@@ -620,12 +620,16 @@ fn the_licence_is_checked_when_laid_out() {
         let input = dir.path().join("artifacts");
         common::program_artifacts(&config, "trove", &input, false);
         let verified = seaworthy::verify::verify(&config, "trove", &input).unwrap();
+        // Without stripping: GNU strip is Linux's only (macOS runs this too).
         let err = seaworthy::layout::layout(
             &config,
             "trove",
             &verified,
             &dir.path().join("dist"),
-            seaworthy::layout::Options::default(),
+            seaworthy::layout::Options {
+                strip: false,
+                ..seaworthy::layout::Options::default()
+            },
         )
         .unwrap_err()
         .to_string();
