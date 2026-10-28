@@ -661,7 +661,7 @@ pub struct Product {
     #[serde(default)]
     pub macos: Option<Macos>,
     /// `[product.<id>.msi]`: how the MSI installs (an `msi` output only):
-    /// its scope, `PATH`, Windows Error Reporting.
+    /// its scope, a licence page, `PATH`, Windows Error Reporting.
     #[serde(default)]
     pub msi: Option<MsiOptions>,
 }
@@ -671,6 +671,7 @@ pub struct Product {
 /// ```toml
 /// [product.trove.msi]
 /// install-scope = "either"        # per user by default; everyone on request
+/// license = "packaging/license.rtf"
 /// path = true                     # the install directory on PATH (its cli programs)
 /// wer-exclude = ["TroveGui"]      # no Windows Error Reporting for this program
 /// ```
@@ -681,6 +682,14 @@ pub struct MsiOptions {
     /// default), `user` or `either`.
     #[serde(default)]
     pub install_scope: InstallScope,
+    /// A licence page shown before an interactive install, which a person
+    /// must accept to go on (an RTF file
+    /// relative to `seaworthy.toml`, starting `{\rtf`, at most
+    /// [`MAX_LICENSE_BYTES`]): the person installing accepts it to go on. A
+    /// quiet install (`msiexec /qn`, `/qb`) shows no dialog, as Windows
+    /// Installer does.
+    #[serde(default)]
+    pub license: Option<PathBuf>,
     /// Append the install directory to `PATH` (the system's for a
     /// machine-wide install, the user's for a per-user one; removed on
     /// uninstall), so the product's `cli` programs run by name.
@@ -692,6 +701,11 @@ pub struct MsiOptions {
     #[serde(default)]
     pub wer_exclude: Vec<String>,
 }
+
+/// The largest licence an MSI shows (`[product.<id>.msi] license`): 1 MiB
+/// of RTF, far past any licence's text, so a wrong file (an image saved as
+/// `.rtf`) is refused rather than packed into every installer.
+pub const MAX_LICENSE_BYTES: u64 = 1024 * 1024;
 
 /// Who an MSI installs for (`[product.<id>.msi] install-scope`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -706,8 +720,8 @@ pub enum InstallScope {
     /// no administrator rights; a machine-wide install is refused.
     User,
     /// Per user by default, or every user when the person installing
-    /// chooses it (`ALLUSERS=1 MSIINSTALLPERUSER=""` on the command
-    /// line).
+    /// chooses it (on the setup dialog, or `ALLUSERS=1
+    /// MSIINSTALLPERUSER=""` on the command line).
     Either,
 }
 
@@ -2617,7 +2631,8 @@ impl Config {
     }
 
     /// `[product.<id>.msi]`: only with an `msi` output; a per-user scope
-    /// only for a product with nothing machine-wide to install; `path` with a `cli` program to put on it; each
+    /// only for a product with nothing machine-wide to install; a licence
+    /// that is an RTF path; `path` with a `cli` program to put on it; each
     /// `wer-exclude` a program of the product, once.
     fn validate_msi_options(&self, id: &str, p: &Product) -> Result<(), DistError> {
         let at = |key: &str, why: &str| DistError::Config(format!("product.{id}.msi.{key}: {why}"));
@@ -2655,6 +2670,17 @@ impl Config {
                     ),
                 ));
             }
+        }
+        if let Some(license) = &msi.license
+            && (!is_relative_path(license) || extension_of(license) != "rtf")
+        {
+            return Err(at(
+                "license",
+                &format!(
+                    "{} must be an .rtf path relative to seaworthy.toml (no `..`, no `$`)",
+                    license.display()
+                ),
+            ));
         }
         let programs = p.programs();
         if msi.path && !programs.iter().any(|program| program.role == Role::Cli) {
@@ -3361,7 +3387,7 @@ impl Product {
     }
 
     /// The MSI's installation options: `[product.<id>.msi]`, else the
-    /// defaults (machine-wide, nothing on `PATH`).
+    /// defaults (machine-wide, no licence page, nothing on `PATH`).
     #[must_use]
     pub fn msi_options(&self) -> MsiOptions {
         self.msi.clone().unwrap_or_default()

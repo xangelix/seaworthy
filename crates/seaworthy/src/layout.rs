@@ -135,6 +135,9 @@ pub enum Role {
     /// A macOS service's uninstaller, `Contents/Resources/uninstall`
     /// (`package` writes it for a pkg).
     Uninstaller,
+    /// Windows: the MSI's licence page (`[product.<id>.msi] license`),
+    /// staged beside the tree for WiX to read, never installed.
+    License,
 }
 
 /// One file in a laid-out tree.
@@ -177,6 +180,10 @@ pub struct Layout {
     /// (its `install_path`, the MSI's `!(bindpath.tree)` reference) for the
     /// MSI's Icon table; never installed as a file.
     pub icon: Option<File>,
+    /// Windows: the MSI's licence (RTF), staged as
+    /// `tree/<Vendor>/<Directory>.rtf` (its `install_path`) for the setup
+    /// dialog's text; never installed as a file.
+    pub license: Option<File>,
 }
 
 impl Layout {
@@ -657,6 +664,39 @@ pub fn layout(
                 }
             }
         }
+        let mut license = None;
+        if let (true, Some(path)) = (
+            windows,
+            product.msi.as_ref().and_then(|msi| msi.license.as_ref()),
+        ) {
+            let source = inside(&config.dir, path)?;
+            let bytes = read_data(&source)?;
+            if !bytes.starts_with(b"{\\rtf") {
+                return Err(DistError::Layout(format!(
+                    "{}: not an RTF document (it must start with {{\\rtf): msi.license",
+                    source.display()
+                )));
+            }
+            if bytes.len() as u64 > crate::config::MAX_LICENSE_BYTES {
+                return Err(DistError::Layout(format!(
+                    "{}: {} bytes, past the {} a licence may have (msi.license)",
+                    source.display(),
+                    bytes.len(),
+                    crate::config::MAX_LICENSE_BYTES
+                )));
+            }
+            let name = format!("{}.rtf", product.windows_directory());
+            let staged = tree.join(&config.defaults.vendor).join(&name);
+            write_data(&staged, &bytes)?;
+            license = Some(File {
+                install_path: format!("{}\\{name}", config.defaults.vendor),
+                staged,
+                role: Role::License,
+                program: None,
+                mode: 0o644,
+                sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
+            });
+        }
         let layout = Layout {
             product: id.to_owned(),
             triple: triple.to_owned(),
@@ -665,6 +705,7 @@ pub fn layout(
             files,
             desktop_files,
             icon,
+            license,
         };
         write_manifest(&layout)?;
         layouts.push(layout);
@@ -694,6 +735,7 @@ pub(crate) fn write_manifest(layout: &Layout) -> Result<(), DistError> {
             .iter()
             .chain(&layout.desktop_files)
             .chain(&layout.icon)
+            .chain(&layout.license)
             .map(|f| ManifestFile {
                 install_path: &f.install_path,
                 path: f
@@ -784,7 +826,8 @@ pub(crate) fn recheck_record(path: &Path, role: &Role, when: &str) -> Result<(),
         | Role::Icon
         | Role::BundleInfo
         | Role::CodeSignature
-        | Role::Uninstaller => Ok(()),
+        | Role::Uninstaller
+        | Role::License => Ok(()),
     };
     result.map_err(|e| {
         DistError::Layout(format!(

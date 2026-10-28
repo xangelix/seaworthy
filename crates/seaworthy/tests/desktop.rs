@@ -1052,8 +1052,8 @@ enum Payload<'a> {
 /// wixl from the tree's layout.json, every file but the icon), at
 /// `version` with `upgrade_code`, `payload` changed as asked. Its tables
 /// carry what the viewer's .wxs declares beside the payload, as WiX builds
-/// it (golden/wix/desktop.wxs): the install location custom action and
-/// the two shortcuts with their registry key paths.
+/// it (golden/wix/desktop.wxs): its properties, the install location
+/// custom action and the two shortcuts with their registry key paths.
 fn fixture_msi(
     dist: &Path,
     version: &str,
@@ -1153,7 +1153,10 @@ fn fixture_msi(
         "[InstallDir]"
     };
     let mut declared = format!(
-        r#"<CustomAction Id="SetARPINSTALLLOCATION" Property="ARPINSTALLLOCATION" Value="{location}" />
+        r#"<Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon.ico" />
+    <Property Id="ARPCONTACT" Value="Acme Packaging &lt;pkg@acme.test&gt;" />
+    <CustomAction Id="SetARPINSTALLLOCATION" Property="ARPINSTALLLOCATION" Value="{location}" />
     <InstallExecuteSequence><Custom Action="SetARPINSTALLLOCATION" After="CostFinalize" /></InstallExecuteSequence>
 "#
     );

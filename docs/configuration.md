@@ -291,13 +291,15 @@ directory, sets none of them):
 ```toml
 [product.trove.msi]
 install-scope = "either"        # per user by default, everyone on request
+license = "packaging/license.rtf"  # a licence page to accept before installing
 path = true                     # the install directory on PATH: its cli programs run by name
 wer-exclude = ["TroveGui"]      # Windows Error Reporting leaves this program alone
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `install-scope` | `"machine"` | Who the MSI installs for. `machine`: every user (`%ProgramFiles%`, `HKLM`), which takes administrator rights. `user`: the installing user alone (`%LocalAppData%\Programs`, `HKCU`, no administrator rights); a machine-wide install is refused. `either`: per user by default, or for every user when the person installing asks (`msiexec /i <msi> ALLUSERS=1 MSIINSTALLPERUSER=""`). `user` and `either` are refused for a product with a service or the update helper, which are machine-wide by nature ([packaging.md](packaging.md#install-scope)). |
+| `install-scope` | `"machine"` | Who the MSI installs for. `machine`: every user (`%ProgramFiles%`, `HKLM`), which takes administrator rights. `user`: the installing user alone (`%LocalAppData%\Programs`, `HKCU`, no administrator rights); a machine-wide install is refused. `either`: per user by default, or for every user when the person installing chooses it, on the setup dialog or with `msiexec /i <msi> ALLUSERS=1 MSIINSTALLPERUSER=""`. `user` and `either` are refused for a product with a service or the update helper, which are machine-wide by nature ([packaging.md](packaging.md#install-scope)). |
+| `license` | — | An RTF file (relative to `seaworthy.toml`, inside its directory, starting `{\rtf`, at most 1 MiB): an interactive install first shows it, and installs only once the person installing accepts it. With `install-scope = "either"` the same dialog offers the scope. A quiet or basic-UI install (`msiexec /qn`, `/qb`, the update helper's) shows no dialog, as Windows Installer does: accepting the licence is then the deployer's business. |
 | `path` | `false` | Append the install directory to `PATH`, the system's for a machine-wide install and the user's for a per-user one, and take it out again on removal, so the product's `cli` programs run by name (every program of the product installs in that one directory, so each runs by its executable's name). Needs a `cli` program. |
 | `wer-exclude` | `[]` | Programs, by executable, that Windows Error Reporting leaves alone (no crash report, no "stopped working" dialog): a value under `ExcludedApplications`, in `HKLM` for a machine-wide install and `HKCU` for a per-user one. Windows matches the executable's file name, so the exclusion covers any program of that name. Each a program of the product, once. |
 

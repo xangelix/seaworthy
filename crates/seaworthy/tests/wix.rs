@@ -869,16 +869,37 @@ fn the_msi_carries_exactly_the_designed_tables() {
             "18"
         ]
     );
-    let registry = rows(&msi, "Registry");
-    assert_eq!(registry.len(), 1);
+    // The update policy and the installed release (one component), and
+    // the update server (its own, installed only when SERVER is set).
+    let mut registry: Vec<Vec<String>> = rows(&msi, "Registry")
+        .into_iter()
+        .map(|r| r[1..].to_vec())
+        .collect();
+    registry.sort();
     assert_eq!(
-        registry[0][1..],
+        registry,
         [
-            "2",
-            "SOFTWARE\\Acme\\Agent",
-            "UpdatePolicy",
-            "[UPDATES]",
-            "UpdatePolicyDefault"
+            [
+                "2",
+                "SOFTWARE\\Acme\\Agent",
+                "Release",
+                "1.4.0~rc.2-812",
+                "UpdatePolicyDefault"
+            ],
+            [
+                "2",
+                "SOFTWARE\\Acme\\Agent",
+                "Server",
+                "[SERVER]",
+                "UpdateServer"
+            ],
+            [
+                "2",
+                "SOFTWARE\\Acme\\Agent",
+                "UpdatePolicy",
+                "[UPDATES]",
+                "UpdatePolicyDefault"
+            ],
         ]
     );
     let launch: Vec<String> = rows(&msi, "LaunchCondition")

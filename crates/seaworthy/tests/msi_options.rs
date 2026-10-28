@@ -452,3 +452,223 @@ fn wix_builds_each_scope_and_adopt_msi_accepts_it() {
         assert!(found.is_empty(), "{scope}: {found:#?}");
     }
 }
+
+/// A minimal RTF licence.
+const LICENSE_RTF: &str = "{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Segoe UI;}}\n\\f0\\fs18 Acme Trove licence: use it [freely] {at} 100% of the time.\\par\n}\n";
+
+/// `products` loaded from a directory holding `packaging/license.rtf`.
+fn with_license_file(products: &str, dir: &Path) -> Config {
+    std::fs::create_dir_all(dir.join("packaging")).unwrap();
+    std::fs::write(dir.join("packaging/license.rtf"), LICENSE_RTF).unwrap();
+    std::fs::write(dir.join("seaworthy.toml"), format!("{DEFAULTS}{products}")).unwrap();
+    Config::load(&dir.join("seaworthy.toml")).unwrap()
+}
+
+/// The licence page and the scope choice: WiX 5 builds each combination
+/// (a licence alone, the choice alone, both), its dialogs are seaworthy's
+/// own (no `Binary` row, no custom action but the scope's property
+/// setter), and adopt-msi's model accepts exactly its tables.
+#[test]
+fn wix_builds_the_setup_dialogs_and_adopt_msi_accepts_them() {
+    let Some(wix) = wix() else {
+        return;
+    };
+    if !have("msiinfo", &["--version"]) {
+        return;
+    }
+    for (scope, license) in [
+        ("user", true),
+        ("either", false),
+        ("either", true),
+        ("machine", true),
+    ] {
+        let mut msi = format!("install-scope = \"{scope}\"");
+        if license {
+            msi.push_str("\nlicense = \"packaging/license.rtf\"");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_license_file(&with_msi(TROVE, "trove", &msi), dir.path());
+        let layouts = program_layouts(&config, "trove", &dir.path().join("out"), false);
+        let windows = layouts.iter().find(|l| l.triple == WINDOWS).unwrap();
+        let wxs = seaworthy::wix::wxs(&config, "trove", windows, &release()).unwrap();
+        let msi = build_msi(&wix, &wxs, &windows.tree, dir.path());
+        let tables = tables(&msi);
+        let label = format!("{scope}, licence {license}");
+        assert!(
+            !tables.contains_key("Binary") || tables["Binary"].rows.is_empty(),
+            "{label}"
+        );
+        let dialogs: Vec<&str> = tables["Dialog"]
+            .rows
+            .iter()
+            .map(|r| r["Dialog"].as_str())
+            .collect();
+        for dialog in [
+            "SetupDlg",
+            "ProgressDlg",
+            "CancelDlg",
+            "ExitDlg",
+            "UserExitDlg",
+            "FatalErrorDlg",
+            "ErrorDlg",
+            "FilesInUse",
+        ] {
+            assert!(dialogs.contains(&dialog), "{label}: {dialogs:?}");
+        }
+        let licence_text = tables["Control"]
+            .rows
+            .iter()
+            .any(|r| r["Control"] == "LicenseText");
+        assert_eq!(licence_text, license, "{label}");
+        let scope_choice = tables.get("RadioButton").map_or(0, |t| t.rows.len());
+        assert_eq!(
+            scope_choice,
+            if scope == "either" { 2 } else { 0 },
+            "{label}"
+        );
+        // The only events: dialogs ending, opening, and the scope's two
+        // properties.
+        for row in &tables["ControlEvent"].rows {
+            assert!(
+                matches!(
+                    row["Event"].as_str(),
+                    "EndDialog" | "SpawnDialog" | "[ALLUSERS]" | "[MSIINSTALLPERUSER]"
+                ),
+                "{label}: {row:?}"
+            );
+        }
+        let code = seaworthy::wix::upgrade_code(&config, "trove").unwrap();
+        let found = findings(&expected_from_wxs(&wxs).unwrap(), &tables, &code);
+        assert!(found.is_empty(), "{label}: {found:#?}");
+    }
+}
+
+/// A product without a licence or a scope choice has no dialogs at all:
+/// Windows Installer's basic UI, as before.
+#[test]
+fn no_dialogs_without_a_licence_or_a_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    for scope in ["machine", "user"] {
+        let config = parse(&with_msi(
+            TROVE,
+            "trove",
+            &format!("install-scope = \"{scope}\""),
+        ));
+        let wxs = wxs_of(&config, "trove", &dir.path().join(scope));
+        assert!(
+            !wxs.contains("<UI>") && !wxs.contains("<Dialog "),
+            "{scope}"
+        );
+    }
+}
+
+/// The licence must be an RTF document of a sane size, inside the project.
+#[test]
+fn the_licence_is_checked_when_laid_out() {
+    for license in [
+        "\"license.txt\"",
+        "\"../license.rtf\"",
+        "\"/etc/license.rtf\"",
+        "\"a$b.rtf\"",
+    ] {
+        refused(
+            &with_msi(TROVE, "trove", &format!("license = {license}")),
+            "product.trove.msi.license",
+        );
+    }
+    let products = with_msi(TROVE, "trove", "license = \"packaging/license.rtf\"");
+    for (bytes, wanted) in [
+        (b"Not RTF at all".to_vec(), "not an RTF document"),
+        (
+            [b"{\\rtf1 ".as_slice(), &vec![b'x'; 1024 * 1024 + 1]].concat(),
+            "past the 1048576 a licence may have",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_license_file(&products, dir.path());
+        std::fs::write(dir.path().join("packaging/license.rtf"), &bytes).unwrap();
+        let input = dir.path().join("artifacts");
+        common::program_artifacts(&config, "trove", &input, false);
+        let verified = seaworthy::verify::verify(&config, "trove", &input).unwrap();
+        let err = seaworthy::layout::layout(
+            &config,
+            "trove",
+            &verified,
+            &dir.path().join("dist"),
+            seaworthy::layout::Options {
+                strip: false,
+                ..seaworthy::layout::Options::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(wanted), "{wanted}: {err}");
+    }
+    // A licence that's a link out of the project is refused too.
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_license_file(&products, dir.path());
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("l.rtf"), LICENSE_RTF).unwrap();
+        std::fs::remove_file(dir.path().join("packaging/license.rtf")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("l.rtf"),
+            dir.path().join("packaging/license.rtf"),
+        )
+        .unwrap();
+        let input = dir.path().join("artifacts");
+        common::program_artifacts(&config, "trove", &input, false);
+        let verified = seaworthy::verify::verify(&config, "trove", &input).unwrap();
+        let err = seaworthy::layout::layout(
+            &config,
+            "trove",
+            &verified,
+            &dir.path().join("dist"),
+            seaworthy::layout::Options::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("resolves outside seaworthy.toml's directory"),
+            "{err}"
+        );
+    }
+}
+
+/// adopt-msi's model of the `Property` table, against WiX's real build of
+/// a service product with the update helper (its secure `UPDATES` and
+/// `SERVER`) and a product that conflicts with another (its detect-only
+/// search's property): exactly accepted.
+#[test]
+fn wix_builds_a_service_and_a_conflict_and_adopt_msi_accepts_their_properties() {
+    let Some(wix) = wix() else {
+        return;
+    };
+    if !have("msiinfo", &["--version"]) {
+        return;
+    }
+    let agent = Config::parse(&format!(
+        "{DEFAULTS}release-signatures = [\"ml-dsa-87\"]\n{}\n[product.other]\ndisplay-name = \"Acme Other\"\ndescription = \"x\"\nexecutable = \"AcmeTool\"\ncore = \"acme_core\"\nkind = \"tool\"\nwindows-directory = \"Other\"\noutputs = [\"msi\"]\nupdates.default = \"off\"\n",
+        AGENT.replace("outputs = [\"msi\"]", "outputs = [\"msi\"]\nconflicts = [\"other\"]")
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let layouts = common::layouts(&agent, "agent", dir.path());
+    let windows = layouts.iter().find(|l| l.triple == WINDOWS).unwrap();
+    let wxs = seaworthy::wix::wxs(&agent, "agent", windows, &release()).unwrap();
+    let msi = build_msi(&wix, &wxs, &windows.tree, dir.path());
+    let properties = properties(&msi);
+    let secure = &properties["SecureCustomProperties"];
+    for name in [
+        "UPDATES",
+        "SERVER",
+        "CONFLICT_OTHER",
+        "WIX_UPGRADE_DETECTED",
+    ] {
+        assert!(secure.split(';').any(|s| s == name), "{name}: {secure}");
+    }
+    let code = seaworthy::wix::upgrade_code(&agent, "agent").unwrap();
+    let found = findings(&expected_from_wxs(&wxs).unwrap(), &tables(&msi), &code);
+    assert!(found.is_empty(), "{found:#?}");
+}

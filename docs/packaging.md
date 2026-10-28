@@ -282,6 +282,11 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
 | `user` | Windows Installer 5's dual-purpose package, `ALLUSERS=2` and `MSIINSTALLPERUSER=1` (WiX `perUserOrMachine`), and a launch condition refusing a machine-wide install | the installing user; no administrator rights, no UAC prompt | `%LocalAppData%\Programs\<Vendor>\<Directory>` | `HKCU`, `HKCU\Software\Classes`; the user's Start menu and desktop |
 | `either` | the same dual-purpose package | the installing user, as `user`; `ALLUSERS=1 MSIINSTALLPERUSER=""` installs for every user, as `machine` (a UAC prompt) | either | either |
 
+With `install-scope = "either"`, or a `license`, an interactive install shows seaworthy's setup
+dialogs ([Setup dialogs](#setup-dialogs)): `either` offers "just for me" (the default) or "everyone on
+this computer" there, which sets `ALLUSERS=2` and `MSIINSTALLPERUSER` (1, or empty) as Microsoft's
+single-package authoring describes, and preselects "everyone" when the command line asked for it.
+
 A per-user install is Windows Installer's own: with `ALLUSERS=2` and `MSIINSTALLPERUSER=1` it
 redirects `ProgramFiles64Folder` to the user's Programs folder, writes `HKMU` and `HKCR` rows under
 `HKCU`, puts the shortcuts in the user's folders, and resets `ALLUSERS` to empty (to 1 for a
@@ -301,6 +306,25 @@ Windows Installer upgrades a product in the context it was installed in: install
 `either` product the way the installed one was installed (`ALLUSERS=1 MSIINSTALLPERUSER=""` again for
 a machine-wide one), or the new one installs beside it.
 
+#### Setup dialogs
+
+A product with `[product.<id>.msi] license`, or `install-scope = "either"`, gets a full-UI setup:
+a first dialog with the licence (an accept check box enabling Install) and/or the scope choice, a
+progress dialog, a cancel confirmation, and Windows Installer's standard dialogs (errors, files in
+use, and the finished, cancelled and failed dialogs, in the install and the administrative UI
+sequences, as ICE20 requires). A quiet or basic-UI install shows none of them. Without either option
+the MSI has no dialogs at all.
+
+They are seaworthy's own, written into the `.wxs`, not WiX's WixUI sets: WixUI_Minimal's licence page
+has a Print button that runs a native DLL from the `Binary` table (`WixUIPrintEula`), and
+WixUI_Advanced adds a folder browser (`SetTargetPath`, so a person could install the product anywhere)
+and another DLL action (`WixUIValidatePath`); both need the UI extension downloaded into the build.
+seaworthy's dialogs are text only and run no code: every event ends a dialog, opens one, or sets the
+scope's two properties. Their appearance is plain (no banner bitmaps) and their text English.
+
+adopt-msi models them exactly (below), so a built MSI's dialogs can't do more than the `.wxs`
+declares, and the `.wxs` itself is refused if a dialog would do more than that.
+
 With `SEAWORTHY_WIX` naming WiX v5.0.2, `package` builds the MSI itself. Otherwise a Windows runner
 builds it from the `.wxs` (`wix build -arch x64 -bindpath tree=<tree> -o <name>.msi <name>.wxs`, then
 `wix msi validate`), and **`seaworthy adopt-msi`** takes it back: the MSI must carry exactly the
@@ -314,12 +338,23 @@ and its security-relevant tables must be exactly what the `.wxs` declares (read 
   (folder, name, target, arguments, working directory) and environment change (`PATH` alone,
   appended, removed on uninstall, the system's or the user's, the directory it adds and its
   component's condition): no row more, none less, none other;
+- every `Property` row: the `.wxs`'s values (the product's name, manufacturer, version, language and
+  UpgradeCode, its scope's `ALLUSERS` and `MSIINSTALLPERUSER`, every `<Property Value=>`), WiX's
+  ProductCode, and `SecureCustomProperties` naming only properties the `.wxs` marks secure, so no
+  property the install would act on (an update server, a scope) is planted;
+- the setup dialogs' tables, row for row, by every column that decides what a dialog does: each
+  dialog, each control's type and the property it's bound to, each control event (event, argument,
+  condition, order), control condition, event subscription, radio button and check box value, text
+  style, and where the sequences show each dialog; a `.wxs` whose dialogs would run a custom action
+  (`DoAction`), point the install elsewhere (`SetTargetPath`), change features, set any property
+  but the scope's, or use a control a person can type a value into, a bitmap or an icon, is refused;
 - every sequence action is a standard action (never `ForceReboot` or `ScheduleReboot`) or a custom
   action the `.wxs` schedules in that sequence, on its condition;
 - no row in a table a seaworthy MSI never uses (`Binary`, `SelfReg`, `MsiEmbeddedChainer`,
-  `MsiEmbeddedUI`, COM and file-type registrations, INI files, `MoveFile`,
+  `MsiEmbeddedUI`, COM and advertised file-type registrations, INI files, `MoveFile`,
   `DuplicateFile`, `RemoveFile`, ODBC, `LockPermissions`, the service failure-action tables,
-  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode or is
+  `Font`, `RemoveRegistry`, list, combo and list-view items, billboards, `UIText`, `ActionText`,
+  `Error`), and every `Upgrade` row names the product's UpgradeCode or is
   a detect-only search the `.wxs` declares for a product it conflicts with (that product's
   UpgradeCode and property, never removing it);
 - a `.wxs` with an element the check doesn't model (a WiX extension's, an `Environment` other than

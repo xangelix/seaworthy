@@ -933,8 +933,9 @@ pub fn adopt_msi(
                 DistError::Layout(format!("{}: a file without {key}", manifest_path.display()))
             })
         };
-        // The icon goes into the Icon table, not the payload.
-        if file["role"]["kind"].as_str() == Some("icon") {
+        // The icon goes into the Icon table and the licence into the setup
+        // dialog, not the payload.
+        if matches!(file["role"]["kind"].as_str(), Some("icon" | "license")) {
             continue;
         }
         let install_path = field("install_path")?;
@@ -1449,7 +1450,8 @@ fn prepare_windows(
                 | Role::Icon
                 | Role::BundleInfo
                 | Role::CodeSignature
-                | Role::Uninstaller,
+                | Role::Uninstaller
+                | Role::License,
                 _,
             ) => None,
         };
