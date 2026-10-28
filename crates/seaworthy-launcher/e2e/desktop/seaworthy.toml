@@ -66,6 +66,28 @@ category = "public.app-category.utilities"
 source = "data"
 destination = "share"
 
+# The same launcher and cores as a command-line tool, in the several-programs
+# form, that can't be installed beside the viewer: the self-test builds,
+# packages and adopts both MSIs, each searching for the other's UpgradeCode
+# (detect-only), and both debs conflict with each other.
+[product.viewer-lite]
+display-name = "Acme Viewer Lite"
+description = "The desktop fixture's launcher and cores as a command-line tool beside which the viewer can't be installed."
+kind = "tool"
+windows-directory = "ViewerLite"
+outputs = ["msi", "deb"]
+updates.default = "off"
+conflicts = ["viewer"]
+linux.provides = ["acme-viewer-cli"]
+linux.depends.deb = ["libc6 (>= 2.34)"]
+
+[[product.viewer-lite.programs]]
+executable = "demo"
+launcher = "demo"
+core = "demo_core"
+role = "cli"
+command = "acme-viewer-lite"
+
 # The lab's service fixture on Linux: deb, rpm and pacman packages, the
 # service under its own account, and the update helper, which takes its
 # version from the lab's required-version endpoint.
