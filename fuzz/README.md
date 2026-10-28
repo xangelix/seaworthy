@@ -37,7 +37,9 @@ scripts/fuzz.sh nightly                      # a ~30 min budget across targets, 
 
 `scripts/fuzz.sh` installs the pinned nightly with rustup when it is missing and uses the
 cargo-fuzz on `PATH` when it is the pinned version, otherwise the pinned release binary
-(SHA-256 verified, `scripts/ci/install-tool.sh`). Every setting is listed in the script's header.
+(SHA-256 verified, `scripts/ci/install-tool.sh`). It builds for the nightly's host target and
+compiles sanitized C dependencies with clang (`CC`/`CXX` override it). Every setting is listed in
+the script's header.
 
 ## Adding a target
 

@@ -14,6 +14,8 @@
 # Environment (all optional):
 #   FUZZ_TOOLCHAIN          the nightly (default: the channel in fuzz/rust-toolchain.toml);
 #                           installed with rustup when missing.
+#   CC, CXX                 the C and C++ compilers for sanitized dependencies (default: clang,
+#                           clang++; GCC's instrumentation can mismatch rustc's LLVM runtime).
 #   FUZZ_TARGETS            space-separated subset (default: every target).
 #   FUZZ_SHARD              "i/n" (1-based): run every n-th target starting at i.
 #   FUZZ_SMOKE_SECS         per-target smoke budget (default 60).
@@ -59,6 +61,14 @@ TOOLCHAIN="${FUZZ_TOOLCHAIN:-$(pinned_toolchain)}"
 
 ensure_tools() {
     [ -n "$TOOLCHAIN" ] || die "no toolchain: set FUZZ_TOOLCHAIN or the channel in $FUZZ_DIR/rust-toolchain.toml"
+    # C and C++ dependencies (zstd) are sanitized too: cc passes rustc's
+    # -Zsanitizer on. Compile them with clang, whose instrumentation matches
+    # the LLVM runtime rustc links; GCC's need not (GCC 13 reports reads of
+    # zstd's static tables as stack-use-after-scope).
+    if [ -z "${CC:-}" ]; then
+        command -v clang >/dev/null || die "clang not found: the fuzz builds compile C with it (or set CC and CXX)"
+        export CC=clang CXX="${CXX:-clang++}"
+    fi
     command -v rustup >/dev/null || die "rustup not found"
     if ! rustup run "$TOOLCHAIN" rustc --version >/dev/null 2>&1; then
         echo "fuzz: installing toolchain $TOOLCHAIN" >&2
