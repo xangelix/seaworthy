@@ -16,7 +16,10 @@
 #              install directory; one Programs and Features entry (its install location
 #              recorded), Windows Installer's cached copy of the product's icon
 #              (ProductIcon) beside it; Windows Error Reporting's exclusion of demo.exe
-#              under HKLM, of the kind and value WerAddExcludedApplication writes
+#              under HKLM, of the kind and value WerAddExcludedApplication writes; the
+#              document type under HKLM\SOFTWARE\Classes: .acmeview's ProgID, content
+#              type and OpenWithProgids, the ProgID's icon and its open and inspect
+#              verbs starting the launcher with the file after --, and `assoc` naming it
 #   launch     the installed launcher picks a core and runs it (core=...); the launcher
 #              carries its own icon and manifest (e2e/demo's build.rs), so Windows'
 #              loader checks the tree the version stamp rebuilt
@@ -26,9 +29,9 @@
 #   remove     msiexec /x: the files, the install directory, the shortcuts, the entry, the
 #              shortcuts' registry values and the WER exclusion gone
 #   user       msiexec /i of release 1.0.0 with nothing set: installed for the current user
-#              alone (%LocalAppData%\Programs, the user's Start menu and desktop, the entry
-#              and the WER exclusion under HKCU, nothing under Program Files or HKLM), the
-#              launcher runs, and msiexec /x removes all of it
+#              alone (%LocalAppData%\Programs, the user's Start menu and desktop, the entry,
+#              the WER exclusion and the document type under HKCU, nothing under Program
+#              Files or HKLM), the launcher runs, and msiexec /x removes all of it
 #   path       viewer-lite 1.0.0 (bundle\viewer-lite-1) for the current user: its directory
 #              appended to the user's PATH (HKCU\Environment), the launcher found through it;
 #              then for everyone: appended to the system PATH; each entry gone on removal
@@ -143,6 +146,7 @@ $Scopes = @{
         Desktop    = Join-Path $env:PUBLIC "Desktop\$DisplayName.lnk"
         Uninstall  = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')
         Hive       = 'HKLM:'
+        Classes    = 'HKLM:\SOFTWARE\Classes'
         Arguments  = @('ALLUSERS=1', 'MSIINSTALLPERUSER=""')
     }
     user    = [pscustomobject]@{
@@ -151,6 +155,7 @@ $Scopes = @{
         Desktop    = Join-Path ([Environment]::GetFolderPath('Desktop')) "$DisplayName.lnk"
         Uninstall  = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall')
         Hive       = 'HKCU:'
+        Classes    = 'HKCU:\Software\Classes'
         Arguments  = @()
     }
 }
@@ -217,12 +222,43 @@ function Assert-Installed([string]$Version, [string]$Scope = 'machine') {
     Assert-True ($icon -and (Test-Path -LiteralPath $icon -PathType Leaf)) "the product's icon (ProductIcon, from ARPPRODUCTICON) is registered and cached (it is '$icon')"
     Assert-True ((Get-FileHash -LiteralPath $icon).Hash -eq (Get-FileHash -LiteralPath $treeIcon).Hash) "the cached icon $icon is the package's ($treeIcon)"
     Assert-WerExcluded $at.Hive
+    Assert-FileType $Scope
     $other = @{ machine = 'user'; user = 'machine' }[$Scope]
     Assert-True (-not (Test-Path -LiteralPath $Scopes[$other].InstallDir)) "nothing is installed where an install for $other would go ($($Scopes[$other].InstallDir))"
     if ($Scope -eq 'user') {
         Assert-True ($null -eq (Get-Value "HKLM:\$werKey" "$Executable.exe")) 'a per-user install writes no machine-wide WER exclusion'
     }
     return $entries[0]
+}
+
+# The viewer's document type (`[[product.viewer.file-types]]`), registered in `Scope`'s
+# Classes: the extension's ProgID, content type and OpenWithProgids entry, the ProgID's
+# icon (the installed .ico) and verbs (the launcher, the file in quotes after --).
+$DocExtension = '.acmeview'
+$DocProgId = 'Acme.ViewerDocument'
+function Assert-FileType([string]$Scope) {
+    $at = $Scopes[$Scope]
+    $launcher = Join-Path $at.InstallDir "$Executable.exe"
+    $classes = $at.Classes
+    $expected = @(
+        @("$classes\$DocExtension", '', $DocProgId),
+        @("$classes\$DocExtension", 'Content Type', 'application/x-acme-viewer-doc'),
+        @("$classes\$DocProgId", '', 'Acme Viewer document'),
+        @("$classes\$DocProgId\DefaultIcon", '', "`"$(Join-Path $at.InstallDir "$DocProgId.ico")`",0"),
+        @("$classes\$DocProgId\shell", '', 'open'),
+        @("$classes\$DocProgId\shell\open\command", '', "`"$launcher`" -- `"%1`""),
+        @("$classes\$DocProgId\shell\inspect\command", '', "`"$launcher`" --inspect -- `"%1`"")
+    )
+    foreach ($row in $expected) {
+        $value = Get-Value $row[0] $row[1]
+        Assert-True ($null -ne $value -and "$($value.Data)" -eq $row[2]) "$($row[0]) [$($row[1])] is '$(if ($value) { $value.Data })', not '$($row[2])'"
+    }
+    Assert-True ($null -ne (Get-Value "$classes\$DocExtension\OpenWithProgids" $DocProgId)) "$DocExtension\OpenWithProgids lists $DocProgId"
+    Assert-True (Test-Path -LiteralPath (Join-Path $at.InstallDir "$DocProgId.ico") -PathType Leaf) "the document icon is installed"
+    $assoc = (& cmd.exe /d /c "assoc $DocExtension" | Out-String).Trim()
+    Assert-True ($assoc -eq "$DocExtension=$DocProgId") "assoc $DocExtension says '$assoc'"
+    $other = @{ machine = 'user'; user = 'machine' }[$Scope]
+    Assert-True (-not (Test-Path -LiteralPath "$($Scopes[$other].Classes)\$DocProgId")) "nothing registers $DocProgId in $($Scopes[$other].Classes)"
 }
 
 # The product's removal: everything the install put in `Scope` gone.
@@ -234,6 +270,9 @@ function Assert-Removed([string]$Scope) {
     $left = Get-ItemProperty -LiteralPath $shortcutKey -ErrorAction SilentlyContinue
     Assert-True (-not $left -or -not ($left.PSObject.Properties.Name -contains 'StartMenuShortcut')) 'the shortcuts registry values are gone'
     Assert-True ($null -eq (Get-Value "$($at.Hive)\$werKey" "$Executable.exe")) "the WER exclusion in $($at.Hive) is gone"
+    foreach ($key in @("$($at.Classes)\$DocProgId", "$($at.Classes)\$DocExtension")) {
+        Assert-True (-not (Test-Path -LiteralPath $key)) "$key is gone"
+    }
 }
 
 # The launcher at `Path` picks a core and runs it.
