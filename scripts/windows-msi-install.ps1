@@ -103,17 +103,38 @@ function Invoke-Msiexec([string[]]$Arguments, [string]$Log) {
     return $p.ExitCode
 }
 
+# Programs and Features lists an MSI installed for everyone from its Uninstall key, and one
+# installed for the current user from what Windows Installer records for that user: it
+# writes no Uninstall key under HKCU, but UserData\<SID>\Products\<packed ProductCode>\
+# InstallProperties.
+$userProducts = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '\Products'
+
+# A ProductCode from Windows Installer's packed form: each of the first three groups' hex
+# digits reversed, and each of the last eight bytes' two digits swapped.
+function ConvertFrom-PackedGuid([string]$Packed) {
+    if ($Packed -notmatch '^[0-9A-Fa-f]{32}$') { return $null }
+    $c = $Packed.ToCharArray()
+    $first = -join $c[7..0]
+    $second = -join $c[11..8]
+    $third = -join $c[15..12]
+    $rest = -join @(for ($i = 16; $i -lt 32; $i += 2) { $c[$i + 1]; $c[$i] })
+    return '{' + $first + '-' + $second + '-' + $third + '-' + $rest.Substring(0, 4) + '-' + $rest.Substring(4) + '}'
+}
+
 # The Programs and Features entries of a product (by display name), for everyone and for
 # the current user. PowerShell unrolls a function's array on return (one entry arrives as
 # a scalar, none as $null), and Windows PowerShell 5.1's strict mode has no .Count for
 # either: every caller takes @(Get-Entries).
-function Get-Entries([string]$Name = $DisplayName, [string[]]$Roots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall')) {
+function Get-Entries([string]$Name = $DisplayName, [string[]]$Roots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall', $userProducts)) {
     @(foreach ($root in $Roots) {
+            $packed = $root -eq $userProducts
             Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
-                $p = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+                $key = if ($packed) { $_.PSPath + '\InstallProperties' } else { $_.PSPath }
+                $p = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
                 if ($p -and ($p.PSObject.Properties.Name -contains 'DisplayName') -and $p.DisplayName -eq $Name) {
                     $location = if ($p.PSObject.Properties.Name -contains 'InstallLocation') { [string]$p.InstallLocation } else { '' }
-                    [pscustomobject]@{ Code = $_.PSChildName; Version = $p.DisplayVersion; Location = $location }
+                    $code = if ($packed) { ConvertFrom-PackedGuid $_.PSChildName } else { $_.PSChildName }
+                    [pscustomobject]@{ Code = $code; Version = $p.DisplayVersion; Location = $location }
                 }
             }
         })
@@ -153,7 +174,7 @@ $Scopes = @{
         InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$Vendor\$Directory"
         StartMenu  = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$DisplayName.lnk"
         Desktop    = Join-Path ([Environment]::GetFolderPath('Desktop')) "$DisplayName.lnk"
-        Uninstall  = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall')
+        Uninstall  = @($userProducts)
         Hive       = 'HKCU:'
         Classes    = 'HKCU:\Software\Classes'
         Arguments  = @()
