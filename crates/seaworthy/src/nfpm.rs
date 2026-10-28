@@ -33,6 +33,11 @@
 //! `polkit` for rpm and pacman), which reads the rule letting the session
 //! start it.
 //!
+//! The package relations: `linux.replaces`' packages are conflicts and
+//! replaces (rpm `Obsoletes:`); the products and packages `conflicts`
+//! names (both ways, [`Config::conflicting_packages`]) are conflicts alone;
+//! `linux.provides` are provides, unversioned.
+//!
 //! The release's build metadata (`package --build`, often the commit) is
 //! a line of the description, where `apt show`, `dpkg -s`, `rpm -qi` and
 //! `pacman -Qi` all show it: `Build: <metadata>` on its own line for deb
@@ -331,10 +336,24 @@ pub fn write_config(
     // The packages this product supersedes (`linux.replaces`): nFPM's
     // `conflicts` and `replaces` (rpm: `Obsoletes:`), so the package
     // manager removes them on install rather than refusing the files both
-    // own.
+    // own. The products and packages it conflicts with (`conflicts`, both
+    // ways) are conflicts alone: never replaced, so no upgrade swaps one
+    // product for another.
+    let mut conflicts = product.linux.replaces.clone();
+    conflicts.extend(
+        config
+            .conflicting_packages(id)
+            .into_iter()
+            .filter(|name| !product.linux.replaces.contains(name)),
+    );
+    if !conflicts.is_empty() {
+        nfpm["conflicts"] = json!(conflicts);
+    }
     if !product.linux.replaces.is_empty() {
-        nfpm["conflicts"] = json!(product.linux.replaces);
         nfpm["replaces"] = json!(product.linux.replaces);
+    }
+    if !product.linux.provides.is_empty() {
+        nfpm["provides"] = json!(product.linux.provides);
     }
     if let Some(object) = nfpm.as_object_mut() {
         if let Some(homepage) = &d.homepage {

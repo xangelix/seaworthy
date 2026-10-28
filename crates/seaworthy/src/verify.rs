@@ -23,11 +23,13 @@
 //!    build, no file matches two globs, names are plain file names, and the
 //!    copies are byte-identical. A difference means an accidental
 //!    per-target FIPS build.
-//! 5. **FIPS** (`defaults.fips`): every Linux core passes
+//! 5. **FIPS** (the product's `fips`, else `defaults.fips`): every Linux core passes
 //!    `scripts/verify-fips-binary.sh`'s checks over its symbol table, read
-//!    as `nm` reads it ([`fips_symbol_findings`]). On Windows every core
+//!    as `nm` reads it ([`fips_symbol_findings`]), for the module
+//!    `defaults.fips-module` pins (default: `seaworthy-crypto`'s; its
+//!    symbol prefix, [`Config::fips_symbol_prefix`]). On Windows every core
 //!    imports the pinned module's crypto DLL, and the sidecars ship every
-//!    DLL of the module any core imports (the pinned aws-lc-fips-sys 0.14
+//!    DLL of the module any core imports (aws-lc-fips-sys 0.14
 //!    builds one, `<prefix>crypto.dll`; older releases added a
 //!    `<prefix>rust_wrapper.dll`, which the imports would then name). On
 //!    macOS, where AWS-LC builds the module as a dylib too, every core
@@ -76,7 +78,7 @@ use object::{
 };
 
 use crate::config::{Config, Product, is_windows_reserved, parse_macos_version};
-use crate::inputs::{Os, PlatformInputs, expected, glob_matches};
+use crate::inputs::{Os, PlatformInputs, ProgramInputs, expected, glob_matches};
 
 /// Where a macOS binary's linked libraries may come from: the system's
 /// own (`/usr/lib`, `/System/Library`). A library outside them — a
@@ -557,40 +559,43 @@ impl Run {
         product: &Product,
         inputs: &PlatformInputs,
     ) -> Vec<PathBuf> {
-        let triple = inputs.triple;
         let os = inputs.os();
-        let windows = os == Os::Windows;
         let targets = if os == Os::Macos {
             &config.defaults.macos_targets
         } else {
             &config.defaults.targets
         };
 
-        // The launcher and its CPU list.
-        if let Some(bytes) = self.read(&inputs.launcher)
-            && self.binary(
-                &inputs.launcher,
+        // Each program's launcher and its CPU list.
+        for program in &inputs.programs {
+            let launcher = &program.launcher;
+            let Some(bytes) = self.read(launcher) else {
+                continue;
+            };
+            if !self.binary(
+                launcher,
                 &bytes,
                 os,
                 BinaryKind::Executable,
                 config,
                 product,
-            )
-        {
+            ) {
+                continue;
+            }
             match seaworthy_levels::cpu_list_from_bytes(&bytes) {
                 Ok(list) => {
-                    if list.core != product.core {
+                    if list.core != program.program.core {
                         self.finding(
-                            &inputs.launcher,
+                            launcher,
                             format!(
                                 "its .cpulist names core {:?}, seaworthy.toml says {:?}",
-                                list.core, product.core
+                                list.core, program.program.core
                             ),
                         );
                     }
                     if &list.cpus != targets {
                         self.finding(
-                            &inputs.launcher,
+                            launcher,
                             format!(
                                 "its .cpulist lists {:?}, seaworthy.toml's {} are {:?} (same CPUs, same order)",
                                 list.cpus,
@@ -600,7 +605,7 @@ impl Run {
                         );
                     }
                 }
-                Err(e) => self.finding(&inputs.launcher, format!("not a seaworthy launcher: {e}")),
+                Err(e) => self.finding(launcher, format!("not a seaworthy launcher: {e}")),
             }
         }
         if let Some(helper) = &inputs.helper
@@ -609,12 +614,38 @@ impl Run {
             self.binary(helper, &bytes, os, BinaryKind::Executable, config, product);
         }
 
-        // The cores and their records.
-        let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
+        // Each program's cores and their records.
         // Windows FIPS: the module's DLLs the cores import, which the
         // sidecars must ship.
         let mut module_imports: BTreeSet<String> = BTreeSet::new();
-        for (cpu, core, _) in &inputs.cores {
+        for program in &inputs.programs {
+            self.cores(config, product, inputs, program, &mut module_imports);
+        }
+
+        if os == Os::Linux {
+            Vec::new()
+        } else {
+            self.sidecars(config, product, inputs, &module_imports)
+        }
+    }
+
+    /// One program's cores: each one's format, runtime dependencies,
+    /// record and FIPS module, and which can never be chosen.
+    fn cores(
+        &mut self,
+        config: &Config,
+        product: &Product,
+        inputs: &PlatformInputs,
+        program: &ProgramInputs,
+        module_imports: &mut BTreeSet<String>,
+    ) {
+        let triple = inputs.triple;
+        let os = inputs.os();
+        let windows = os == Os::Windows;
+        // The module the product's cores must carry (defaults.fips-module).
+        let prefix = config.fips_symbol_prefix();
+        let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
+        for (cpu, core, _) in &program.cores {
             let Some(bytes) = self.read(core) else {
                 continue;
             };
@@ -667,27 +698,28 @@ impl Run {
                 }
                 Err(e) => self.finding(core, format!("no valid requirement record: {e}")),
             }
-            if config.defaults.fips && os == Os::Linux {
-                for finding in
-                    fips_symbol_findings(&bytes, seaworthy_crypto::module::FIPS_SYMBOL_PREFIX)
-                {
+            if config.fips(product) && os == Os::Linux {
+                for finding in fips_symbol_findings(&bytes, &prefix) {
                     self.finding(core, finding);
                 }
             }
-            if config.defaults.fips && windows {
-                let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+            if config.fips(product) && windows {
                 let crypto = format!("{prefix}crypto.dll");
                 let imports = pe_imports(&bytes).unwrap_or_default();
                 if !imports.contains(&crypto) {
                     self.finding(
                         core,
-                        format!("does not import {crypto} — not a FIPS build of the pinned module"),
+                        format!("does not import {crypto} — not a FIPS build of the pinned module (defaults.fips-module)"),
                     );
                 }
-                module_imports.extend(imports.into_iter().filter(|name| name.starts_with(prefix)));
+                module_imports.extend(
+                    imports
+                        .into_iter()
+                        .filter(|name| name.starts_with(prefix.as_str())),
+                );
             }
-            if config.defaults.fips && os == Os::Macos {
-                let module = format!("lib{}", seaworthy_crypto::module::FIPS_SYMBOL_PREFIX);
+            if config.fips(product) && os == Os::Macos {
+                let module = format!("lib{prefix}");
                 let crypto = format!("{module}crypto.dylib");
                 let loads: Vec<String> = macho_facts(&bytes)
                     .map(|facts| {
@@ -702,7 +734,7 @@ impl Run {
                     self.finding(
                         core,
                         format!(
-                            "does not load @rpath/{crypto} — not a FIPS build of the pinned module"
+                            "does not load @rpath/{crypto} — not a FIPS build of the pinned module (defaults.fips-module)"
                         ),
                     );
                 }
@@ -716,16 +748,16 @@ impl Run {
                 .iter()
                 .find(|(_, f)| f.is_subset(later_features))
             {
+                // A product of several programs names whose core it is.
+                let whose = if inputs.programs.len() > 1 {
+                    format!(" ({})", program.program.core)
+                } else {
+                    String::new()
+                };
                 self.warnings.push(format!(
-                    "{triple}: the {later} core can never be chosen — every CPU that runs it also runs the {earlier} core, which comes first in targets"
+                    "{triple}: the {later} core can never be chosen — every CPU that runs it also runs the {earlier} core, which comes first in targets{whose}"
                 ));
             }
-        }
-
-        if os == Os::Linux {
-            Vec::new()
-        } else {
-            self.sidecars(config, product, inputs, &module_imports)
         }
     }
 
@@ -747,7 +779,7 @@ impl Run {
         let mut claimed: BTreeMap<String, &str> = BTreeMap::new();
         for glob in product.sidecars.for_os(os) {
             let mut first: Option<(PathBuf, String)> = None;
-            for (cpu, _, dir) in &inputs.cores {
+            for (cpu, _, dir) in inputs.cores() {
                 let matches: Vec<PathBuf> = std::fs::read_dir(dir)
                     .map(|entries| {
                         entries
@@ -795,18 +827,14 @@ impl Run {
                     None => {
                         if self.binary(&path, &bytes, os, BinaryKind::Library, config, product)
                             && os == Os::Macos
-                            && config.defaults.fips
-                            && name.starts_with(&format!(
-                                "lib{}",
-                                seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
-                            ))
+                            && config.fips(product)
+                            && name.starts_with(&format!("lib{}", config.fips_symbol_prefix()))
                         {
                             // The module itself: its symbols pass the
                             // Linux cores' checks (scripts/verify-fips-binary.sh).
-                            for finding in fips_symbol_findings(
-                                &bytes,
-                                seaworthy_crypto::module::FIPS_SYMBOL_PREFIX,
-                            ) {
+                            for finding in
+                                fips_symbol_findings(&bytes, &config.fips_symbol_prefix())
+                            {
                                 self.finding(&path, finding);
                             }
                         }
@@ -824,7 +852,7 @@ impl Run {
                 }
             }
         }
-        if config.defaults.fips {
+        if config.fips(product) {
             let names: Vec<String> = sidecars
                 .iter()
                 .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))

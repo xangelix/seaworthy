@@ -78,7 +78,7 @@ checks its SHA-256 against the listing; nothing unlisted is in it.
 | `package` | Linux | `seaworthy package --platforms linux,windows`: verify, layout, version resources, Authenticode, packages, manifests, SBOMs; signed on a release | the calling job's grant: `contents: read`, plus `id-token: write` with the `azure-*` inputs |
 | `msi` | Windows | WiX v5.0.2 (pinned, checksum-verified) builds and validates each MSI from package's `.wxs` | `contents: read` |
 | `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI's payload checked against the signed tree and its security-relevant tables against the `.wxs`, signed, listed | the calling job's grant, as `package` |
-| `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (desktop) or pkg (service), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed (refused on a release under `[defaults.apple]`'s pinned team) | `contents: read` |
+| `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (a desktop app) or pkg (a service, a tool, cli programs), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed (refused on a release under `[defaults.apple]`'s pinned team) | `contents: read` |
 | `verify` | Linux | every listed artifact against its listing; the packages artifact with `SHA256SUMS` | `contents: read` |
 | `publish` | Linux | on a release with `publish-toml`: `seaworthy repo` after the last published plan, then `seaworthy publish` (one at a time) | `contents: read` |
 
@@ -152,7 +152,7 @@ cap them too):
 | `ci-signing-toml` | (none) | outside a release, the CI test keys' signing configuration (`seaworthy package --ci-test-signing`) |
 | `publish-toml`, `publish-dry-run` | (none), `false` | on a release, the store to publish to; a dry run checks everything and uploads nothing |
 | `toolchain` | the product's `rust-toolchain.toml` | a toolchain for the product's builds |
-| `cargo-args` | (none) | more cargo arguments for every build (`--features fips`) |
+| `cargo-args` | (none) | more cargo arguments for every build (`--features fips`); products built in several crypto builds give each program its own `features` in `seaworthy.toml` instead |
 | `rustflags`, `core-rustflags` | (none) | more rustflags for every build, and for the cores alone ([packaging.md](packaging.md#extra-build-flags); `{workspace}`, `{triple}` and `{cpu}` expand) |
 | `remap-paths` | `true` | remap the source paths rustc writes into the binaries to neutral ones: no build machine path or private repository name ([packaging.md](packaging.md#source-paths)) |
 | `build-env` | (none) | the builds' environment, JSON: `{"*": {"CC": "clang"}, "x86_64-pc-windows-msvc": {...}}` (a triple's entries win; the runner's, loader's and cargo's own variables are refused) |
@@ -248,7 +248,7 @@ for osslsigncode, built from its pinned source.
 
 ### Apple
 
-Export the Developer ID Application identity (and, for a service's pkg, the Developer ID Installer
+Export the Developer ID Application identity (and, for a pkg, the Developer ID Installer
 identity) with their keys as one PKCS#12, store it base64-encoded as `APPLE_CERTIFICATE_P12` with
 its password; create an App Store Connect API key with the Developer role and store the `.p8` file,
 its key id and issuer id. On a release the macOS packaging step imports the identities into a

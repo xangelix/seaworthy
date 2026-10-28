@@ -120,12 +120,13 @@
 //!   `https://` fails the install (never a removal); the helper checks the
 //!   whole URL (`seaworthy_updater::read_admin_server`). Group Policy's
 //!   `Server` wins over it.
-//! - **A desktop app** (`[product.<id>.desktop]`): the icon
+//! - **A desktop app** (`[product.<id>.desktop]`, the `gui` program): the icon
 //!   (`desktop.windows-icon`, staged as `tree/<Vendor>/<Directory>.ico`) in
 //!   the Icon table, as Programs and Features' icon (`ARPPRODUCTICON`) and
 //!   the shortcuts'; a Start-menu shortcut (`ProgramMenuFolder\<display
 //!   name>.lnk`, unless `start-menu = false`) and a desktop one
-//!   (`desktop-shortcut = true`, every user's desktop) to the launcher,
+//!   (`desktop-shortcut = true`, every user's desktop) to the `gui`
+//!   program's launcher,
 //!   started in the install directory. Each shortcut's component keys on an
 //!   HKCU value under the product's key, as Windows Installer's validation
 //!   requires of a component in the Start-menu or desktop folder: ICE38 and
@@ -143,6 +144,12 @@
 //!   The database's code page is UTF-8 (`Codepage="65001"`, WiX's default
 //!   pinned): a display name outside one Windows code page still reaches
 //!   the entry whole (the Windows update lane's product has one).
+//! - **Conflicts** (`conflicts`, both ways): for each product it can't be
+//!   installed beside that ships an MSI, a detect-only `Upgrade` row on
+//!   that product's UpgradeCode (`FindRelatedProducts` sets
+//!   `CONFLICT_<ID>`, [`conflict_property`]; the other product is never
+//!   removed) and a launch condition refusing the install while it's
+//!   there, naming it. A repair or a removal is never refused.
 //! - **Upgrades:** `MajorUpgrade` removes the installed version first
 //!   (`afterInstallInitialize`), allows two builds of one version (the
 //!   sequence orders them) and refuses downgrades. The UpgradeCode is
@@ -253,6 +260,31 @@ fn identifier(prefix: &str, name: &str, n: usize) -> String {
     let mut id = format!("{prefix}{n:03}_{clean}");
     id.truncate(72);
     id
+}
+
+/// The property the MSI's search for conflicting product `id` sets:
+/// `CONFLICT_<ID>`, uppercase (a public property, which
+/// `FindRelatedProducts` sets), `-` as `_`.
+#[must_use]
+pub fn conflict_property(id: &str) -> String {
+    format!("CONFLICT_{}", id.to_ascii_uppercase().replace('-', "_"))
+}
+
+/// `text` as literal text in an MSI *Formatted* string: `[`, `]`, `{` and
+/// `}` written as Windows Installer's escapes (`[\[]`, …), so a display
+/// name never expands a property.
+fn formatted_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '[' | ']' | '{' | '}') {
+            out.push_str("[\\");
+            out.push(c);
+            out.push(']');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn policy_value(policy: UpdatePolicy) -> &'static str {
@@ -383,6 +415,38 @@ pub fn wxs(
         4,
         "<MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\" DowngradeErrorMessage=\"A newer version of [ProductName] is already installed.\" />",
     );
+    // The products this one can't be installed beside (`conflicts`, both
+    // ways) that ship an MSI: each found by its UpgradeCode, detect-only
+    // (never removed), and the install refused while one is there. A
+    // maintenance run (repair, removal) is never refused.
+    for other in config.conflicting_products(id) {
+        let Some(other_product) = config
+            .products
+            .get(&other)
+            .filter(|p| p.outputs.contains(&crate::config::Output::Msi))
+        else {
+            continue;
+        };
+        let property = conflict_property(&other);
+        line(
+            4,
+            &format!("<Upgrade Id=\"{}\">", upgrade_code(config, &other)?),
+        );
+        line(
+            6,
+            &format!(
+                "<UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"{property}\" />"
+            ),
+        );
+        line(4, "</Upgrade>");
+        let name = xml(&formatted_literal(&other_product.display_name));
+        line(
+            4,
+            &format!(
+                "<Launch Condition=\"Installed OR NOT {property}\" Message=\"[ProductName] can't be installed while {name} is installed: uninstall {name} first.\" />"
+            ),
+        );
+    }
     line(
         4,
         "<MediaTemplate EmbedCab=\"yes\" CompressionLevel=\"high\" />",
@@ -810,11 +874,13 @@ pub fn wxs(
         ),
     );
 
+    // The shortcuts start the gui program's launcher.
+    let gui = product.gui_program().map(|p| p.executable);
     let mut launcher_id = None;
     for (n, (file, relative)) in layout.files.iter().zip(&relatives).enumerate() {
         let file_id = identifier("f", relative, n);
         let component_id = identifier("c", relative, n);
-        if file.role == Role::Launcher {
+        if file.role == Role::Launcher && file.program == gui {
             launcher_id = Some(file_id.clone());
         }
         line(
@@ -831,8 +897,14 @@ pub fn wxs(
                 xml(&file.install_path)
             ),
         );
+        // The service runs the first program's launcher (the layout's
+        // first launcher).
+        let service_launcher = file.role == Role::Launcher
+            && layout
+                .launcher()
+                .is_some_and(|first| first.install_path == file.install_path);
         match (&file.role, &service) {
-            (Role::Launcher, Some((record, _, _, _))) => {
+            (Role::Launcher, Some((record, _, _, _))) if service_launcher => {
                 let mut install = format!(
                     "<ServiceInstall Id=\"Service\" Name=\"{}\" DisplayName=\"{}\" Description=\"{}\" Type=\"ownProcess\" Start=\"auto\" ErrorControl=\"normal\" Vital=\"yes\" Account=\"{}\"",
                     xml(&record.name),

@@ -613,7 +613,7 @@ fn the_wxs_matches_its_golden_file() {
         "<StandardDirectory Id=\"DesktopFolder\" />",
         "WorkingDirectory=\"InstallDir\" Icon=\"ProductIcon.ico\" />",
     ] {
-        assert!(wxs.contains(wanted), "{wanted} in\n{wxs}");
+        assert!(wxs.contains(wanted), "{wanted}");
     }
     // Nested once each, every data file's component in its own directory.
     assert_eq!(wxs.matches("Name=\"fonts\"").count(), 1);
@@ -630,7 +630,8 @@ fn the_wxs_matches_its_golden_file() {
         seaworthy::wix::wxs(&config, "viewer", layout_for(&plain, WINDOWS), &release()).unwrap();
     assert!(
         !wxs.contains("<Icon ") && !wxs.contains("ARPPRODUCTICON"),
-        "{wxs}"
+        "{:#?}",
+        common::wxs_lines(&wxs, &["<Icon ", "ARPPRODUCTICON"])
     );
     assert_eq!(wxs.matches("<Shortcut ").count(), 1);
     assert!(!wxs.contains("Icon=\"ProductIcon.ico\""));

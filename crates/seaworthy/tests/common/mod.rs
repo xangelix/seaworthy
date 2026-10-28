@@ -1009,6 +1009,14 @@ pub(crate) fn layout_for<'a>(
     layouts.iter().find(|l| l.triple == triple).unwrap()
 }
 
+/// The `.wxs` lines holding any of `needles`: a failing assert's message,
+/// in place of the whole document.
+pub(crate) fn wxs_lines<'a>(wxs: &'a str, needles: &[&str]) -> Vec<&'a str> {
+    wxs.lines()
+        .filter(|l| needles.iter().any(|n| l.contains(n)))
+        .collect()
+}
+
 /// The fixture release.
 pub(crate) fn release() -> seaworthy::version::Release {
     seaworthy::version::Release::new("1.4.0-rc.2", 812).unwrap()

@@ -1,5 +1,6 @@
 # The reusable workflow (dist.yml) run on the launcher's end-to-end fixture's
-# desktop product (crates/seaworthy-launcher/e2e/desktop): every job a caller's run
+# desktop product and the tool that conflicts with it
+# (crates/seaworthy-launcher/e2e/desktop): every job a caller's run
 # has, unsigned, on GitHub-hosted runners: the Linux, Windows and macOS
 # builds per CPU target, the Linux packages, the Windows zip and MSI (built
 # with WiX and adopted), the macOS disk image, and the verified packages
@@ -34,9 +35,10 @@ jobs:
     with:
       config: crates/seaworthy-launcher/e2e/desktop/seaworthy.toml
       manifest: crates/seaworthy-launcher/e2e/Cargo.toml
-      # The desktop product (the fixture's service products build their
-      # launchers differently, for the lab lanes).
-      products: viewer
+      # The desktop product, and the command-line tool that conflicts with
+      # it (the fixture's service products build their launchers
+      # differently, for the lab lanes).
+      products: viewer,viewer-lite
       artifact-prefix: selftest
       retention-days: 3
 

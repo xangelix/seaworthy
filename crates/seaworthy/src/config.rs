@@ -135,9 +135,18 @@ pub struct Defaults {
     /// binary checks (Linux); on Windows and macOS, where AWS-LC builds the
     /// module as a dynamic library, every core loads the pinned module's
     /// crypto library and the sidecars ship every module library the cores
-    /// load (on macOS the module's own symbols pass the Linux checks).
+    /// load (on macOS the module's own symbols pass the Linux checks). A
+    /// product's own `fips` overrides it ([`Config::fips`]).
     #[serde(default)]
     pub fips: bool,
+    /// The `aws-lc-fips-sys` release the FIPS products' cores are built
+    /// with (`"0.14.2"`): one of [`FIPS_MODULES`], each known to build a
+    /// validated, or in-process, AWS-LC FIPS module. It names the module's
+    /// symbol prefix and libraries the FIPS checks require
+    /// ([`Config::fips_symbol_prefix`]). Default: the release
+    /// `seaworthy-crypto` pins (`EXPECTED_FIPS_SYS_VERSION`).
+    #[serde(default)]
+    pub fips_module: Option<String>,
     /// The package maintainer (deb `Maintainer:`, rpm `Packager:`).
     pub maintainer: String,
     /// The license expression (rpm `License:`, deb copyright, pacman).
@@ -171,6 +180,65 @@ pub struct Defaults {
     /// anyone can read.
     #[serde(default)]
     pub publish_sboms: bool,
+}
+
+/// An `aws-lc-fips-sys` release `defaults.fips-module` may name, and the
+/// AWS-LC FIPS module release it builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FipsModule {
+    /// The `aws-lc-fips-sys` crate release (`0.14.3`): it prefixes every
+    /// module symbol (`aws_lc_fips_0_14_3_`) and names the module's
+    /// libraries off Linux (`aws_lc_fips_0_14_3_crypto.dll`).
+    pub sys: &'static str,
+    /// The AWS-LC FIPS module release it builds (`4.2.0`).
+    pub module: &'static str,
+}
+
+impl FipsModule {
+    /// The prefix the sys crate gives every module symbol, and the module's
+    /// libraries' names: `aws_lc_fips_<major>_<minor>_<patch>_`.
+    #[must_use]
+    pub fn symbol_prefix(&self) -> String {
+        format!("aws_lc_fips_{}_", self.sys.replace('.', "_"))
+    }
+}
+
+/// The `aws-lc-fips-sys` releases `defaults.fips-module` accepts: each
+/// builds an AWS-LC FIPS module that is validated or in the CMVP's process
+/// (AWS-LC FIPS 4.2.0: in process, its validated predecessor AWS-LC 3,
+/// certificate #5314), and was built and checked with seaworthy's FIPS
+/// checks. Another release joins only when its module release and symbol
+/// prefix are confirmed the same way: add it here, with a test in
+/// `tests/fips_builds.rs`, and the module's status to `docs/fips.md`.
+pub const FIPS_MODULES: [FipsModule; 2] = [
+    FipsModule {
+        sys: "0.14.2",
+        module: "4.2.0",
+    },
+    FipsModule {
+        sys: "0.14.3",
+        module: "4.2.0",
+    },
+];
+
+/// The module release `seaworthy-crypto` pins: `defaults.fips-module`'s
+/// default.
+#[must_use]
+pub fn pinned_fips_module() -> FipsModule {
+    FIPS_MODULES
+        .iter()
+        .copied()
+        .find(|m| m.sys == seaworthy_crypto::module::EXPECTED_FIPS_SYS_VERSION)
+        .unwrap_or(FipsModule {
+            sys: seaworthy_crypto::module::EXPECTED_FIPS_SYS_VERSION,
+            module: seaworthy_crypto::module::EXPECTED_FIPS_MODULE_VERSION,
+        })
+}
+
+/// The release `version` names in [`FIPS_MODULES`], if any.
+#[must_use]
+pub fn fips_module(version: &str) -> Option<FipsModule> {
+    FIPS_MODULES.iter().copied().find(|m| m.sys == version)
 }
 
 fn default_macos_targets() -> Vec<String> {
@@ -323,10 +391,11 @@ pub enum Output {
     Pacman,
     /// A Linux tarball of the install tree.
     Tar,
-    /// A macOS disk image holding the app bundle (desktop products).
+    /// A macOS disk image holding the app bundle (a desktop app alone).
     Dmg,
-    /// A macOS flat installer package: the app bundle and its
-    /// LaunchDaemons (service products).
+    /// A macOS flat installer package: the app bundle, the tool directory
+    /// with its `PATH` links, and a service's LaunchDaemons (services,
+    /// tools, products with `cli` programs).
     Pkg,
 }
 
@@ -450,6 +519,12 @@ pub struct Linux {
     /// link, a menu entry).
     #[serde(default)]
     pub replaces: Vec<String>,
+    /// Virtual package names this product's Linux packages provide (deb
+    /// `Provides:`, rpm `Provides:`, pacman `provides`), unversioned: what
+    /// another package may depend on whichever of several products (one
+    /// per crypto build, say) is installed.
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 /// The default glibc floor: 2.34, RHEL 9's (and so Rocky's and Alma's),
@@ -503,13 +578,23 @@ pub struct Product {
     /// The launcher crate's path, relative to the workspace root (the
     /// directory of the CI template's `manifest`, build-plan's
     /// `--manifest`), for the CI templates that build it; `seaworthy`
-    /// reads only built artifacts.
+    /// reads only built artifacts. The single-program form: with
+    /// `[[programs]]`, each program names its own.
     #[serde(default)]
     pub launcher: Option<PathBuf>,
-    /// The launcher executable's file stem (`AcmeForensicCollector`).
-    pub executable: String,
-    /// The core cdylib's crate name (`acme_collector_core`).
-    pub core: String,
+    /// The launcher executable's file stem (`AcmeForensicCollector`):
+    /// required in the single-program form, refused with `[[programs]]`.
+    #[serde(default)]
+    pub executable: Option<String>,
+    /// The core cdylib's crate name (`acme_collector_core`): required in
+    /// the single-program form, refused with `[[programs]]`.
+    #[serde(default)]
+    pub core: Option<String>,
+    /// `[[product.<id>.programs]]`: the product's programs, each its own
+    /// launcher and per-CPU cores ([`Product::programs`]). Empty: the
+    /// single-program form (`executable`, `core`, `launcher`).
+    #[serde(default)]
+    pub programs: Vec<ProgramEntry>,
     /// The update helper executable's file stem. Required unless
     /// `updates.default = "off"`.
     #[serde(default)]
@@ -553,6 +638,20 @@ pub struct Product {
     /// product installs its files and nothing else.
     #[serde(default)]
     pub desktop: Option<Desktop>,
+    /// What this product can't be installed beside: product ids of this
+    /// `seaworthy.toml` (both ways: [`Config::conflicting_products`]; every
+    /// platform both build for: the Linux packages' conflicts, an MSI that
+    /// refuses to install beside the other's) or plain Linux package names (the Linux
+    /// packages' conflicts alone). Unlike `linux.replaces`, never replaced
+    /// on an upgrade: a package manager never swaps one for the other.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Whether this product's cores carry the AWS-LC FIPS module
+    /// ([`Config::fips`]): `defaults.fips` when unset. One `seaworthy.toml`
+    /// can then ship a product per crypto build (`acme-fips`,
+    /// `acme-portable`), each checked as what it is.
+    #[serde(default)]
+    pub fips: Option<bool>,
     /// `[[product.<id>.files]]`: data files installed under the install
     /// root beside the launcher (fonts, images, documents, licenses).
     #[serde(default)]
@@ -561,6 +660,152 @@ pub struct Product {
     /// with a macOS output.
     #[serde(default)]
     pub macos: Option<Macos>,
+}
+
+/// What a program is to the people who run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    /// A command-line program, put on `PATH` as its `command`
+    /// (`/usr/bin/<command>` in the Linux packages).
+    Cli,
+    /// A graphical program: the product's menu entry and shortcuts
+    /// (`[product.<id>.desktop]`) start it, and on macOS it is the app
+    /// bundle's executable. A product has at most one.
+    Gui,
+}
+
+/// `[[product.<id>.programs]]`: one program of a product, as written.
+///
+/// ```toml
+/// [[product.trove.programs]]
+/// executable = "trove"
+/// launcher = "crates/trove/cli"
+/// core = "trove_cli_core"
+/// role = "cli"
+/// features = ["fips"]
+/// default-features = false
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ProgramEntry {
+    /// The launcher executable's file stem.
+    pub executable: String,
+    /// The launcher crate's path, relative to the workspace root (as the
+    /// single-program form's `launcher`).
+    #[serde(default)]
+    pub launcher: Option<PathBuf>,
+    /// The core cdylib's crate name.
+    pub core: String,
+    /// `cli` or `gui`.
+    pub role: Role,
+    /// The name it is put on `PATH` as (`[a-z0-9][a-z0-9._+-]*`): a
+    /// `cli` program's defaults to its executable, which must then be such
+    /// a name; a `gui` program is put on `PATH` only when it names one.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// The core crate's cargo features this program's cores build with
+    /// (`--features`), each core build in a target directory of its own
+    /// ([`Program::build_dir`]).
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Whether the core crate's default features stay on (default `true`;
+    /// `false` builds with `--no-default-features`).
+    #[serde(default = "default_true")]
+    pub default_features: bool,
+}
+
+/// One program of a product as every step sees it ([`Product::programs`]):
+/// a `[[programs]]` entry, or the single-program form's keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    /// The launcher executable's file stem.
+    pub executable: String,
+    /// The launcher crate's path from the workspace root, when given.
+    pub launcher: Option<PathBuf>,
+    /// The core cdylib's crate name.
+    pub core: String,
+    /// `cli` or `gui`.
+    pub role: Role,
+    /// The Linux packages' `/usr/bin/<command>` link to the launcher.
+    pub linux_command: Option<String>,
+    /// The macOS pkg's `/usr/local/bin/<command>` link to the launcher.
+    pub macos_command: Option<String>,
+    /// The core's cargo features, sorted.
+    pub features: Vec<String>,
+    /// Whether the core crate's default features stay on.
+    pub default_features: bool,
+    /// macOS: in the product's app bundle (a `gui` program, or the
+    /// single-program form's service or desktop app), else in its tool
+    /// directory.
+    pub bundled: bool,
+}
+
+impl Program {
+    /// Whether the core builds with its crate's default features alone.
+    #[must_use]
+    pub fn default_build(&self) -> bool {
+        self.default_features && self.features.is_empty()
+    }
+
+    /// The core build's name for `cpu`: its cargo target directory, and
+    /// its directory under `<triple>/cores/` in the artifact directory.
+    /// `<cpu>` for a core built with its crate's default features (every
+    /// single-program product's); `<cpu>.f<8 hex>` otherwise, the hex
+    /// from the feature set's SHA-256, so a core crate built with other
+    /// features never shares a target directory or an artifact path with
+    /// another build of it, and two products building it alike build it
+    /// once.
+    #[must_use]
+    pub fn build_dir(&self, cpu: &str) -> String {
+        if self.default_build() {
+            return cpu.to_owned();
+        }
+        let mut text = format!("seaworthy core features\0{}", self.default_features);
+        for feature in &self.features {
+            text.push('\0');
+            text.push_str(feature);
+        }
+        let digest = seaworthy_crypto::digest::sha256(text.as_bytes());
+        format!(
+            "{cpu}.f{}",
+            hex::encode(digest.get(..4).unwrap_or_default())
+        )
+    }
+
+    /// The cargo arguments choosing the core's features:
+    /// `--no-default-features` and `--features <a,b>`, as set.
+    #[must_use]
+    pub fn feature_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if !self.default_features {
+            args.push("--no-default-features".to_owned());
+        }
+        if !self.features.is_empty() {
+            args.push("--features".to_owned());
+            args.push(self.features.join(","));
+        }
+        args
+    }
+}
+
+/// A cargo feature as `--features` takes it: a name of `[A-Za-z0-9_+.-]`
+/// starting with a letter, digit or `_`, or `<package>/<name>`; at most 64
+/// bytes.
+fn is_feature(text: &str) -> bool {
+    let name = |part: &str| {
+        part.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_+.-".contains(&b))
+    };
+    text.len() <= 64
+        && match text.split_once('/') {
+            Some((package, feature)) => name(package) && name(feature),
+            None => name(text),
+        }
 }
 
 /// `[product.<id>.macos]`: what the app bundle says about itself.
@@ -1694,6 +1939,23 @@ impl Config {
                 ));
             }
         }
+        if let Some(version) = &d.fips_module {
+            if fips_module(version).is_none() {
+                return Err(DistError::Config(format!(
+                    "defaults.fips-module {version:?} isn't an aws-lc-fips-sys release seaworthy knows to build a validated or in-process AWS-LC FIPS module ({})",
+                    FIPS_MODULES
+                        .iter()
+                        .map(|m| format!("{} builds AWS-LC FIPS {}", m.sys, m.module))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )));
+            }
+            if !self.products.values().any(|p| self.fips(p)) {
+                return Err(DistError::Config(
+                    "defaults.fips-module is set, but no product carries the FIPS module (fips = true, in [defaults] or a product)".to_owned(),
+                ));
+            }
+        }
         for (key, value) in [("maintainer", &d.maintainer), ("license", &d.license)] {
             if !is_plain_text(value) {
                 return Err(DistError::Config(format!(
@@ -1708,6 +1970,78 @@ impl Config {
             self.validate_product(id, product)?;
         }
         self.validate_across_products()
+    }
+
+    /// The FIPS module the FIPS products' cores carry:
+    /// `defaults.fips-module`, else the release `seaworthy-crypto` pins.
+    #[must_use]
+    pub fn fips_module(&self) -> FipsModule {
+        self.defaults
+            .fips_module
+            .as_deref()
+            .and_then(fips_module)
+            .unwrap_or_else(pinned_fips_module)
+    }
+
+    /// The module's symbol prefix (`aws_lc_fips_0_14_3_`), which the FIPS
+    /// checks require of every FIPS core and its module's libraries.
+    #[must_use]
+    pub fn fips_symbol_prefix(&self) -> String {
+        self.fips_module().symbol_prefix()
+    }
+
+    /// Whether `product`'s cores carry the AWS-LC FIPS module: its own
+    /// `fips`, else `defaults.fips`. `verify` applies the FIPS binary
+    /// checks to the cores (and on Windows and macOS to the sidecars) of
+    /// exactly these products.
+    #[must_use]
+    pub fn fips(&self, product: &Product) -> bool {
+        product.fips.unwrap_or(self.defaults.fips)
+    }
+
+    /// The products of this file product `id` can't be installed beside,
+    /// sorted: those its `conflicts` names, and those whose `conflicts`
+    /// names it (a conflict holds both ways, so each product's packages
+    /// refuse the other's whichever is installed first).
+    #[must_use]
+    pub fn conflicting_products(&self, id: &str) -> Vec<String> {
+        let mut found = BTreeSet::new();
+        if let Some(product) = self.products.get(id) {
+            for name in &product.conflicts {
+                if name != id && self.products.contains_key(name) {
+                    found.insert(name.clone());
+                }
+            }
+        }
+        for (other, product) in &self.products {
+            if other != id && product.conflicts.iter().any(|name| name == id) {
+                found.insert(other.clone());
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// The Linux packages product `id`'s packages conflict with, sorted:
+    /// each conflicting product's package (`<vendor>-<id>`) and every plain
+    /// package name its `conflicts` lists. `linux.replaces`' packages are
+    /// conflicts too, which nFPM's `replaces` adds.
+    #[must_use]
+    pub fn conflicting_packages(&self, id: &str) -> Vec<String> {
+        let mut found: BTreeSet<String> = self
+            .conflicting_products(id)
+            .iter()
+            .map(|other| crate::linux::package_name(self, other))
+            .collect();
+        if let Some(product) = self.products.get(id) {
+            found.extend(
+                product
+                    .conflicts
+                    .iter()
+                    .filter(|name| !self.products.contains_key(*name))
+                    .cloned(),
+            );
+        }
+        found.into_iter().collect()
     }
 
     /// Whether releases carry signed manifests (`defaults.release-signatures`
@@ -1731,7 +2065,18 @@ impl Config {
 
     /// Two products may not install into, or register, the same thing.
     fn validate_across_products(&self) -> Result<(), DistError> {
-        let mut seen: BTreeMap<(&str, String), &str> = BTreeMap::new();
+        // Products that conflict are never installed together, so they may
+        // install the same command, menu entry, shortcuts and directory
+        // (one product per crypto build, each the tool's one install);
+        // nothing else is shared, the UpgradeCode least of all (it would
+        // make one an upgrade of the other).
+        const SHAREABLE: [&str; 4] = [
+            "windows-directory",
+            "linux.command",
+            "desktop.app-id",
+            "display-name (the MSI's shortcut)",
+        ];
+        let mut seen: BTreeMap<(&str, String), Vec<&str>> = BTreeMap::new();
         for (id, p) in &self.products {
             let mut claims = vec![(
                 "windows-directory",
@@ -1752,8 +2097,18 @@ impl Config {
                     claims.push(("service.state-directory", state.clone()));
                 }
             }
-            if let Some(command) = &p.linux.command {
-                claims.push(("linux.command", command.clone()));
+            for program in p.programs() {
+                if let Some(command) = program.linux_command {
+                    claims.push(("linux.command", command));
+                }
+            }
+            // The bundle id is also the pkg's identifier, the receipt
+            // `pkgutil` keeps and a conflicting product's pkg looks for:
+            // never shared, conflicting products included (one product's
+            // install or uninstall would rewrite or forget the other's).
+            // macOS compares identifiers without regard to case.
+            if let Some(macos) = &p.macos {
+                claims.push(("macos.bundle-id", macos.bundle_id.to_ascii_lowercase()));
             }
             if let Some(desktop) = &p.desktop {
                 claims.push((
@@ -1771,12 +2126,24 @@ impl Config {
                     ));
                 }
             }
+            let conflicting = self.conflicting_products(id);
             for (key, value) in claims {
-                if let Some(other) = seen.insert((key, value.clone()), id) {
+                let holders = seen.entry((key, value.clone())).or_default();
+                if let Some(other) = holders.iter().find(|other| {
+                    !(SHAREABLE.contains(&key) && conflicting.iter().any(|c| c == *other))
+                }) {
                     return Err(DistError::Config(format!(
-                        "products {other} and {id} share {key} {value:?}"
+                        "products {other} and {id} share {key} {value:?}{}",
+                        if SHAREABLE.contains(&key) {
+                            " (only products that conflict may)"
+                        } else if key == "macos.bundle-id" {
+                            " (it is also the pkg's identifier, its receipt: one per product, even between products that conflict)"
+                        } else {
+                            ""
+                        }
                     )));
                 }
+                holders.push(id);
             }
         }
         Ok(())
@@ -1803,23 +2170,7 @@ impl Config {
                 &format!("at most {MAX_DISPLAY_NAME} and {MAX_DESCRIPTION} characters"),
             ));
         }
-        if !is_windows_name(&p.executable) {
-            return Err(at(
-                "executable",
-                "a file stem ([A-Za-z0-9][A-Za-z0-9._-]*), not a Windows device name",
-            ));
-        }
-        let core_ok = p
-            .core
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphabetic())
-            && p.core
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
-        if !core_ok {
-            return Err(at("core", "a crate name ([A-Za-z][A-Za-z0-9_]*)"));
-        }
+        self.validate_programs(id, p)?;
         if p.helper.is_some() && !self.signs_manifests() {
             return Err(at(
                 "helper",
@@ -1834,11 +2185,14 @@ impl Config {
                 ));
             }
             (Some(helper), _)
-                if !is_windows_name(helper) || helper.eq_ignore_ascii_case(&p.executable) =>
+                if !is_windows_name(helper)
+                    || p.programs()
+                        .iter()
+                        .any(|program| helper.eq_ignore_ascii_case(&program.executable)) =>
             {
                 return Err(at(
                     "helper",
-                    "a file stem, not a Windows device name, different from the executable (case-insensitively: NTFS)",
+                    "a file stem, not a Windows device name, different from every program's executable (case-insensitively: NTFS)",
                 ));
             }
             _ => {}
@@ -1985,17 +2339,47 @@ impl Config {
             }
             (None, false) => {}
         }
+        // macOS: a dmg holds a desktop app's bundle alone; a pkg installs
+        // a service, a tool, or a product's cli programs (in its tool
+        // directory, linked into /usr/local/bin), beside its bundle if it
+        // has one.
+        let programs = p.programs();
+        let tool_programs = programs.iter().any(|program| !program.bundled);
         if p.outputs.contains(&Output::Dmg) && p.kind != Kind::Desktop {
             return Err(at(
                 "outputs",
-                "dmg holds a desktop app (kind = \"desktop\"); a macOS service ships as a pkg",
+                "dmg holds a desktop app (kind = \"desktop\"); a macOS service or tool ships as a pkg",
             ));
         }
-        if p.outputs.contains(&Output::Pkg) && p.kind != Kind::Service {
+        if p.outputs.contains(&Output::Dmg) && tool_programs {
             return Err(at(
                 "outputs",
-                "pkg holds a macOS service (kind = \"service\"): its LaunchDaemon; a desktop app ships as a dmg",
+                "dmg holds a desktop app's bundle alone: its cli programs, and their PATH links, need a pkg",
             ));
+        }
+        if p.outputs.contains(&Output::Pkg) && p.kind == Kind::Desktop && !tool_programs {
+            return Err(at(
+                "outputs",
+                "pkg holds a macOS service, a tool or a product's cli programs (kind = \"service\" or \"tool\", or a [[programs]] entry with role = \"cli\"); a desktop app alone ships as a dmg",
+            ));
+        }
+        // What only an app bundle has.
+        if macos_output
+            && !programs.iter().any(|program| program.bundled)
+            && let Some(macos) = &p.macos
+        {
+            for (key, set) in [
+                ("macos.icon", macos.icon.is_some()),
+                ("macos.category", macos.category.is_some()),
+                ("macos.localizations", !macos.localizations.is_empty()),
+            ] {
+                if set {
+                    return Err(at(
+                        key,
+                        "describes the app bundle, and this product has none (no gui program: its programs install in its tool directory)",
+                    ));
+                }
+            }
         }
         // macOS's identity is its own: a pkg's LaunchDaemon runs as root
         // (the package creates no daemon account yet), which a product says
@@ -2053,7 +2437,7 @@ impl Config {
         if !p.sidecars.macos.is_empty() && !macos_output {
             return Err(at("sidecars.macos", "set, but no output is for macOS"));
         }
-        if self.defaults.fips && macos_output && p.sidecars.macos.is_empty() {
+        if self.fips(p) && macos_output && p.sidecars.macos.is_empty() {
             return Err(at(
                 "sidecars.macos",
                 "with fips, a macOS build ships the FIPS module's dylib beside the cores (AWS-LC builds the module only as a dynamic library off Linux): sidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]",
@@ -2170,6 +2554,156 @@ impl Config {
         self.validate_desktop_and_files(id, p)
     }
 
+    /// The product's programs: the single-program form's keys or
+    /// `[[programs]]` (never both), each executable a file stem, each core
+    /// a crate name, none shared within the product (case-insensitively:
+    /// NTFS, and macOS's default file system), at most one `gui` program,
+    /// each command a command name, each feature a cargo feature.
+    fn validate_programs(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        let at = |key: &str, why: &str| DistError::Config(format!("product.{id}.{key}: {why}"));
+        if p.programs.is_empty() {
+            if p.executable.is_none() {
+                return Err(at(
+                    "executable",
+                    "required: the launcher's file stem (or list the product's programs as [[product.<id>.programs]])",
+                ));
+            }
+            if p.core.is_none() {
+                return Err(at(
+                    "core",
+                    "required: the core cdylib's crate name (or list the product's programs as [[product.<id>.programs]])",
+                ));
+            }
+        } else {
+            for (key, set) in [
+                ("executable", p.executable.is_some()),
+                ("core", p.core.is_some()),
+                ("launcher", p.launcher.is_some()),
+                ("linux.command", p.linux.command.is_some()),
+            ] {
+                if set {
+                    return Err(at(
+                        key,
+                        "the single-program form's key: with [[programs]], each program names its own (executable, core, launcher, command)",
+                    ));
+                }
+            }
+        }
+        let programs = p.programs();
+        let mut gui = None;
+        for (n, program) in programs.iter().enumerate() {
+            let key = |field: &str| {
+                if p.programs.is_empty() {
+                    field.to_owned()
+                } else {
+                    format!("programs[{n}].{field}")
+                }
+            };
+            if !is_windows_name(&program.executable) {
+                return Err(at(
+                    &key("executable"),
+                    "a file stem ([A-Za-z0-9][A-Za-z0-9._-]*), not a Windows device name",
+                ));
+            }
+            let core_ok = program
+                .core
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+                && program
+                    .core
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !core_ok {
+                return Err(at(&key("core"), "a crate name ([A-Za-z][A-Za-z0-9_]*)"));
+            }
+            let earlier = programs.get(..n).unwrap_or_default();
+            if earlier
+                .iter()
+                .any(|e| e.executable.eq_ignore_ascii_case(&program.executable))
+            {
+                return Err(at(
+                    &key("executable"),
+                    &format!(
+                        "{:?} is another program's executable too (case-insensitively: NTFS)",
+                        program.executable
+                    ),
+                ));
+            }
+            // The launcher finds its cores as `<core>_<cpu>` beside the
+            // others: two programs of one core would load each other's.
+            if earlier
+                .iter()
+                .any(|e| e.core.eq_ignore_ascii_case(&program.core))
+            {
+                return Err(at(
+                    &key("core"),
+                    &format!(
+                        "{:?} is another program's core too: the cores of a product's programs install side by side, named <core>_<cpu>",
+                        program.core
+                    ),
+                ));
+            }
+            if program.role == Role::Gui {
+                if let Some(first) = gui {
+                    return Err(at(
+                        &key("role"),
+                        &format!(
+                            "programs[{first}] is the product's gui program already: the menu entry, the shortcuts and the macOS app bundle are one program's (a second app is a second product)"
+                        ),
+                    ));
+                }
+                gui = Some(n);
+            }
+            if !p.programs.is_empty()
+                && let Some(command) = &program.linux_command
+            {
+                if !is_command_name(command) {
+                    let why = if p.programs.get(n).is_some_and(|e| e.command.is_none()) {
+                        format!(
+                            "a cli program is put on PATH as its executable, and {:?} isn't a command name ([a-z0-9][a-z0-9._+-]*, at most 64 bytes): set command",
+                            program.executable
+                        )
+                    } else {
+                        "a command name ([a-z0-9][a-z0-9._+-]*, at most 64 bytes)".to_owned()
+                    };
+                    return Err(at(&key("command"), &why));
+                }
+                if earlier
+                    .iter()
+                    .any(|e| e.linux_command.as_deref() == Some(command))
+                {
+                    return Err(at(
+                        &key("command"),
+                        &format!("{command:?} is another program's command too"),
+                    ));
+                }
+            }
+            for (i, feature) in program.features.iter().enumerate() {
+                if !is_feature(feature) {
+                    return Err(at(
+                        &key("features"),
+                        &format!(
+                            "{feature:?} isn't a cargo feature ([A-Za-z0-9_+.-], or <package>/<feature>; at most 64 bytes)"
+                        ),
+                    ));
+                }
+                if program
+                    .features
+                    .get(..i)
+                    .unwrap_or_default()
+                    .contains(feature)
+                {
+                    return Err(at(
+                        &key("features"),
+                        &format!("{feature:?} is listed twice"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `[product.<id>.desktop]`, `[[product.<id>.files]]` and
     /// `linux.command`. The icons' and files' contents are checked
     /// when `layout` reads them.
@@ -2226,11 +2760,12 @@ impl Config {
                 ));
             }
         }
+        self.validate_relations(id, p, linux_package)?;
         if let Some(desktop) = &p.desktop {
-            if p.kind != Kind::Desktop {
+            if p.gui_program().is_none() {
                 return Err(at(
                     "desktop",
-                    "only a desktop app (kind = \"desktop\") has a menu entry, icons and shortcuts",
+                    "only a desktop app (kind = \"desktop\", or a [[programs]] entry with role = \"gui\") has a menu entry, icons and shortcuts",
                 ));
             }
             if let Some(app_id) = &desktop.app_id
@@ -2389,6 +2924,102 @@ impl Config {
         Ok(())
     }
 
+    /// `conflicts` and `linux.provides`: no product conflicts with itself
+    /// or provides itself; a plain name is a package name no product here
+    /// builds (a sibling is named by its id, so every platform follows),
+    /// and only a Linux package has one.
+    fn validate_relations(
+        &self,
+        id: &str,
+        p: &Product,
+        linux_package: bool,
+    ) -> Result<(), DistError> {
+        let at = |key: &str, why: &str| DistError::Config(format!("product.{id}.{key}: {why}"));
+        let own = crate::linux::package_name(self, id);
+        let built = |name: &str| {
+            self.products
+                .keys()
+                .map(|other| (other.clone(), crate::linux::package_name(self, other)))
+                .chain(
+                    self.repository_package()
+                        .map(|package| (REPOSITORY_ID.to_owned(), package)),
+                )
+                .find(|(_, package)| package == name)
+                .map(|(other, _)| other)
+        };
+        let mut listed = BTreeSet::new();
+        for name in &p.conflicts {
+            if !listed.insert(name.as_str()) {
+                return Err(at("conflicts", &format!("{name:?} is listed twice")));
+            }
+            if name == id || *name == own {
+                return Err(at("conflicts", "a product can't conflict with itself"));
+            }
+            if self.products.contains_key(name) {
+                continue;
+            }
+            if !is_package_name(name) || name.len() > 64 {
+                return Err(at(
+                    "conflicts",
+                    &format!(
+                        "{name:?} is neither a product of this seaworthy.toml nor a package name every format accepts ([a-z0-9][a-z0-9.-]+, at most 64 characters)"
+                    ),
+                ));
+            }
+            if let Some(other) = built(name) {
+                return Err(at(
+                    "conflicts",
+                    &format!(
+                        "{name:?} is a package this seaworthy.toml builds: name the product ({other:?}), so its MSI and pkg refuse too"
+                    ),
+                ));
+            }
+            if p.linux.replaces.contains(name) {
+                return Err(at(
+                    "conflicts",
+                    &format!("{name:?} is in linux.replaces, which conflicts with it already"),
+                ));
+            }
+            if !linux_package {
+                return Err(at(
+                    "conflicts",
+                    &format!(
+                        "{name:?} is a Linux package, and only a Linux package (deb, rpm, pacman) conflicts with one"
+                    ),
+                ));
+            }
+        }
+        if !p.linux.provides.is_empty() && !linux_package {
+            return Err(at(
+                "linux.provides",
+                "only a Linux package (deb, rpm, pacman) provides packages",
+            ));
+        }
+        let mut provided = BTreeSet::new();
+        for name in &p.linux.provides {
+            if !is_package_name(name) || name.len() > 64 {
+                return Err(at(
+                    "linux.provides",
+                    &format!(
+                        "{name:?} isn't a package name every format accepts ([a-z0-9][a-z0-9.-]+, at most 64 characters)"
+                    ),
+                ));
+            }
+            if !provided.insert(name.as_str()) {
+                return Err(at("linux.provides", &format!("{name:?} is listed twice")));
+            }
+            // Providing a package this file builds (itself included) would
+            // satisfy what depends on that one with this one.
+            if *name == own || built(name).is_some() {
+                return Err(at(
+                    "linux.provides",
+                    &format!("{name:?} is a package this seaworthy.toml builds"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The product's service as a [`ServiceSpec`], with `program` the
     /// launcher's installed path on the platform being rendered.
     ///
@@ -2531,9 +3162,81 @@ impl Product {
             self.display_name
                 .split_whitespace()
                 .last()
-                .unwrap_or(&self.executable)
-                .to_owned()
+                .map(str::to_owned)
+                .or_else(|| self.programs().first().map(|p| p.executable.clone()))
+                .unwrap_or_default()
         })
+    }
+
+    /// The product's programs, in `seaworthy.toml`'s order: each
+    /// `[[programs]]` entry, or the single-program form's one program.
+    /// That one is a `gui` program for `kind = "desktop"` and a `cli`
+    /// program otherwise; its PATH link is `linux.command`, on Linux
+    /// alone, as before; on macOS it stays in the app bundle, but for
+    /// `kind = "tool"`, which has no bundle. A `[[programs]]` `cli`
+    /// program's command defaults to its executable, and a program's
+    /// command links on Linux and in the macOS pkg alike.
+    #[must_use]
+    pub fn programs(&self) -> Vec<Program> {
+        if self.programs.is_empty() {
+            return vec![Program {
+                executable: self.executable.clone().unwrap_or_default(),
+                launcher: self.launcher.clone(),
+                core: self.core.clone().unwrap_or_default(),
+                role: if self.kind == Kind::Desktop {
+                    Role::Gui
+                } else {
+                    Role::Cli
+                },
+                linux_command: self.linux.command.clone(),
+                macos_command: None,
+                features: Vec::new(),
+                default_features: true,
+                bundled: self.kind != Kind::Tool,
+            }];
+        }
+        self.programs
+            .iter()
+            .map(|entry| {
+                let command = entry
+                    .command
+                    .clone()
+                    .or_else(|| (entry.role == Role::Cli).then(|| entry.executable.clone()));
+                let mut features = entry.features.clone();
+                features.sort();
+                Program {
+                    executable: entry.executable.clone(),
+                    launcher: entry.launcher.clone(),
+                    core: entry.core.clone(),
+                    role: entry.role,
+                    linux_command: command.clone(),
+                    macos_command: command,
+                    features,
+                    default_features: entry.default_features,
+                    bundled: entry.role == Role::Gui,
+                }
+            })
+            .collect()
+    }
+
+    /// The program the service runs: the first.
+    #[must_use]
+    pub fn service_program(&self) -> Option<Program> {
+        self.programs().into_iter().next()
+    }
+
+    /// The `gui` program, which the menu entry, the shortcuts and the macOS
+    /// app bundle start.
+    #[must_use]
+    pub fn gui_program(&self) -> Option<Program> {
+        self.programs().into_iter().find(|p| p.role == Role::Gui)
+    }
+
+    /// The program the macOS app bundle holds, if any: the `gui` program,
+    /// or the single-program form's service or desktop app.
+    #[must_use]
+    pub fn bundled_program(&self) -> Option<Program> {
+        self.programs().into_iter().find(|p| p.bundled)
     }
 
     /// Whether the update helper ships with this product.
@@ -2543,10 +3246,11 @@ impl Product {
     }
 
     /// Whether the helper ships for `os`: [`ships_helper`](Self::ships_helper),
-    /// except a desktop product on macOS, whose dmg carries none (a
-    /// helper there needs a LaunchDaemon, which only a service's pkg
+    /// except a desktop product on macOS, whose dmg (or pkg) carries none
+    /// (a helper there needs a LaunchDaemon, which only a service's pkg
     /// installs, and an interactive user's start right macOS doesn't have
-    /// yet; the app updates by download there, as before).
+    /// yet; the app updates by download there, as before). A tool's helper
+    /// ships as a file only, on macOS as elsewhere.
     #[must_use]
     pub fn ships_helper_on(&self, os: crate::inputs::Os) -> bool {
         self.ships_helper() && !(os == crate::inputs::Os::Macos && self.kind == Kind::Desktop)

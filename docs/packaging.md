@@ -18,19 +18,23 @@ artifacts ──▶ verify ──▶ layout ──▶ package ──▶ repo ─
 ## The artifact directory
 
 ```text
-<artifacts>/<triple>/launcher/<executable>[.exe]
-<artifacts>/<triple>/helper/<helper>[.exe]          when the update helper ships
-<artifacts>/<triple>/cores/<cpu>/lib<core>.so       Linux (x86_64-unknown-linux-gnu)
-<artifacts>/<triple>/cores/<cpu>/<core>.dll         Windows (x86_64-pc-windows-msvc), with the sidecars
-<artifacts>/<triple>/cores/<cpu>/lib<core>.dylib    macOS (aarch64-apple-darwin)
+<artifacts>/<triple>/launcher/<executable>[.exe]     each program's
+<artifacts>/<triple>/helper/<helper>[.exe]           when the update helper ships
+<artifacts>/<triple>/cores/<build>/lib<core>.so      Linux (x86_64-unknown-linux-gnu)
+<artifacts>/<triple>/cores/<build>/<core>.dll        Windows (x86_64-pc-windows-msvc), with the sidecars
+<artifacts>/<triple>/cores/<build>/lib<core>.dylib   macOS (aarch64-apple-darwin)
 ```
+
+`<build>` is the CPU target, or `<cpu>.f<8 hex>` for a program whose core builds with cargo features
+of its own (`features`, `default-features = false`; the hex is from the feature set's SHA-256), so
+two products building one core crate with different features keep apart.
 
 Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
 the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
-the launcher and helper once (in the target directory `base`), the core once per CPU target in its
-own target directory (named for the CPU), the per-CPU flags as `target.<triple>.rustflags`. It
-refuses a product whose cargo configuration sets `build.rustflags`, which cargo would ignore once
-target flags are set.
+each program's launcher and the helper once (in the target directory `base`), each program's core
+once per CPU target with its features, in its build's own target directory (`<build>` above), the
+per-CPU flags as `target.<triple>.rustflags`. It refuses a product whose cargo configuration sets
+`build.rustflags`, which cargo would ignore once target flags are set.
 
 ### Extra build flags
 
@@ -50,7 +54,7 @@ Each is split on whitespace, and its words follow the plan's flags in that build
 `{workspace}`, the workspace manifest's directory as an absolute path (cargo runs each
 dependency's `rustc` in that dependency's own directory, so a relative path would name a different
 file for each crate); `{triple}`, the target triple; and `{cpu}`, the step's target directory: the
-core's CPU, or `base`. A flag that chooses the CPU or its features (`target-cpu`, `target-feature`)
+core's build (its CPU, or `<cpu>.f<8 hex>` for a core with features of its own), or `base`. A flag that chooses the CPU or its features (`target-cpu`, `target-feature`)
 is refused: the plan sets them per core, and each core's requirement record must name exactly what
 it was built for. So is a quote (the flags travel as TOML strings) and any other `{placeholder}`.
 
@@ -104,20 +108,22 @@ workflow's `remap-paths: false`) turns remapping off.
 `seaworthy verify` runs every check and reports every finding together, so one run names everything
 wrong:
 
-1. **Presence and kind.** The launcher, the helper (when shipped) and one core per CPU target, on
-   every platform the outputs need; each a regular file of the platform's format: ELF64 x86-64
+1. **Presence and kind.** Each program's launcher and one core per CPU target, and the helper
+   (when shipped), on every platform the outputs need; each a regular file of the platform's format: ELF64 x86-64
    executables and shared libraries on Linux, PE32+ AMD64 executables and DLLs on Windows, thin
    arm64 Mach-O executables and dylibs on macOS.
 2. **Core records.** Each core's `.cpureq` parses, names this platform's triple and this
    directory's CPU, and lists only feature names `seaworthy-levels` knows.
-3. **The launcher's `.cpulist`** names the product's core and exactly the configured targets, in
+3. **Each launcher's `.cpulist`** names its program's core and exactly the configured targets, in
    order.
-4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build,
-   and the copies are byte-identical: a difference means an accidental per-target FIPS build.
-5. **FIPS** (`defaults.fips`). Every Linux core passes the static-link checks of
-   `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no second
-   libcrypto, no other module version. On Windows and macOS every core loads the pinned module's
-   library, and the sidecars ship it.
+4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build
+   of every program, and the copies are byte-identical: a difference means an accidental
+   per-target FIPS build.
+5. **FIPS** (the product's `fips`, else `defaults.fips`). Every Linux core passes the static-link
+   checks of `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no
+   second libcrypto, no other module version. On Windows and macOS every core loads the pinned
+   module's library, and the sidecars ship it. The pinned module is `defaults.fips-module`'s
+   release, else `seaworthy-crypto`'s ([fips.md](fips.md#a-products-module-release)).
 6. **Runtime dependencies.** Windows binaries link the C runtime statically. Linux binaries need
    only the base system's libraries plus those the product declares in `linux.needed`, and no glibc
    newer than the floor (`linux.glibc`, default 2.34): every entry of the version-needs table counts,
@@ -130,8 +136,9 @@ An import table, dynamic section or version table that doesn't parse, and a stri
 are findings, never a pass: the checks would otherwise pass vacuously. `verify` also warns about a
 core no CPU would ever choose (its features include every feature of a more preferred core).
 
-`seaworthy fips-check FILE…` and `seaworthy glibc-check [--floor X.Y] FILE…` apply the FIPS and glibc
-rules to single files, for binaries built outside a product (a separate FIPS builder, for example).
+`seaworthy fips-check [--module VERSION] FILE…` and `seaworthy glibc-check [--floor X.Y] FILE…`
+apply the FIPS and glibc rules to single files, for binaries built outside a product (a separate
+FIPS builder, for example).
 
 **Building for the glibc floor.** A build on a current distribution picks up symbol versions the
 package's `glibc` dependency says nothing about (glibc 2.38's `__isoc23_*`, std's weakly referenced
@@ -148,12 +155,19 @@ floor and the packages' dependency together.
 
 | | Linux | Windows | macOS |
 |---|---|---|---|
-| Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` |
-| Launcher | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
-| Cores | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
-| Sidecars | — | beside the cores, one copy | `Contents/Frameworks` |
-| Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS` (pkg only) |
-| Data files | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>` |
+| Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` (the bundle); `/usr/local/<vendor>/<product>` (lowercase: the tool directory) |
+| Launchers (each program's) | `<executable>` | `<executable>.exe` | the bundle's `Contents/MacOS/<executable>`; the tool directory's `bin/<executable>` |
+| Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | beside the launcher's directory: `Contents/Frameworks/lib<core>_<cpu>.dylib`, `Frameworks/lib<core>_<cpu>.dylib` |
+| Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
+| Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | the bundle's `Contents/MacOS`, else the tool directory's `bin` (not in a dmg) |
+| Data files | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>`, and `Resources/<destination>` in the tool directory |
+
+On macOS the app bundle holds the bundled program: the `gui` program, or the single-program form's
+service or desktop app. The tool directory holds every other program (`cli` programs, a tool's),
+laid out like a bundle's `Contents` (`bin` for `MacOS`), so a launcher finds its cores in
+`../Frameworks`, and data files in `../Resources`, wherever it is; a product may have both. The
+macOS tree stages the bundle as `tree/<Display Name>.app` and the tool directory at its install
+path under `tree/`.
 
 Linux binaries are stripped (`strip --strip-all`, `$STRIP` overrides the tool) and each stripped
 core's record is read back, so stripping can never cost a core its `.cpureq`. `layout.json` beside
@@ -183,8 +197,8 @@ under `<out>/<product>/`:
 | `packages/<stem>-windows-x86_64.zip` | the Windows tree under one `<stem>/` directory |
 | `packages/<stem>-windows-x86_64.wxs` (and `.msi` with `SEAWORTHY_WIX`) | the MSI's source, and the MSI |
 | `packages/<stem>-policy-templates.zip` | the Group Policy templates: `<Vendor>.<Directory>.admx` and `en-US/….adml` |
-| `packages/<stem>-macos-arm64.dmg` | a desktop product's app bundle in a disk image |
-| `packages/<stem>-macos-arm64.pkg` | a service product's bundle and LaunchDaemons |
+| `packages/<stem>-macos-arm64.dmg` | a desktop app's bundle in a disk image |
+| `packages/<stem>-macos-arm64.pkg` | a service's, a tool's or a product with `cli` programs' bundle, tool directory, `PATH` links and LaunchDaemons |
 | `packages/<artifact>.manifest` | with `--signing`: the artifact's signed release manifest |
 | `packages/<pacman package>.sig` | with OpenPGP signing: the detached signature pacman checks |
 | `packages/<artifact>.cdx.json` | the artifact's SBOM |
@@ -197,10 +211,13 @@ under `<out>/<product>/`:
 nFPM 2.47.0 (`$NFPM`; `scripts/ci/install-nfpm.sh` installs the pinned release, verified by SHA-256)
 builds the deb, rpm and pacman packages from the Linux tree. A service's packages carry its systemd
 unit, a `sysusers.d` entry for its sandbox user, a vendor preset and, with the update helper, the
-helper's path and service units. A desktop product's carry its menu entry, hicolor icons and an
-optional `/usr/bin/<command>` link to the launcher, and, with the helper, the helper's unit and a
-polkit rule letting an active local session start exactly that unit
-([updates.md](updates.md)).
+helper's path and service units. A product with a `gui` program carries its menu entry (starting
+that program) and hicolor icons, and every product a `/usr/bin/<command>` link to each program put
+on `PATH`; a desktop product with the helper carries the helper's unit and a polkit rule letting an
+active local session start exactly that unit ([updates.md](updates.md)). The products and packages
+a product conflicts with (`conflicts`) are every format's conflicts, and `linux.provides` its
+provides; neither replaces anything, so a package manager never swaps one product for another (one
+per crypto build: installing another profile means removing the installed one first).
 
 One package-script lifecycle, spelled for each format:
 
@@ -241,6 +258,9 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
   repair a standard user can start (`MsiServiceConfigFailureActions` is documented as broken);
 - writes the installed release (in deb's spelling) and, with `UPDATES=` and `SERVER=`, the update
   policy default and the machine's update server under `HKLM\SOFTWARE\<Vendor>\<Directory>`;
+- refuses a first install while a product it conflicts with (`conflicts`, either way) is installed
+  by its MSI: a detect-only search for that product's UpgradeCode (`FindRelatedProducts`, never
+  removing it) and a launch condition naming it. A repair or a removal is never refused;
 - allows two builds of one version (the sequence orders them) and refuses downgrades. Its
   UpgradeCode is `upgrade-code`, else derived from the vendor and the product id: pin it before
   renaming either, and to the code earlier MSIs carry when another tool built them
@@ -262,7 +282,9 @@ and its security-relevant tables must be exactly what the `.wxs` declares (read 
 - no row in a table a seaworthy MSI never uses (`Binary`, `SelfReg`, `MsiEmbeddedChainer`,
   `MsiEmbeddedUI`, COM and file-type registrations, `Environment`, INI files, `MoveFile`,
   `DuplicateFile`, `RemoveFile`, ODBC, `LockPermissions`, the service failure-action tables,
-  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode;
+  `Font`, `RemoveRegistry`, dialogs), and every `Upgrade` row names the product's UpgradeCode or is
+  a detect-only search the `.wxs` declares for a product it conflicts with (that product's
+  UpgradeCode and property, never removing it);
 - a `.wxs` with an element the check doesn't model (a WiX extension's, `Environment`, …) is
   refused, so the check grows with the `.wxs`, never behind it.
 
@@ -276,27 +298,40 @@ machine's update server.
 
 ### macOS
 
-`layout` stages `<Display Name>.app`; `package` writes `Contents/Info.plist` (the bundle id, the
-executable, `CFBundleShortVersionString` = `MAJOR.MINOR.PATCH`, `CFBundleVersion` = the sequence,
-`LSMinimumSystemVersion`), signs the bundle ad hoc from the inside out, and builds:
+`layout` stages `<Display Name>.app` and the tool directory; `package` writes the bundle's
+`Contents/Info.plist` (the bundle id, the bundled program's executable,
+`CFBundleShortVersionString` = `MAJOR.MINOR.PATCH`, `CFBundleVersion` = the sequence,
+`LSMinimumSystemVersion`), signs the bundle ad hoc from the inside out and each binary of the tool
+directory on its own, and builds:
 
-- for a desktop product, a **dmg** with `hdiutil` (the app beside a link to `/Applications`). It
-  carries no update helper: on macOS a helper is a LaunchDaemon, which only a pkg installs;
-- for a service, a **pkg** with `pkgbuild` and `productbuild`: the bundle in `/Applications`, the
-  service's LaunchDaemon (as root, which `[product.<id>.service.macos] account = "root"` must
-  say: a pkg creates no daemon account yet) and, with the helper, an on-demand helper daemon watching the update request
-  file, scripts that stop the service before an install and load the daemons after it, and an
-  uninstaller at `Contents/Resources/uninstall`.
+- for a desktop app alone (`kind = "desktop"`, no `cli` program), a **dmg** with `hdiutil` (the
+  app beside a link to `/Applications`). It carries no update helper: on macOS a helper is a
+  LaunchDaemon, which only a pkg installs;
+- for a service, a tool, or a product with `cli` programs, a **pkg** with `pkgbuild` and
+  `productbuild`: the bundle in `/Applications` (pinned there: never relocated), the tool directory
+  at `/usr/local/<vendor>/<product>`, a link in `/usr/local/bin` to each program a `[[programs]]`
+  entry puts on `PATH` (its `command`; `linux.command` stays Linux's), a `preinstall` refusing to
+  install while a product it conflicts with (`conflicts`) is installed by its pkg (`pkgutil
+  --pkg-info` of its identifier, naming it and its uninstaller), and an uninstaller in the bundle
+  (`Contents/Resources/uninstall`) or, without one, the tool directory (`uninstall`), which removes
+  the links that still point into the product, the bundle, the tool directory and the receipt. A
+  service's pkg adds the service's LaunchDaemon (as root, which
+  `[product.<id>.service.macos] account = "root"` must say: a pkg creates no daemon account yet)
+  and, with the helper, an on-demand helper daemon watching the update request file, with scripts
+  that stop the service before an install and load the daemons after it. A tool's helper ships as
+  a file only, as on Linux.
 
 Both tools are macOS's own, so macOS outputs package on a Mac (`--platforms macos`). Without a
 signer the signature is ad hoc: Gatekeeper refuses a downloaded copy until a tester clears the
 quarantine (`xattr -dr com.apple.quarantine "/Applications/<name>.app"`), and the GitLab template
 keeps macOS outputs out of releases. With `signing.toml`'s `[apple]` (and `defaults.apple.team-id`
 pinned), the bundle is **Developer ID-signed** from the inside out with the hardened runtime and a
-secure timestamp, every signature checked against Apple's Developer ID requirement for the pinned
-team; the dmg is signed, **notarized** (`xcrun notarytool submit --wait`), its ticket stapled
-(`xcrun stapler`), and Gatekeeper's assessment must accept it. A service's pkg is signed by the
-Developer ID Installer identity (`productbuild --sign`) and notarized the same way
+secure timestamp, and so is every binary of the tool directory (each launcher with
+`macos.entitlements`, as the bundle's executable), every signature checked against Apple's
+Developer ID requirement for the pinned team; the dmg is signed, **notarized** (`xcrun notarytool
+submit --wait`), its ticket stapled (`xcrun stapler`), and Gatekeeper's assessment must accept it.
+A pkg is signed by the Developer ID Installer identity (`productbuild --sign`) and notarized the
+same way
 ([configuration.md](configuration.md#signingtoml)). The ticket is stapled to the dmg or pkg, the
 outermost container; an app copied out of the dmg is checked against the notary service online.
 A dmg isn't byte-reproducible (`hdiutil` writes timestamps and a UUID).
@@ -566,9 +601,9 @@ instead of upgrading it, or never reaches the machines at all. Check every row b
 | MSI ProductVersion | `MAJOR.MINOR.PATCH`; Windows Installer compares the first three fields only, allows the same version again and refuses a downgrade. | The first release is refused as a downgrade unless its version compares at or above the installed one on those three fields (a build counter the old versions kept in the third field, say). |
 | MSI component GUIDs | Derived from the UpgradeCode and each file. | Nothing to do: the major upgrade removes the old product before it installs (`afterInstallInitialize`), so the two never share a component. |
 | MSI scope | Per machine. | A per-user installation of the old product isn't found by the upgrade: remove it first. |
-| Package names | `<vendor>-<id>` in lowercase, for deb, rpm and pacman. | apt, dnf and pacman see an unrelated package: both stay installed and collide on shared paths (`/usr/bin/<command>`, units), and the update helper doesn't find the installed release. seaworthy declares no `Replaces`, `Obsoletes` or `Conflicts`: choose `vendor` and the product id so the name is the old one, or retire the old package on each machine. |
+| Package names | `<vendor>-<id>` in lowercase, for deb, rpm and pacman. | apt, dnf and pacman see an unrelated package: both stay installed and collide on shared paths (`/usr/bin/<command>`, units), and the update helper doesn't find the installed release. Choose `vendor` and the product id so the name is the old one, or name the old package in `linux.replaces` (every format then conflicts with it and replaces it), or retire it on each machine. |
 | Service names | `[product.<id>.service]`'s `name`: the SCM name, the systemd unit's basename, the LaunchDaemon's label; with `state-directory` (systemd `StateDirectory=`) and the sandbox `user`. | The old service keeps running beside the new one wherever the old package or product survives, and a new state directory or user starts the service without its state, or without the right to it. Keep all three. |
-| Install directories | `/opt/<vendor>/<id>` (lowercase), `%ProgramFiles%\<Vendor>\<windows-directory>`, `/Applications/<Display Name>.app`; state, staging and logs under `%ProgramData%\<Vendor>\<windows-directory>`. | Files move: whatever names the old paths (scripts, firewall rules, monitoring, allow-lists) stops matching, and state left under the old directory isn't carried over. |
+| Install directories | `/opt/<vendor>/<id>` (lowercase), `%ProgramFiles%\<Vendor>\<windows-directory>`, `/Applications/<Display Name>.app`, `/usr/local/<vendor>/<id>` (lowercase); state, staging and logs under `%ProgramData%\<Vendor>\<windows-directory>`. | Files move: whatever names the old paths (scripts, firewall rules, monitoring, allow-lists) stops matching, and state left under the old directory isn't carried over. |
 | macOS bundle id | `bundle-id`, which is also the pkg's identifier. | macOS keys permissions and preferences to the bundle id, and the installer upgrades an app only under the same identifier. Keep it. |
 | Update policy | `HKLM\SOFTWARE\Policies\<Vendor>\<windows-directory>` (Group Policy), `HKLM\SOFTWARE\<Vendor>\<windows-directory>` (the MSI's `UPDATES=` and `SERVER=`), `/etc/<vendor>/<id>/policy.toml`. | Administrators' policies stop applying, silently: an `off` their policy set no longer holds. Keep `vendor` and `windows-directory` so the keys are the ones administrators already set, or have them deploy the new Group Policy templates first. |
 | The release key | `release-keys`, compiled into the update helper, verifying `seaworthy-release-manifest:1` manifests. | An update helper built by another tool verifies its own manifest format and keys: it never installs a seaworthy release. The first seaworthy release reaches machines through a channel they already trust (the package repositories, below; an administrator; the old tool's own update path); from then on the seaworthy-built helper updates them. An existing ML-DSA-87, ECDSA P-256 or Ed25519 key pair can stay the release key, its public key written as `seaworthy keygen --public` writes one. |

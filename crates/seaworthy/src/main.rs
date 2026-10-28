@@ -18,7 +18,7 @@
 //! seaworthy apple-team [--config seaworthy.toml]
 //! seaworthy keygen --algorithm ALG --secret FILE --public FILE
 //! seaworthy sign-statement --algorithm ALG --key FILE [--raw]
-//! seaworthy fips-check FILE…
+//! seaworthy fips-check [--module VERSION] FILE…
 //! seaworthy glibc-check [--floor X.Y] FILE…
 //! seaworthy --version | --help
 //! ```
@@ -150,8 +150,10 @@
 //!
 //! `fips-check` runs `scripts/verify-fips-binary.sh`'s checks over each ELF
 //! file's symbol table, as `nm` reads it, for the pinned module
-//! (`seaworthy_crypto::module::FIPS_SYMBOL_PREFIX`). It's what `verify` applies
-//! to every Linux core of a FIPS product, one binary at a time.
+//! (`seaworthy_crypto::module::FIPS_SYMBOL_PREFIX`), or the `aws-lc-fips-sys`
+//! release `--module` names (one `defaults.fips-module` accepts). It's what
+//! `verify` applies to every Linux core of a FIPS product, one binary at a
+//! time.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -180,7 +182,7 @@ const USAGE: &str = "usage:
   seaworthy apple-team [--config seaworthy.toml]
   seaworthy keygen --algorithm ml-dsa-87|ecdsa-p256|ed25519 --secret FILE --public FILE
   seaworthy sign-statement --algorithm ml-dsa-87|ecdsa-p256|ed25519 --key FILE [--raw]
-  seaworthy fips-check FILE...
+  seaworthy fips-check [--module VERSION] FILE...
   seaworthy glibc-check [--floor X.Y] FILE...
   seaworthy --version | --help";
 
@@ -690,7 +692,7 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                         "{} {}: verified ({} cores)",
                         v.product(),
                         platform.inputs.triple,
-                        platform.inputs.cores.len()
+                        platform.inputs.cores().count()
                     );
                 }
             }
@@ -1315,13 +1317,41 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
     Ok(())
 }
 
-/// `fips-check FILE…`: every file must pass; prints each verdict.
-fn fips_check(files: &[String]) -> ExitCode {
-    if files.is_empty() || files.iter().any(|f| f.starts_with('-')) {
+/// `fips-check [--module VERSION] FILE…`: every file must pass; prints
+/// each verdict.
+fn fips_check(args: &[String]) -> ExitCode {
+    let mut module = seaworthy::config::pinned_fips_module();
+    let mut files = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--module" {
+            match iter.next().and_then(|v| seaworthy::config::fips_module(v)) {
+                Some(known) => module = known,
+                None => {
+                    let known: Vec<&str> = seaworthy::config::FIPS_MODULES
+                        .iter()
+                        .map(|m| m.sys)
+                        .collect();
+                    eprintln!(
+                        "fips-check: --module needs an aws-lc-fips-sys release seaworthy knows ({})\n{USAGE}",
+                        known.join(", ")
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+        } else if arg.starts_with('-') {
+            eprintln!("fips-check: unknown option {arg:?}\n{USAGE}");
+            return ExitCode::from(2);
+        } else {
+            files.push(arg);
+        }
+    }
+    if files.is_empty() {
         eprintln!("fips-check needs one or more files\n{USAGE}");
         return ExitCode::from(2);
     }
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = module.symbol_prefix();
+    let prefix = prefix.as_str();
     let mut failed = false;
     for file in files {
         let findings = match std::fs::read(file) {

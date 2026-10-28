@@ -221,9 +221,10 @@ impl Product {
     ///
     /// - `[defaults]` `vendor` and `channel` (both required), and
     ///   `release-trust` (`any-key` or `every-algorithm`; else `any-key`);
-    /// - `[product.<id>]` `display-name` and `executable` (required), and
-    ///   `windows-directory` (else the display name's last word, else the
-    ///   executable);
+    /// - `[product.<id>]` `display-name` and `executable` (or, with
+    ///   `[[product.<id>.programs]]`, the first program's `executable`)
+    ///   (required), and `windows-directory` (else the display name's last
+    ///   word, else that executable);
     /// - `[product.<id>]` `updates.default` (`auto`, `notify` or `off`;
     ///   else `auto`);
     /// - `[product.<id>.service]` `name` (required in the table) and
@@ -240,12 +241,21 @@ impl Product {
             .product
             .get(id)
             .ok_or_else(|| ProductError(format!("seaworthy.toml has no [product.{id}]")))?;
+        let executable = entry
+            .executable
+            .as_deref()
+            .or_else(|| entry.programs.first().map(|p| p.executable.as_str()))
+            .ok_or_else(|| {
+                ProductError(format!(
+                    "[product.{id}] names no executable (executable, or [[product.{id}.programs]])"
+                ))
+            })?;
         let windows_directory = entry.windows_directory.clone().unwrap_or_else(|| {
             entry
                 .display_name
                 .split_whitespace()
                 .last()
-                .unwrap_or(&entry.executable)
+                .unwrap_or(executable)
                 .to_owned()
         });
         let mut product = Self::new(
@@ -525,12 +535,22 @@ struct Defaults {
 #[serde(rename_all = "kebab-case")]
 struct ProductTable {
     display_name: String,
-    executable: String,
+    /// The single-program form's executable; `[[programs]]` names each
+    /// program's instead.
+    executable: Option<String>,
+    #[serde(default)]
+    programs: Vec<ProgramTable>,
     windows_directory: Option<String>,
     service: Option<ServiceTable>,
     #[serde(default)]
     updates: UpdatesTable,
     macos: Option<MacosTable>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ProgramTable {
+    executable: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -707,6 +727,34 @@ windows-directory = "Desk"
             );
             assert!(Product::from_config(&text, "agent").is_err(), "{bad}");
         }
+    }
+
+    /// A product listing its programs (`[[product.<id>.programs]]`) has no
+    /// product-level executable: the first program's stands in for the
+    /// default directory, as the CLI derives it.
+    #[test]
+    fn a_product_of_several_programs_reads_the_same_names() {
+        let text = "[defaults]\nvendor = \"Acme\"\nchannel = \"stable\"\n\n[product.trove]\ndisplay-name = \"   \"\n\n[[product.trove.programs]]\nexecutable = \"trove\"\ncore = \"trove_cli_core\"\nrole = \"cli\"\n\n[[product.trove.programs]]\nexecutable = \"TroveGui\"\ncore = \"trove_gui_core\"\nrole = \"gui\"\n";
+        let trove = Product::from_config(text, "trove").unwrap();
+        assert_eq!(trove.windows_directory(), "trove");
+        assert_eq!(trove.package(), "acme-trove");
+        let named = text.replace("display-name = \"   \"", "display-name = \"Acme Trove\"");
+        assert_eq!(
+            Product::from_config(&named, "trove")
+                .unwrap()
+                .windows_directory(),
+            "Trove"
+        );
+        let none = text.replace("executable = ", "launcher = ");
+        let err = Product::from_config(&none, "trove")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("seaworthy.toml"), "{err}");
+        let neither = "[defaults]\nvendor = \"Acme\"\nchannel = \"stable\"\n\n[product.trove]\ndisplay-name = \"Trove\"\n";
+        let err = Product::from_config(neither, "trove")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no executable"), "{err}");
     }
 
     #[test]

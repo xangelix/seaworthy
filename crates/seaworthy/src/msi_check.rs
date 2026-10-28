@@ -23,7 +23,10 @@
 //! - **The sequences**: every action is a standard action (never a forced
 //!   or scheduled reboot) or a custom action the `.wxs` schedules there,
 //!   with its condition.
-//! - **The upgrade rows** name the product's UpgradeCode alone.
+//! - **The upgrade rows** name the product's UpgradeCode, or are the
+//!   detect-only searches the `.wxs` declares for the products it
+//!   conflicts with (their UpgradeCode and property): a row that would
+//!   remove another product is refused.
 //!
 //! The tables come from `msiinfo export -s` (SQL text: it never writes a
 //! table's binary streams to disk, as the tab-separated export does), and
@@ -151,7 +154,10 @@ pub const COLUMNS: &[(&str, &[&str])] = &[
         "Shortcut",
         &["Directory_", "Name", "Target", "Arguments", "WkDir"],
     ),
-    ("Upgrade", &["UpgradeCode"]),
+    (
+        "Upgrade",
+        &["UpgradeCode", "ActionProperty", "Attributes", "Remove"],
+    ),
     (
         "Directory",
         &["Directory", "Directory_Parent", "DefaultDir"],
@@ -308,6 +314,8 @@ const MODELED: &[&str] = &[
     "CreateFolder",
     "RegistryValue",
     "Shortcut",
+    "Upgrade",
+    "UpgradeVersion",
 ];
 
 /// One table as `msiinfo export -s` gives it: its columns, and each row by
@@ -513,6 +521,9 @@ pub struct Expected {
     locks: BTreeMap<(String, String, String), usize>,
     /// (folder path, name, target, arguments, working directory path).
     shortcuts: BTreeSet<(String, String, String, String, String)>,
+    /// Detect-only searches for other products (`conflicts`): their
+    /// UpgradeCode, uppercase, and the property each sets.
+    detections: BTreeSet<(String, String)>,
 }
 
 /// One open element while reading the `.wxs`.
@@ -946,6 +957,35 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
                 if expected.actions.insert(action.clone(), declared).is_some() {
                     return Err(format!("custom action {action} declared twice"));
                 }
+            }
+            "Upgrade" => {
+                // WiX names the searched-for UpgradeCode `Id`.
+                let code = attr("Id");
+                if code.is_empty() {
+                    return Err(
+                        "an <Upgrade> without an Id (the UpgradeCode it searches for)".to_owned(),
+                    );
+                }
+                open.id = Some(code.to_ascii_uppercase());
+            }
+            "UpgradeVersion" => {
+                let code = stack
+                    .last()
+                    .filter(|o| o.name == "Upgrade")
+                    .and_then(|o| o.id.clone())
+                    .ok_or_else(|| "an <UpgradeVersion> outside an <Upgrade>".to_owned())?;
+                // Only a search: a row that isn't detect-only removes the
+                // product it finds.
+                if attr("OnlyDetect") != "yes" {
+                    return Err(format!(
+                        "an <UpgradeVersion> of {code} that isn't OnlyDetect=\"yes\": it would remove that product"
+                    ));
+                }
+                let property = attr("Property");
+                if property.is_empty() {
+                    return Err(format!("an <UpgradeVersion> of {code} without a Property"));
+                }
+                expected.detections.insert((code, property));
             }
             "InstallExecuteSequence" | "InstallUISequence" => {
                 open.sequence = Some(name.clone());
@@ -1386,16 +1426,41 @@ pub fn findings(
         ));
     }
 
-    // Upgrades: the product's own alone.
+    // Upgrades: the product's own, and detect-only searches for the
+    // products the .wxs declares it conflicts with (never removed:
+    // msidbUpgradeAttributesOnlyDetect, 2).
+    let mut detected = BTreeSet::new();
     for row in rows("Upgrade") {
         let code = get(row, "UpgradeCode");
-        if !code.eq_ignore_ascii_case(upgrade_code)
-            || !code.eq_ignore_ascii_case(&expected.upgrade_code)
+        if code.eq_ignore_ascii_case(upgrade_code)
+            && code.eq_ignore_ascii_case(&expected.upgrade_code)
         {
-            findings.push(format!(
-                "an upgrade row for {code}, not the product's {upgrade_code}"
-            ));
+            continue;
         }
+        let property = get(row, "ActionProperty");
+        let key = (code.to_ascii_uppercase(), property.to_owned());
+        if !code.eq_ignore_ascii_case(upgrade_code) && expected.detections.contains(&key) {
+            let detect_only = get(row, "Attributes")
+                .parse::<u32>()
+                .is_ok_and(|attributes| attributes & 2 == 2);
+            if !detect_only || !get(row, "Remove").is_empty() {
+                findings.push(format!(
+                    "the upgrade row for {code} isn't detect-only (Attributes {:?}, Remove {:?}): it would remove that product",
+                    get(row, "Attributes"),
+                    get(row, "Remove")
+                ));
+            }
+            detected.insert(key);
+            continue;
+        }
+        findings.push(format!(
+            "an upgrade row for {code} ({property}), neither the product's {upgrade_code} nor a product the .wxs detects"
+        ));
+    }
+    for (code, property) in expected.detections.difference(&detected) {
+        findings.push(format!(
+            "the .wxs's detection of {code} ({property}) is missing"
+        ));
     }
     findings
 }
@@ -1958,6 +2023,112 @@ mod tests {
             }
         }
         assert!(checked >= 40, "{checked}");
+    }
+
+    /// A product conflicting with another: the `.wxs` searches for the
+    /// other's UpgradeCode, detect-only, and WiX's table holds that row
+    /// beside the product's own; adopt-msi accepts exactly that.
+    #[test]
+    fn a_detect_only_search_for_a_conflicting_product_is_accepted() {
+        const OTHER: &str = "{2B4E6A80-1C3D-4F5E-8A7B-9C0D1E2F3A4B}";
+        let wxs = WXS.replacen(
+            "<StandardDirectory Id=\"System64Folder\" />",
+            &format!(
+                "<Upgrade Id=\"{}\">\n      <UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"CONFLICT_TROVE_PORTABLE\" />\n    </Upgrade>\n    <Launch Condition=\"Installed OR NOT CONFLICT_TROVE_PORTABLE\" Message=\"[ProductName] can't be installed while Trove is installed: uninstall Trove first.\" />\n    <StandardDirectory Id=\"System64Folder\" />",
+                OTHER.to_ascii_lowercase()
+            ),
+            1,
+        );
+        assert_ne!(wxs, WXS);
+        let expected = expected_from_wxs(&wxs).unwrap();
+        let with_row = |attributes: &str, remove: &str, property: &str, code: &str| {
+            let mut tables = wix_tables();
+            let mut row = BTreeMap::new();
+            for (column, value) in [
+                ("UpgradeCode", code),
+                ("VersionMin", "0.0.0"),
+                ("VersionMax", ""),
+                ("Language", ""),
+                ("Attributes", attributes),
+                ("Remove", remove),
+                ("ActionProperty", property),
+            ] {
+                row.insert(column.to_owned(), value.to_owned());
+            }
+            tables.get_mut("Upgrade").unwrap().rows.push(row);
+            findings(&expected, &tables, CODE)
+        };
+        // WiX's row: OnlyDetect (2) and VersionMinInclusive (256).
+        let found = with_row("258", "", "CONFLICT_TROVE_PORTABLE", OTHER);
+        assert!(found.is_empty(), "{found:#?}");
+        // The search missing from the MSI.
+        let found = findings(&expected, &wix_tables(), CODE);
+        assert!(
+            found.iter().any(|f| f.contains("detection of {2B4E6A80")),
+            "{found:#?}"
+        );
+        // A row that would remove the other product, or another property.
+        for (attributes, remove, property, code, mentions) in [
+            (
+                "256",
+                "",
+                "CONFLICT_TROVE_PORTABLE",
+                OTHER,
+                "isn't detect-only",
+            ),
+            (
+                "258",
+                "ALL",
+                "CONFLICT_TROVE_PORTABLE",
+                OTHER,
+                "isn't detect-only",
+            ),
+            (
+                "258",
+                "",
+                "WIX_UPGRADE_DETECTED",
+                OTHER,
+                "neither the product's",
+            ),
+            (
+                "258",
+                "",
+                "CONFLICT_TROVE_PORTABLE",
+                "{00000000-0000-0000-0000-000000000000}",
+                "neither the product's",
+            ),
+        ] {
+            let found = with_row(attributes, remove, property, code);
+            assert!(
+                found.iter().any(|f| f.contains(mentions)),
+                "{attributes} {remove} {property} {code}: {found:#?}"
+            );
+        }
+        // Without the .wxs declaring it, the same row is refused.
+        let plain = expected_from_wxs(WXS).unwrap();
+        let mut tables = wix_tables();
+        let mut row = tables["Upgrade"].rows[1].clone();
+        row.insert("UpgradeCode".to_owned(), OTHER.to_owned());
+        row.insert(
+            "ActionProperty".to_owned(),
+            "CONFLICT_TROVE_PORTABLE".to_owned(),
+        );
+        tables.get_mut("Upgrade").unwrap().rows.push(row);
+        let found = findings(&plain, &tables, CODE);
+        assert!(
+            found.iter().any(|f| f.contains("neither the product's")),
+            "{found:#?}"
+        );
+        // A .wxs whose search isn't detect-only, or names no UpgradeCode
+        // (`Code` is no attribute of WiX's), is refused outright.
+        for bad in [
+            wxs.replace("OnlyDetect=\"yes\" ", ""),
+            wxs.replace(" Property=\"CONFLICT_TROVE_PORTABLE\"", ""),
+            wxs.replace("<Upgrade Id", "<Upgrades Id"),
+            wxs.replace("<Upgrade Id", "<Upgrade Code"),
+        ] {
+            assert!(expected_from_wxs(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
