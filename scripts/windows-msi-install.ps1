@@ -103,10 +103,9 @@ function Invoke-Msiexec([string[]]$Arguments, [string]$Log) {
     return $p.ExitCode
 }
 
-# Programs and Features lists an MSI installed for everyone from its Uninstall key, and one
-# installed for the current user from what Windows Installer records for that user: it
-# writes no Uninstall key under HKCU, but UserData\<SID>\Products\<packed ProductCode>\
-# InstallProperties.
+# Windows Installer writes an MSI product's Uninstall key under HKLM whatever its scope (none
+# under HKCU); a product installed for the current user is also recorded in that user's
+# UserData\<SID>\Products\<packed ProductCode>\InstallProperties, which says whose it is.
 $userProducts = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '\Products'
 
 # A ProductCode from Windows Installer's packed form: each of the first three groups' hex
@@ -233,7 +232,13 @@ function Assert-Installed([string]$Version, [string]$Scope = 'machine') {
     }
     $entries = @(Get-Entries -Roots $at.Uninstall)
     Assert-True ($entries.Count -eq 1) "one Programs and Features entry named $DisplayName for $Scope (found $($entries.Count))"
-    Assert-True (@(Get-Entries).Count -eq 1) "no other entry named $DisplayName in either scope"
+    # Windows Installer records a per-user product twice: the Uninstall key under HKLM it
+    # writes for every product (Programs and Features shows it only to its user) and the
+    # user's UserData record. One product, wherever it is recorded, and in the scope asked.
+    $all = @(Get-Entries | Sort-Object -Property Code -Unique)
+    Assert-True ($all.Count -eq 1) "no other product named $DisplayName in either scope (found: $(@($all | ForEach-Object { $_.Code }) -join ', '))"
+    $assignment = [string](Get-ProductInfo $entries[0].Code 'AssignmentType')
+    Assert-True ($assignment -eq @{ machine = '1'; user = '0' }[$Scope]) "Windows Installer records the product for $Scope (AssignmentType $($assignment): 1 per machine, 0 per user)"
     Assert-True ($entries[0].Version -eq $Version) "the entry is version $Version (it is $($entries[0].Version))"
     Assert-True ($entries[0].Location.TrimEnd('\') -eq $installDir) "the entry's install location is $installDir (it is '$($entries[0].Location)')"
     # Programs and Features' icon: an MSI's Uninstall key carries no DisplayIcon;
