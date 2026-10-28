@@ -340,9 +340,22 @@ fn the_msi_refuses_to_install_beside_a_conflicting_product() {
     let search = format!(
         "    <Upgrade Code=\"{other}\">\n      <UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"CONFLICT_TROVE_AWS_LC\" />\n    </Upgrade>\n    <Launch Condition=\"Installed OR NOT CONFLICT_TROVE_AWS_LC\" Message=\"[ProductName] can't be installed while Acme Trove (AWS-LC) is installed: uninstall Acme Trove (AWS-LC) first.\" />\n"
     );
-    assert!(wxs.contains(&search), "{wxs}");
-    assert_eq!(wxs.matches("<Upgrade ").count(), 1, "{wxs}");
-    assert!(!wxs.contains("TROVE_PORTABLE"), "{wxs}");
+    assert!(
+        wxs.contains(&search),
+        "{:#?}",
+        common::wxs_lines(&wxs, &["Upgrade", "<Launch "])
+    );
+    assert_eq!(
+        wxs.matches("<Upgrade ").count(),
+        1,
+        "{:#?}",
+        common::wxs_lines(&wxs, &["<Upgrade "])
+    );
+    assert!(
+        !wxs.contains("TROVE_PORTABLE"),
+        "{:#?}",
+        common::wxs_lines(&wxs, &["TROVE_PORTABLE"])
+    );
     assert_eq!(
         seaworthy::wix::conflict_property("trove-aws-lc"),
         "CONFLICT_TROVE_AWS_LC"
@@ -362,7 +375,8 @@ fn the_msi_refuses_to_install_beside_a_conflicting_product() {
         wxs.contains(
             "Message=\"[ProductName] can't be installed while Acme Trove [\\[]FIPS[\\]] is installed: uninstall Acme Trove [\\[]FIPS[\\]] first.\""
         ),
-        "{wxs}"
+        "{:#?}",
+        common::wxs_lines(&wxs, &["<Launch "])
     );
     seaworthy::msi_check::expected_from_wxs(&wxs).unwrap();
 }

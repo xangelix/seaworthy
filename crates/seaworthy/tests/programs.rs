@@ -768,7 +768,7 @@ fn the_msi_shortcuts_start_the_gui_program() {
         .filter(|l| l.contains("<Shortcut "))
         .map(str::to_owned)
         .collect();
-    assert_eq!(shortcuts.len(), 2, "{wxs}");
+    assert_eq!(shortcuts.len(), 2, "{shortcuts:#?}");
     let gui_file = wxs
         .lines()
         .find(|l| l.contains("<File ") && l.contains("TroveGui.exe"))
@@ -833,7 +833,12 @@ arguments = ["serve"]
         .split("<Component ")
         .filter(|c| c.contains("<ServiceInstall "))
         .collect();
-    assert_eq!(component.len(), 1, "{wxs}");
+    assert_eq!(
+        component.len(),
+        1,
+        "{:#?}",
+        common::wxs_lines(&wxs, &["<Component ", "<ServiceInstall "])
+    );
     assert!(
         component[0].contains("\\Acme\\Agent\\AcmeAgent.exe\""),
         "{}",

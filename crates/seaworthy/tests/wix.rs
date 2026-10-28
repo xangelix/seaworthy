@@ -194,7 +194,12 @@ fn the_programdata_folders_are_made_by_the_launchers_guard() {
         let line = wxs
             .lines()
             .find(|l| l.contains("<CustomAction Id=\"ProgramDataFolders\""))
-            .unwrap_or_else(|| panic!("no guard in {wxs}"));
+            .unwrap_or_else(|| {
+                panic!(
+                    "no guard in {:#?}",
+                    common::wxs_lines(wxs, &["<CustomAction "])
+                )
+            });
         assert!(
             line.contains("Execute=\"deferred\" Impersonate=\"no\" Return=\"check\""),
             "{line}"
@@ -328,7 +333,8 @@ fn wix_and_xml_syntax_in_config_text_stays_literal() {
         wxs.contains(
             "Name=\"Acme &amp; Co &quot;Field&quot; &lt;Collector&gt; !!(bind.secret) --- Edition\""
         ),
-        "{wxs}"
+        "{:#?}",
+        common::wxs_lines(&wxs, &["Name=\"Acme "])
     );
     let comments: Vec<&str> = wxs
         .split("<!--")
