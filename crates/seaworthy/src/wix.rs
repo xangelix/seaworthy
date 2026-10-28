@@ -430,7 +430,7 @@ pub fn wxs(
         let property = conflict_property(&other);
         line(
             4,
-            &format!("<Upgrade Code=\"{}\">", upgrade_code(config, &other)?),
+            &format!("<Upgrade Id=\"{}\">", upgrade_code(config, &other)?),
         );
         line(
             6,

@@ -959,7 +959,14 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
                 }
             }
             "Upgrade" => {
-                open.id = Some(attr("Code").to_ascii_uppercase());
+                // WiX names the searched-for UpgradeCode `Id`.
+                let code = attr("Id");
+                if code.is_empty() {
+                    return Err(
+                        "an <Upgrade> without an Id (the UpgradeCode it searches for)".to_owned(),
+                    );
+                }
+                open.id = Some(code.to_ascii_uppercase());
             }
             "UpgradeVersion" => {
                 let code = stack
@@ -2027,7 +2034,7 @@ mod tests {
         let wxs = WXS.replacen(
             "<StandardDirectory Id=\"System64Folder\" />",
             &format!(
-                "<Upgrade Code=\"{}\">\n      <UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"CONFLICT_TROVE_PORTABLE\" />\n    </Upgrade>\n    <Launch Condition=\"Installed OR NOT CONFLICT_TROVE_PORTABLE\" Message=\"[ProductName] can't be installed while Trove is installed: uninstall Trove first.\" />\n    <StandardDirectory Id=\"System64Folder\" />",
+                "<Upgrade Id=\"{}\">\n      <UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"CONFLICT_TROVE_PORTABLE\" />\n    </Upgrade>\n    <Launch Condition=\"Installed OR NOT CONFLICT_TROVE_PORTABLE\" Message=\"[ProductName] can't be installed while Trove is installed: uninstall Trove first.\" />\n    <StandardDirectory Id=\"System64Folder\" />",
                 OTHER.to_ascii_lowercase()
             ),
             1,
@@ -2112,11 +2119,13 @@ mod tests {
             found.iter().any(|f| f.contains("neither the product's")),
             "{found:#?}"
         );
-        // A .wxs whose search isn't detect-only is refused outright.
+        // A .wxs whose search isn't detect-only, or names no UpgradeCode
+        // (`Code` is no attribute of WiX's), is refused outright.
         for bad in [
             wxs.replace("OnlyDetect=\"yes\" ", ""),
             wxs.replace(" Property=\"CONFLICT_TROVE_PORTABLE\"", ""),
-            wxs.replace("<Upgrade Code", "<Upgrades Code"),
+            wxs.replace("<Upgrade Id", "<Upgrades Id"),
+            wxs.replace("<Upgrade Id", "<Upgrade Code"),
         ] {
             assert!(expected_from_wxs(&bad).is_err(), "{bad}");
         }

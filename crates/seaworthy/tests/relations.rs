@@ -338,7 +338,7 @@ fn the_msi_refuses_to_install_beside_a_conflicting_product() {
     .unwrap();
     let other = seaworthy::wix::upgrade_code(&config, "trove-aws-lc").unwrap();
     let search = format!(
-        "    <Upgrade Code=\"{other}\">\n      <UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"CONFLICT_TROVE_AWS_LC\" />\n    </Upgrade>\n    <Launch Condition=\"Installed OR NOT CONFLICT_TROVE_AWS_LC\" Message=\"[ProductName] can't be installed while Acme Trove (AWS-LC) is installed: uninstall Acme Trove (AWS-LC) first.\" />\n"
+        "    <Upgrade Id=\"{other}\">\n      <UpgradeVersion Minimum=\"0.0.0\" IncludeMinimum=\"yes\" OnlyDetect=\"yes\" Property=\"CONFLICT_TROVE_AWS_LC\" />\n    </Upgrade>\n    <Launch Condition=\"Installed OR NOT CONFLICT_TROVE_AWS_LC\" Message=\"[ProductName] can't be installed while Acme Trove (AWS-LC) is installed: uninstall Acme Trove (AWS-LC) first.\" />\n"
     );
     assert!(
         wxs.contains(&search),
