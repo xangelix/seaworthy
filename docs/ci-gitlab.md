@@ -9,7 +9,7 @@ script. The templates live in [`ci/gitlab/`](../ci/gitlab/):
 |---|---|
 | `seaworthy.yml` | prepare, the Linux build, package, repo, publish, and the release-ordering lint |
 | `seaworthy-windows.yml` | the Windows build and, for `msi` outputs, the MSI built with WiX and adopted; for products with `msi` or `zip` outputs |
-| `seaworthy-macos.yml` | the macOS build and its ad hoc-signed dmg (or, for a service, unsigned pkg) on a Mac runner, for products with `dmg` or `pkg` outputs: a pipeline artifact, never part of a release |
+| `seaworthy-macos.yml` | the macOS build and its ad hoc-signed dmg (or, for a service, a tool or cli programs, unsigned pkg) on a Mac runner, for products with `dmg` or `pkg` outputs: a pipeline artifact, never part of a release |
 
 They need GitLab 17.0 or later (`include` with `inputs`, array inputs). The packaging itself is
 described in [packaging.md](packaging.md), the files the jobs read in

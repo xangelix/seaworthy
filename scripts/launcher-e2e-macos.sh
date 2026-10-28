@@ -30,6 +30,11 @@
 #     the helper's watching the request file), the scripts parse, and the
 #     distribution is Apple Silicon's. Whether passwordless sudo works is
 #     reported: scripts/macos-pkg-install.sh needs it;
+#   - the CLI packages it as a command-line tool in a pkg ([[programs]], no
+#     app bundle): the payload holds the tool directory
+#     (/usr/local/acme/demo: bin/demo, its cores in Frameworks, the
+#     uninstaller), each binary signed on its own, and the link
+#     /usr/local/bin/acme-demo to the launcher, which runs from there;
 #   - a FIPS product: the cores built with the AWS-LC FIPS module
 #     (seaworthy-crypto's `fips` feature), which AWS-LC builds as a dylib
 #     off Linux, linked with @loader_path; the CLI verifies the module,
@@ -307,6 +312,68 @@ for script in preinstall postinstall; do
 done
 sh -n "$INSTALLED/Contents/Resources/uninstall" || fail "the uninstaller doesn't parse"
 ok "seaworthy packages a service as a pkg: the signed bundle, its LaunchDaemons and scripts"
+
+# The fixture as a command-line tool in a pkg: no bundle, the tool
+# directory and its PATH link.
+TOOLPROJECT="$OUT/tool-project"
+rm -rf "${TOOLPROJECT:?}"
+mkdir -p "$TOOLPROJECT/artifacts/$TARGET/launcher"
+cp "$DEMO" "$TOOLPROJECT/artifacts/$TARGET/launcher/demo"
+for cpu in "${CPUS[@]}"; do
+    mkdir -p "$TOOLPROJECT/artifacts/$TARGET/cores/$cpu"
+    cp "$OUT/core-$cpu/$TARGET/release/libdemo_core.dylib" "$TOOLPROJECT/artifacts/$TARGET/cores/$cpu/"
+done
+cat > "$TOOLPROJECT/seaworthy.toml" <<'TOML'
+[defaults]
+vendor = "Acme"
+targets = ["x86-64-v3"]
+macos-targets = ["apple-m4", "apple-m1"]
+channel = "stable"
+maintainer = "Acme Packaging <packages@example.com>"
+license = "MIT"
+
+[product.demo]
+display-name = "Acme Demo"
+description = "The launcher's end-to-end fixture as a command-line tool."
+kind = "tool"
+outputs = ["pkg"]
+updates.default = "off"
+
+[[product.demo.programs]]
+executable = "demo"
+core = "demo_core"
+role = "cli"
+command = "acme-demo"
+
+[product.demo.macos]
+bundle-id = "com.example.acme.demo-tool"
+TOML
+"$SEAWORTHY" package --config "$TOOLPROJECT/seaworthy.toml" --artifacts "$TOOLPROJECT/artifacts" \
+    --out "$TOOLPROJECT/out" --release 0.1.0 --sequence 7 || fail "seaworthy package (tool pkg) failed"
+TOOLPKG="$TOOLPROJECT/out/demo/packages/acme-demo-0.1.0-7-macos-arm64.pkg"
+[ -f "$TOOLPKG" ] || fail "no $TOOLPKG"
+grep -q '"kind": "pkg"' "$TOOLPROJECT/out/demo/packages.json" || fail "packages.json doesn't list the tool's pkg"
+TOOLEXPANDED="$TOOLPROJECT/expanded"
+pkgutil --expand-full "$TOOLPKG" "$TOOLEXPANDED" || fail "pkgutil --expand-full (tool) failed"
+grep -q 'identifier="com.example.acme.demo-tool"' "$TOOLEXPANDED/component.pkg/PackageInfo" ||
+    fail "PackageInfo: $(cat "$TOOLEXPANDED/component.pkg/PackageInfo")"
+TOOLPAYLOAD="$TOOLEXPANDED/component.pkg/Payload"
+[ ! -e "$TOOLPAYLOAD/Applications" ] || fail "a tool's payload holds an app bundle"
+TOOLDIR="$TOOLPAYLOAD/usr/local/acme/demo"
+for file in bin/demo Frameworks/libdemo_core_apple-m1.dylib Frameworks/libdemo_core_apple-m4.dylib uninstall; do
+    [ -f "$TOOLDIR/$file" ] || fail "the tool's payload has no $file: $(find "$TOOLPAYLOAD" -maxdepth 6)"
+done
+for file in bin/demo Frameworks/libdemo_core_apple-m1.dylib; do
+    codesign --verify --strict "$TOOLDIR/$file" || fail "$file's signature doesn't verify"
+done
+[ "$(readlink "$TOOLPAYLOAD/usr/local/bin/acme-demo")" = /usr/local/acme/demo/bin/demo ] ||
+    fail "the payload's /usr/local/bin/acme-demo isn't a link to the launcher"
+for script in preinstall postinstall; do
+    sh -n "$TOOLEXPANDED/component.pkg/Scripts/$script" || fail "the tool's $script doesn't parse"
+done
+sh -n "$TOOLDIR/uninstall" || fail "the tool's uninstaller doesn't parse"
+run 0 "core=apple-m1" "$TOOLDIR/bin/demo"
+ok "seaworthy packages a command-line tool as a pkg: the tool directory, its signatures and its PATH link"
 if sudo -n true 2>/dev/null; then
     echo "launcher-e2e-macos: info  passwordless sudo works here (scripts/macos-pkg-install.sh can run)"
 else

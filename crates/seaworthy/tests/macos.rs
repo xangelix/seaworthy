@@ -715,7 +715,12 @@ fn the_pkg_s_daemons_scripts_and_uninstaller() {
     let product = &config.products["agent"];
     let names = macos::pkg_names(&config, "agent", product).unwrap();
     assert_eq!(names.identifier, "com.acme.agent");
-    assert_eq!(names.bundle, "/Applications/Acme Field Agent.app");
+    assert_eq!(
+        names.bundle.as_deref(),
+        Some("/Applications/Acme Field Agent.app")
+    );
+    assert_eq!(names.tool, None);
+    assert!(names.links.is_empty() && names.conflicts.is_empty());
     assert_eq!(names.labels(), ["AcmeAgent-update", "AcmeAgent"]);
     assert_eq!(
         names.support,
@@ -827,7 +832,7 @@ fn the_pkg_s_daemons_scripts_and_uninstaller() {
     }
     // The bundle never relocates or version-checks; the distribution is
     // Apple Silicon, macos-minimum or later, the startup volume.
-    let component = macos::component_plist(&names);
+    let component = macos::component_plist(&names).unwrap();
     for needle in [
         "<key>BundleIsRelocatable</key>\n\t\t<false/>",
         "<key>BundleIsVersionChecked</key>\n\t\t<false/>",
@@ -1449,8 +1454,11 @@ fn a_developer_id_signs_and_notarizes_a_service_s_pkg() {
     let names = seaworthy::macos::PkgNames {
         display_name: "Acme Agent".to_owned(),
         identifier: "com.example.acme.agent".to_owned(),
-        bundle: "/Applications/Acme Agent.app".to_owned(),
-        service: "AcmeAgent".to_owned(),
+        bundle: Some("/Applications/Acme Agent.app".to_owned()),
+        tool: None,
+        links: Vec::new(),
+        conflicts: Vec::new(),
+        service: Some("AcmeAgent".to_owned()),
         helper: None,
         support: "/Library/Application Support/Acme/Agent".into(),
         logs: "/Library/Logs/Acme/Agent".into(),
@@ -1460,7 +1468,7 @@ fn a_developer_id_signs_and_notarizes_a_service_s_pkg() {
         seaworthy::macos::build_pkg(
             &tools,
             &names,
-            &bundle,
+            dir.path(),
             &[],
             "1.4.0",
             "11.0",

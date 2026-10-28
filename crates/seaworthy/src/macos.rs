@@ -24,21 +24,27 @@
 //! the identity, the hardened runtime (`--options runtime`; library
 //! validation accepts the cores, which carry the same team's signature)
 //! and a secure timestamp, the product's `macos.entitlements` on the main
-//! executable alone; each signature must satisfy the Developer ID
+//! executable (and each launcher of the tool directory) alone; each
+//! signature must satisfy the Developer ID
 //! requirement for `seaworthy.toml`'s `defaults.apple.team-id`
 //! ([`developer_id_requirement`]). The disk image is signed the same way,
 //! submitted to Apple's notary service (`xcrun notarytool submit --wait`
 //! with the `[apple]` keychain profile), its ticket stapled (`xcrun stapler`)
 //! and the result assessed as Gatekeeper will (`spctl --assess`). A
-//! service's pkg is signed by the Developer ID Installer identity
+//! pkg is signed by the Developer ID Installer identity
 //! (`productbuild --sign`), notarized, stapled and assessed likewise.
 //!
 //! A disk image isn't byte-reproducible (`hdiutil` writes timestamps and a
 //! UUID). The files inside it are, and the listing names the image by its
 //! digest like every artifact.
 //!
-//! A service product ships as a **pkg** instead: the
-//! same signed bundle in `/Applications`, its LaunchDaemons in
+//! A service, a tool, or a product with `cli` programs ships as a **pkg**
+//! instead: the signed bundle (when the product has a bundled program) in
+//! `/Applications`, the tool directory ([`tool_directory`]: the other
+//! programs, each binary signed on its own, [`sign_tool`]) with a link in
+//! `/usr/local/bin` to each program a `[[programs]]` entry puts on `PATH`,
+//! a [`preinstall`] that refuses to install while a product it conflicts
+//! with is installed by its pkg, and for a service its LaunchDaemons in
 //! `/Library/LaunchDaemons` ([`launch_daemons`]: the service's, and with
 //! the update helper the helper's on-demand one), a [`preinstall`] that
 //! stops the service and a [`postinstall`] that makes its directories
@@ -46,8 +52,9 @@
 //! `/Library/Logs/<Vendor>/<Directory>`) and loads the daemons. Neither
 //! script ever touches the helper's daemon while it's loaded: it may be the
 //! one running the install (the Linux packages' rule). macOS has no
-//! uninstall for a package, so the bundle carries [`uninstaller`]
-//! (`Contents/Resources/uninstall`, run with `sudo`). [`build_pkg`] runs
+//! uninstall for a package, so the bundle (or, without one, the tool
+//! directory) carries [`uninstaller`] (`Contents/Resources/uninstall`, or
+//! `uninstall`; run with `sudo`). [`build_pkg`] runs
 //! `pkgbuild` (the bundle never relocated or version-checked:
 //! [`component_plist`]) and `productbuild` ([`distribution`]: Apple Silicon,
 //! `macos-minimum` or later, the startup volume only). Unsigned until
@@ -66,6 +73,27 @@ pub const LAUNCH_DAEMONS: &str = "/Library/LaunchDaemons";
 
 /// The uninstaller's place in the bundle.
 pub const UNINSTALLER: &str = "Contents/Resources/uninstall";
+
+/// The uninstaller's place in a product's tool directory, when it has no
+/// bundle.
+pub const TOOL_UNINSTALLER: &str = "uninstall";
+
+/// Where a pkg links its programs onto `PATH`.
+pub const PATH_LINKS: &str = "/usr/local/bin";
+
+/// A product's tool directory on macOS, `/usr/local/<vendor>/<id>`
+/// (lowercase, as Linux's `/opt/<vendor>/<id>`): the programs that aren't
+/// in the app bundle (`cli` programs, a tool's), laid out like a bundle's
+/// `Contents` (`bin/`, `Frameworks/`, `Resources/`), so a launcher finds
+/// its cores in `../Frameworks` wherever it is. A pkg installs it and
+/// links each program's command into `/usr/local/bin`.
+#[must_use]
+pub fn tool_directory(config: &Config, id: &str) -> String {
+    format!(
+        "/usr/local/{}/{id}",
+        config.defaults.vendor.to_ascii_lowercase()
+    )
+}
 
 /// The bundle's icon in `Contents/Resources` (`CFBundleIconFile`).
 pub const ICON_FILE: &str = "AppIcon.icns";
@@ -211,20 +239,42 @@ impl Tools {
     }
 }
 
-/// The names a service's package uses: every script and
-/// daemon derives its paths from here, and the update helper reads the
-/// same directories through `seaworthy_updater::Product`.
+/// A product a pkg can't be installed beside (`conflicts`), as its own
+/// pkg names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkgConflict {
+    /// Its package identifier (its bundle id): `pkgutil`'s receipt.
+    pub identifier: String,
+    /// Its display name.
+    pub display_name: String,
+    /// Its uninstaller's install path.
+    pub uninstaller: String,
+}
+
+/// The names a product's package uses: every script and daemon derives
+/// its paths from here, and the update helper reads the same directories
+/// through `seaworthy_updater::Product`.
 #[derive(Debug, Clone)]
 pub struct PkgNames {
     /// The display name (the installer's title).
     pub display_name: String,
     /// The package's identifier: the bundle id (`pkgutil`'s receipt).
     pub identifier: String,
-    /// The bundle's install path, `/Applications/<Display Name>.app`.
-    pub bundle: String,
-    /// The service's launchd label (the service name).
-    pub service: String,
-    /// The update helper's label (`<service>-update`) when it ships.
+    /// The bundle's install path, `/Applications/<Display Name>.app`, when
+    /// the product has a bundled program.
+    pub bundle: Option<String>,
+    /// The tool directory ([`tool_directory`]), when a program installs
+    /// there.
+    pub tool: Option<String>,
+    /// The `PATH` links, `(/usr/local/bin/<command>, the launcher's install
+    /// path)`.
+    pub links: Vec<(String, String)>,
+    /// The products this one can't be installed beside that ship a pkg.
+    pub conflicts: Vec<PkgConflict>,
+    /// The service's launchd label (the service name), for a service.
+    pub service: Option<String>,
+    /// The update helper's label (`<service>-update`) when it ships with a
+    /// service (a tool's helper is a file only).
     pub helper: Option<String>,
     /// `/Library/Application Support/<Vendor>/<Directory>`.
     pub support: PathBuf,
@@ -245,36 +295,107 @@ impl PkgNames {
     pub fn labels(&self) -> Vec<&str> {
         self.helper
             .iter()
+            .chain(&self.service)
             .map(String::as_str)
-            .chain([self.service.as_str()])
             .collect()
+    }
+
+    /// The uninstaller's install path: in the bundle
+    /// (`Contents/Resources/uninstall`, sealed by its signature), else in
+    /// the tool directory.
+    #[must_use]
+    pub fn uninstaller(&self) -> String {
+        match (&self.bundle, &self.tool) {
+            (Some(bundle), _) => format!("{bundle}/{UNINSTALLER}"),
+            (None, Some(tool)) => format!("{tool}/{TOOL_UNINSTALLER}"),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+/// Program `executable`'s launcher's install path on macOS: in the bundle
+/// (`Contents/MacOS`) when it's bundled, else in the tool directory
+/// (`bin`).
+fn launcher_path(config: &Config, id: &str, product: &Product, executable: &str) -> String {
+    let bundled = product
+        .programs()
+        .iter()
+        .find(|p| p.executable == executable)
+        .is_some_and(|p| p.bundled);
+    if bundled {
+        format!(
+            "/Applications/{}/Contents/MacOS/{executable}",
+            bundle_name(product)
+        )
+    } else {
+        format!("{}/bin/{executable}", tool_directory(config, id))
     }
 }
 
 /// The names product `id`'s package uses.
 ///
 /// # Errors
-/// [`DistError::Config`] for a product without a service or a `[macos]`
-/// section.
+/// [`DistError::Config`] for a product without a `[macos]` section.
 pub fn pkg_names(config: &Config, id: &str, product: &Product) -> Result<PkgNames, DistError> {
     let missing = |what: &str| DistError::Config(format!("product {id}'s pkg needs {what}"));
-    let service = product
-        .service
-        .as_ref()
-        .ok_or_else(|| missing("[product.<id>.service]"))?;
     let macos = product
         .macos
         .as_ref()
         .ok_or_else(|| missing("[product.<id>.macos]"))?;
     let names = config.update_product(id, product)?;
+    let programs = product.programs();
+    let bundle = programs
+        .iter()
+        .any(|p| p.bundled)
+        .then(|| format!("/Applications/{}", bundle_name(product)));
+    let tool = programs
+        .iter()
+        .any(|p| !p.bundled)
+        .then(|| tool_directory(config, id));
+    let links = programs
+        .iter()
+        .filter_map(|p| {
+            p.macos_command.as_ref().map(|command| {
+                (
+                    format!("{PATH_LINKS}/{command}"),
+                    launcher_path(config, id, product, &p.executable),
+                )
+            })
+        })
+        .collect();
+    let conflicts = config
+        .conflicting_products(id)
+        .into_iter()
+        .filter_map(|other| {
+            let product = config.products.get(&other)?;
+            let macos = product.macos.as_ref()?;
+            product
+                .outputs
+                .contains(&crate::config::Output::Pkg)
+                .then(|| PkgConflict {
+                    identifier: macos.bundle_id.clone(),
+                    display_name: product.display_name.clone(),
+                    uninstaller: if product.programs().iter().any(|p| p.bundled) {
+                        format!("/Applications/{}/{UNINSTALLER}", bundle_name(product))
+                    } else {
+                        format!("{}/{TOOL_UNINSTALLER}", tool_directory(config, &other))
+                    },
+                })
+        })
+        .collect();
+    let service = product.service.as_ref().map(|s| s.name.clone());
     Ok(PkgNames {
         display_name: product.display_name.clone(),
         identifier: macos.bundle_id.clone(),
-        bundle: format!("/Applications/{}", bundle_name(product)),
-        service: service.name.clone(),
-        helper: product
-            .ships_helper()
-            .then(|| format!("{}-update", service.name)),
+        bundle,
+        tool,
+        links,
+        conflicts,
+        helper: service
+            .as_ref()
+            .filter(|_| product.ships_helper())
+            .map(|service| format!("{service}-update")),
+        service,
         support: names.macos_support_directory(),
         logs: names.macos_log_directory(),
     })
@@ -297,23 +418,29 @@ pub fn launch_daemons(
     use seaworthy_service::render::launchd;
     let names = pkg_names(config, id, product)?;
     let refused = |e: seaworthy_service::ServiceError| DistError::Config(e.to_string());
+    let service = names
+        .service
+        .clone()
+        .ok_or_else(|| DistError::Config(format!("product {id} runs no service")))?;
     let executable = product
         .service_program()
         .map(|p| p.executable)
         .unwrap_or_default();
-    let program = format!("{}/Contents/MacOS/{executable}", names.bundle);
+    let program = launcher_path(config, id, product, &executable);
     let spec = config.macos_service_spec(id, product, Path::new(&program))?;
     let log = |label: &str| mac_join(&names.logs, &format!("{label}.log"));
     let mut daemons = vec![(
-        names.service.clone(),
-        launchd::daemon_plist(&spec, &log(&names.service)).map_err(refused)?,
+        service.clone(),
+        launchd::daemon_plist(&spec, &log(&service)).map_err(refused)?,
     )];
     if let Some(label) = &names.helper {
-        let helper = format!(
-            "{}/Contents/MacOS/{}",
-            names.bundle,
-            product.helper.as_deref().unwrap_or("update")
-        );
+        // Beside the bundle's launcher, else the tool's (layout's rule).
+        let helper_name = product.helper.as_deref().unwrap_or("update");
+        let helper = match (&names.bundle, &names.tool) {
+            (Some(bundle), _) => format!("{bundle}/Contents/MacOS/{helper_name}"),
+            (None, Some(tool)) => format!("{tool}/bin/{helper_name}"),
+            (None, None) => String::new(),
+        };
         let request = config
             .update_product(id, product)?
             .macos_request_file()
@@ -347,27 +474,53 @@ fn mac_join(dir: &Path, name: &str) -> PathBuf {
     PathBuf::from(format!("{}/{name}", dir.to_string_lossy()))
 }
 
-/// The package's `preinstall`: refuses any volume but the startup one, and
-/// stops the service (`launchctl bootout`) so its files change under no
-/// running process. Never the update helper's daemon: it may be the one
-/// running this install.
+/// Text for a double-quoted `echo` in a script: no quote, newline, `$`,
+/// backquote or backslash.
+fn echo_text(text: &str) -> String {
+    text.replace(['"', '\n', '$', '`', '\\'], "")
+}
+
+/// The package's `preinstall`: refuses any volume but the startup one,
+/// refuses to install while a product it conflicts with is installed (its
+/// pkg's receipt), and stops the service (`launchctl bootout`) so its files
+/// change under no running process. Never the update helper's daemon: it
+/// may be the one running this install.
 #[must_use]
 pub fn preinstall(names: &PkgNames) -> String {
-    format!(
+    let mut text = format!(
         "#!/bin/sh
          # {title} preinstall (generated by seaworthy): stops the service
          # before its files change; never the update helper's daemon, which may
          # be running this install.
          [ \"$3\" = / ] || {{ echo \"installs on the startup volume only\" >&2; exit 1; }}
-         if /bin/launchctl print system/{service} >/dev/null 2>&1; then
-             /bin/launchctl bootout system/{service} || echo \"could not stop {service_text}; installing over it\" >&2
-         fi
-         exit 0
 ",
         title = names.display_name.replace('\n', " "),
-        service = sh(&names.service),
-        service_text = names.service,
-    )
+    );
+    for conflict in &names.conflicts {
+        text.push_str(&format!(
+            "if /usr/sbin/pkgutil --pkg-info {identifier} >/dev/null 2>&1; then
+                 echo \"{title_text} can't be installed while {other} is installed: uninstall it first (sudo {uninstaller})\" >&2
+                 exit 1
+             fi
+",
+            identifier = sh(&conflict.identifier),
+            title_text = echo_text(&names.display_name),
+            other = echo_text(&conflict.display_name),
+            uninstaller = echo_text(&conflict.uninstaller),
+        ));
+    }
+    if let Some(service) = &names.service {
+        text.push_str(&format!(
+            "if /bin/launchctl print system/{service} >/dev/null 2>&1; then
+             /bin/launchctl bootout system/{service} || echo \"could not stop {service_text}; installing over it\" >&2
+         fi
+",
+            service = sh(service),
+            service_text = service,
+        ));
+    }
+    text.push_str("exit 0\n");
+    text
 }
 
 /// The package's `postinstall`: the support (`state`, `updates`: root's,
@@ -379,8 +532,20 @@ pub fn preinstall(names: &PkgNames) -> String {
 /// script ends (a directory it can't make, say) the service the preinstall
 /// stopped runs again: a failed install never leaves it stopped, and the
 /// script's status is still the failure.
+/// A package without a service has nothing to start: its postinstall
+/// checks the volume alone.
 #[must_use]
 pub fn postinstall(names: &PkgNames) -> String {
+    let Some(service) = &names.service else {
+        return format!(
+            "#!/bin/sh
+         # {title} postinstall (generated by seaworthy): no service to start.
+         [ \"$3\" = / ] || exit 1
+         exit 0
+",
+            title = names.display_name.replace('\n', " "),
+        );
+    };
     let state = mac_join(&names.support, "state");
     let updates = mac_join(&names.support, "updates");
     let mut text = format!(
@@ -406,9 +571,9 @@ pub fn postinstall(names: &PkgNames) -> String {
              /bin/launchctl bootstrap system {plist} || status=1
          fi
 ",
-        service = sh(&names.service),
-        service_text = names.service,
-        plist = sh(&PkgNames::daemon_path(&names.service)),
+        service = sh(service),
+        service_text = service,
+        plist = sh(&PkgNames::daemon_path(service)),
     ));
     if let Some(helper) = &names.helper {
         text.push_str(&format!(
@@ -439,8 +604,10 @@ pub fn postinstall(names: &PkgNames) -> String {
     text
 }
 
-/// The uninstaller the bundle carries (`Contents/Resources/uninstall`):
-/// run as root, it stops and removes the daemons, the app and the
+/// The uninstaller the package carries ([`PkgNames::uninstaller`]: in the
+/// bundle, `Contents/Resources/uninstall`, else the tool directory's
+/// `uninstall`): run as root, it stops and removes the daemons, the app,
+/// the tool directory, the `PATH` links that still point into it and the
 /// package's receipt; `--purge` removes the state and logs too. The
 /// administrator's policy file (`/etc/<vendor>/<id>/policy.toml`) stays,
 /// as on Linux.
@@ -465,9 +632,16 @@ pub fn uninstaller(names: &PkgNames) -> String {
          [ \"$(/usr/bin/id -u)\" = 0 ] || {{ echo \"run it as root (sudo)\" >&2; exit 1; }}
          purge=0
          case \"${{1:-}}\" in --purge) purge=1 ;; '') ;; *) echo \"usage: $0 [--purge]\" >&2; exit 2 ;; esac
-         loaded() {{ /bin/launchctl print \"system/$1\" >/dev/null 2>&1; }}
+",
+        title = names.display_name.replace('\n', " "),
+        self_path = sh(&names.uninstaller()),
+    );
+    // The daemons' functions, with daemons to stop.
+    if !names.labels().is_empty() {
+        text.push_str(
+            "         loaded() { /bin/launchctl print \"system/$1\" >/dev/null 2>&1; }
          # Unload a daemon, retrying a bootout that fails mid-transition.
-         unload() {{
+         unload() {
              tries=0
              while loaded \"$1\"; do
                  if [ \"$tries\" -ge 10 ]; then
@@ -478,18 +652,19 @@ pub fn uninstaller(names: &PkgNames) -> String {
                  tries=$((tries + 1))
                  /bin/sleep 1
              done
-         }}
+         }
 ",
-        title = names.display_name.replace('\n', " "),
-        self_path = sh(&format!("{}/{UNINSTALLER}", names.bundle)),
-    );
+        );
+    }
     let mut labels = names.labels();
-    let service = labels.pop();
+    let service = names.service.as_ref().and_then(|_| labels.pop());
     for label in labels {
         text.push_str(&format!("unload {label}\n", label = sh(label)));
     }
     let updates = mac_join(&names.support, "updates");
-    text.push_str(&format!(
+    // An update a helper run left in flight: only a service's helper runs.
+    if names.service.is_some() {
+        text.push_str(&format!(
         "waited=0
          while /usr/bin/pgrep -f {pattern} >/dev/null 2>&1; do
              if [ \"$waited\" -ge 600 ]; then
@@ -502,6 +677,7 @@ pub fn uninstaller(names: &PkgNames) -> String {
 ",
         pattern = sh(&format!("^/usr/sbin/installer -pkg {}/", updates.display())),
     ));
+    }
     if let Some(service) = service {
         text.push_str(&format!(
             "stable=0
@@ -531,17 +707,26 @@ pub fn uninstaller(names: &PkgNames) -> String {
             plist = sh(&PkgNames::daemon_path(label)),
         ));
     }
+    // A link another product took over since stays.
+    for (link, target) in &names.links {
+        text.push_str(&format!(
+            "if [ \"$(/usr/bin/readlink {link})\" = {target} ]; then /bin/rm -f {link}; fi\n",
+            link = sh(link),
+            target = sh(target),
+        ));
+    }
+    for directory in names.bundle.iter().chain(&names.tool) {
+        text.push_str(&format!("/bin/rm -rf {}\n", sh(directory)));
+    }
     text.push_str(&format!(
-        "/bin/rm -rf {bundle}
-         /usr/sbin/pkgutil --forget {identifier} >/dev/null 2>&1
+        "/usr/sbin/pkgutil --forget {identifier} >/dev/null 2>&1
          if [ \"$purge\" = 1 ]; then /bin/rm -rf {support} {logs}; fi
          echo \"{title_text} is uninstalled\"
 ",
-        bundle = sh(&names.bundle),
         identifier = sh(&names.identifier),
         support = sh_path(&names.support),
         logs = sh_path(&names.logs),
-        title_text = names.display_name.replace(['"', '\n', '$', '`', '\\'], ""),
+        title_text = echo_text(&names.display_name),
     ));
     text
 }
@@ -550,10 +735,12 @@ pub fn uninstaller(names: &PkgNames) -> String {
 /// (an installer would otherwise update a copy found elsewhere), never
 /// version-checked (the update helper's floor decides downgrades), its
 /// identifier strict, an upgrade replacing it.
+///
+/// `None` without a bundle: a tool directory is plain files.
 #[must_use]
-pub fn component_plist(names: &PkgNames) -> String {
-    let relative = names.bundle.trim_start_matches('/');
-    format!(
+pub fn component_plist(names: &PkgNames) -> Option<String> {
+    let relative = names.bundle.as_deref()?.trim_start_matches('/');
+    Some(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n<array>\n\t<dict>\n\
@@ -564,7 +751,7 @@ pub fn component_plist(names: &PkgNames) -> String {
          \t\t<key>RootRelativeBundlePath</key>\n\t\t<string>{}</string>\n\
          \t</dict>\n</array>\n</plist>\n",
         xml_text(relative)
-    )
+    ))
 }
 
 /// `productbuild`'s distribution: one hidden choice holding the component
@@ -618,10 +805,14 @@ fn write_mode(path: &Path, text: &str, mode: u32) -> Result<(), DistError> {
     Ok(())
 }
 
-/// Builds `pkg` from the signed `bundle`: the payload (the bundle at its
-/// install path, the `daemons` in `/Library/LaunchDaemons`, 0644), the
-/// scripts, `pkgbuild` into a component package (identifier and
-/// `version`), then `productbuild` with [`distribution`]. Staged in
+/// Builds `pkg` from the signed macOS `tree` (layout's: the bundle as
+/// `<Display Name>.app`, the tool directory at its install path): the
+/// payload (the bundle and the tool directory at their install paths, the
+/// `PATH` links in `/usr/local/bin`, the `daemons` in
+/// `/Library/LaunchDaemons`, 0644), the scripts, `pkgbuild` into a
+/// component package (identifier and `version`; the bundle never
+/// relocated, [`component_plist`]), then `productbuild` with
+/// [`distribution`]. Staged in
 /// `work`. With a Developer ID, `productbuild` signs it with the Developer
 /// ID Installer identity, and it's notarized, stapled and assessed as
 /// Gatekeeper will install it; without one it stays unsigned.
@@ -635,7 +826,7 @@ fn write_mode(path: &Path, text: &str, mode: u32) -> Result<(), DistError> {
 pub fn build_pkg(
     tools: &Tools,
     names: &PkgNames,
-    bundle: &Path,
+    tree: &Path,
     daemons: &[(String, String)],
     version: &str,
     minimum: &str,
@@ -661,7 +852,26 @@ pub fn build_pkg(
         std::fs::remove_dir_all(&staging).map_err(|e| DistError::io(&staging, e))?;
     }
     let root = staging.join("root");
-    copy_tree(bundle, &root.join(names.bundle.trim_start_matches('/')))?;
+    if let Some(bundle) = &names.bundle {
+        let name = Path::new(bundle)
+            .file_name()
+            .ok_or_else(|| DistError::Layout(format!("{bundle} has no name")))?;
+        copy_tree(&tree.join(name), &root.join(bundle.trim_start_matches('/')))?;
+    }
+    if let Some(tool) = &names.tool {
+        let relative = tool.trim_start_matches('/');
+        copy_tree(&tree.join(relative), &root.join(relative))?;
+    }
+    for (link, target) in &names.links {
+        let path = root.join(link.trim_start_matches('/'));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| DistError::io(parent, e))?;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, &path).map_err(|e| DistError::io(&path, e))?;
+        #[cfg(not(unix))]
+        let _ = target;
+    }
     for (label, plist) in daemons {
         let path = root.join(PkgNames::daemon_path(label).trim_start_matches('/'));
         write_mode(&path, plist, 0o644)?;
@@ -670,31 +880,30 @@ pub fn build_pkg(
     write_mode(&scripts.join("preinstall"), &preinstall(names), 0o755)?;
     write_mode(&scripts.join("postinstall"), &postinstall(names), 0o755)?;
     let component_list = staging.join("component.plist");
-    write_mode(&component_list, &component_plist(names), 0o644)?;
+    let mut component_args: Vec<&std::ffi::OsStr> = Vec::new();
+    if let Some(text) = component_plist(names) {
+        write_mode(&component_list, &text, 0o644)?;
+        component_args.extend([OsStr::new("--component-plist"), component_list.as_os_str()]);
+    }
     let packages = staging.join("packages");
     std::fs::create_dir_all(&packages).map_err(|e| DistError::io(&packages, e))?;
     let component = packages.join("component.pkg");
-    run(
-        &tools.pkgbuild,
-        &[
-            "--root".as_ref(),
-            root.as_os_str(),
-            "--component-plist".as_ref(),
-            component_list.as_os_str(),
-            "--identifier".as_ref(),
-            names.identifier.as_ref(),
-            "--version".as_ref(),
-            version.as_ref(),
-            "--scripts".as_ref(),
-            scripts.as_os_str(),
-            "--install-location".as_ref(),
-            "/".as_ref(),
-            "--ownership".as_ref(),
-            "recommended".as_ref(),
-            component.as_os_str(),
-        ],
-        "pkgbuild",
-    )?;
+    let mut pkgbuild: Vec<&std::ffi::OsStr> = vec!["--root".as_ref(), root.as_os_str()];
+    pkgbuild.extend(component_args);
+    pkgbuild.extend([
+        OsStr::new("--identifier"),
+        OsStr::new(&names.identifier),
+        OsStr::new("--version"),
+        OsStr::new(version),
+        OsStr::new("--scripts"),
+        scripts.as_os_str(),
+        OsStr::new("--install-location"),
+        OsStr::new("/"),
+        OsStr::new("--ownership"),
+        OsStr::new("recommended"),
+        component.as_os_str(),
+    ]);
+    run(&tools.pkgbuild, &pkgbuild, "pkgbuild")?;
     let distribution_xml = staging.join("distribution.xml");
     write_mode(
         &distribution_xml,
@@ -936,6 +1145,40 @@ pub fn sign_bundle(
         }
     }
     verify_signature(tools, signer, bundle, true)
+}
+
+/// Signs the code in a product's tool directory, which no bundle seals:
+/// each of `nested` (the cores, the sidecars, the helper), then each of
+/// `launchers` (with the product's entitlements, as a bundle's main
+/// executable carries them: each launcher is a program's process), each
+/// with the hardened runtime and a secure timestamp under a Developer ID;
+/// then checks every signature (`codesign --verify --strict`, and for a
+/// Developer ID against its requirement for the pinned team).
+///
+/// # Errors
+/// [`DistError::Tool`] when `codesign` fails or a signature doesn't
+/// verify; [`DistError::Sign`] for a signature by another team or kind of
+/// identity.
+pub fn sign_tool(
+    tools: &Tools,
+    launchers: &[PathBuf],
+    nested: &[PathBuf],
+    signer: &MacSigner<'_>,
+) -> Result<(), DistError> {
+    for code in nested {
+        codesign(tools, signer, code, true, None)?;
+    }
+    let entitlements = match signer {
+        MacSigner::AdHoc => None,
+        MacSigner::DeveloperId { entitlements, .. } => *entitlements,
+    };
+    for launcher in launchers {
+        codesign(tools, signer, launcher, true, entitlements)?;
+    }
+    for code in nested.iter().chain(launchers) {
+        verify_signature(tools, signer, code, false)?;
+    }
+    Ok(())
 }
 
 /// Submits `file` (a signed disk image or pkg) to Apple's notary service

@@ -391,10 +391,11 @@ pub enum Output {
     Pacman,
     /// A Linux tarball of the install tree.
     Tar,
-    /// A macOS disk image holding the app bundle (desktop products).
+    /// A macOS disk image holding the app bundle (a desktop app alone).
     Dmg,
-    /// A macOS flat installer package: the app bundle and its
-    /// LaunchDaemons (service products).
+    /// A macOS flat installer package: the app bundle, the tool directory
+    /// with its `PATH` links, and a service's LaunchDaemons (services,
+    /// tools, products with `cli` programs).
     Pkg,
 }
 
@@ -2328,23 +2329,47 @@ impl Config {
             }
             (None, false) => {}
         }
+        // macOS: a dmg holds a desktop app's bundle alone; a pkg installs
+        // a service, a tool, or a product's cli programs (in its tool
+        // directory, linked into /usr/local/bin), beside its bundle if it
+        // has one.
+        let programs = p.programs();
+        let tool_programs = programs.iter().any(|program| !program.bundled);
         if p.outputs.contains(&Output::Dmg) && p.kind != Kind::Desktop {
             return Err(at(
                 "outputs",
-                "dmg holds a desktop app (kind = \"desktop\"); a macOS service ships as a pkg",
+                "dmg holds a desktop app (kind = \"desktop\"); a macOS service or tool ships as a pkg",
             ));
         }
-        if p.outputs.contains(&Output::Pkg) && p.kind != Kind::Service {
+        if p.outputs.contains(&Output::Dmg) && tool_programs {
             return Err(at(
                 "outputs",
-                "pkg holds a macOS service (kind = \"service\"): its LaunchDaemon; a desktop app ships as a dmg",
+                "dmg holds a desktop app's bundle alone: its cli programs, and their PATH links, need a pkg",
             ));
         }
-        if macos_output && p.programs().iter().any(|program| !program.bundled) {
+        if p.outputs.contains(&Output::Pkg) && p.kind == Kind::Desktop && !tool_programs {
             return Err(at(
                 "outputs",
-                "the macOS outputs hold the app bundle, which holds the gui program alone: a cli program has no place there",
+                "pkg holds a macOS service, a tool or a product's cli programs (kind = \"service\" or \"tool\", or a [[programs]] entry with role = \"cli\"); a desktop app alone ships as a dmg",
             ));
+        }
+        // What only an app bundle has.
+        if macos_output
+            && !programs.iter().any(|program| program.bundled)
+            && let Some(macos) = &p.macos
+        {
+            for (key, set) in [
+                ("macos.icon", macos.icon.is_some()),
+                ("macos.category", macos.category.is_some()),
+                ("macos.localizations", !macos.localizations.is_empty()),
+            ] {
+                if set {
+                    return Err(at(
+                        key,
+                        "describes the app bundle, and this product has none (no gui program: its programs install in its tool directory)",
+                    ));
+                }
+            }
         }
         // macOS's identity is its own: a pkg's LaunchDaemon runs as root
         // (the package creates no daemon account yet), which a product says
@@ -3211,10 +3236,11 @@ impl Product {
     }
 
     /// Whether the helper ships for `os`: [`ships_helper`](Self::ships_helper),
-    /// except a desktop product on macOS, whose dmg carries none (a
-    /// helper there needs a LaunchDaemon, which only a service's pkg
+    /// except a desktop product on macOS, whose dmg (or pkg) carries none
+    /// (a helper there needs a LaunchDaemon, which only a service's pkg
     /// installs, and an interactive user's start right macOS doesn't have
-    /// yet; the app updates by download there, as before).
+    /// yet; the app updates by download there, as before). A tool's helper
+    /// ships as a file only, on macOS as elsewhere.
     #[must_use]
     pub fn ships_helper_on(&self, os: crate::inputs::Os) -> bool {
         self.ships_helper() && !(os == crate::inputs::Os::Macos && self.kind == Kind::Desktop)

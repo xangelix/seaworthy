@@ -189,8 +189,8 @@ pub enum Kind {
     /// A macOS disk image holding the signed app bundle. No release
     /// manifest: no update helper installs a desktop app's dmg.
     Dmg,
-    /// A macOS service's flat package: the bundle and its
-    /// LaunchDaemons, which the macOS update helper installs.
+    /// A macOS flat package: the bundle, the tool directory and a
+    /// service's LaunchDaemons, which the macOS update helper installs.
     Pkg,
 }
 
@@ -580,8 +580,8 @@ pub fn package(
                 crate::macos::build_pkg(
                     tools,
                     &crate::macos::pkg_names(config, id, product)?,
-                    &layout.tree.join(crate::macos::bundle_name(product)),
-                    &crate::macos::launch_daemons(config, id, product)?,
+                    &layout.tree,
+                    &pkg_daemons(config, id, product)?,
                     &versions.pkg,
                     &config.defaults.macos_minimum,
                     &path,
@@ -608,7 +608,7 @@ pub fn package(
                 Kind::Dmg => tree_files(layout_for(MACOS)?),
                 Kind::Pkg => {
                     let mut files = tree_files(layout_for(MACOS)?);
-                    for (label, plist) in crate::macos::launch_daemons(config, id, product)? {
+                    for (label, plist) in pkg_daemons(config, id, product)? {
                         files.push(crate::sbom::SbomFile {
                             path: crate::macos::PkgNames::daemon_path(&label),
                             sha256: seaworthy_crypto::digest::sha256_hex(plist.as_bytes()),
@@ -1534,11 +1534,14 @@ fn stage_entitlements(
     Ok(staged)
 }
 
-/// Completes the macOS bundle in place: writes `Contents/Info.plist`,
-/// signs the bundle from the inside out (`crate::macos`: ad hoc, or with
-/// the Developer ID `signer` names), checks
-/// every signed binary still carries its record, lists the plist and the
-/// signature seal with the bundle's files, and rewrites `layout.json`.
+/// Completes the macOS tree in place. The bundle, when the product has
+/// one: `Contents/Info.plist`, then signed from the inside out
+/// (`crate::macos`: ad hoc, or with the Developer ID `signer` names). The
+/// tool directory, when a program installs there: each binary signed on
+/// its own. A pkg's uninstaller goes in the bundle (sealed by its
+/// signature), else the tool directory. Then every signed binary must
+/// still carry its record, the plist and the signature seal are listed
+/// with the tree's files, and `layout.json` is rewritten.
 fn prepare_macos(
     config: &Config,
     product: &crate::config::Product,
@@ -1548,25 +1551,48 @@ fn prepare_macos(
     signer: &crate::macos::MacSigner<'_>,
 ) -> Result<(), DistError> {
     use crate::layout::{File, Role};
-    let bundle = layout.tree.join(crate::macos::bundle_name(product));
-    let icon = layout.files.iter().any(|f| f.role == Role::Icon);
-    let text = crate::macos::info_plist(product, release, &config.defaults.macos_minimum, icon)?;
-    let plist = bundle.join("Contents").join("Info.plist");
-    write(&plist, text.as_bytes())?;
-    layout.files.push(File {
-        install_path: format!("{}/Contents/Info.plist", layout.install_root),
-        staged: plist,
-        role: Role::BundleInfo,
-        program: None,
-        mode: 0o644,
-        sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
-    });
-    // A service's pkg: its uninstaller, inside the bundle so the signature
-    // seals it (macOS has no uninstall for a package).
+    let id = layout.product.clone();
+    let names = crate::macos::pkg_names(config, &id, product)?;
+    // Each root's staged directory: layout stages the bundle as
+    // `<Display Name>.app` and the tool directory at its install path.
+    let bundle = names
+        .bundle
+        .as_ref()
+        .map(|_| layout.tree.join(crate::macos::bundle_name(product)));
+    let tool = names
+        .tool
+        .as_ref()
+        .map(|install| layout.tree.join(install.trim_start_matches('/')));
+    if let (Some(bundle), Some(install)) = (&bundle, &names.bundle) {
+        let icon = layout.files.iter().any(|f| f.role == Role::Icon);
+        let text =
+            crate::macos::info_plist(product, release, &config.defaults.macos_minimum, icon)?;
+        let plist = bundle.join("Contents").join("Info.plist");
+        write(&plist, text.as_bytes())?;
+        layout.files.push(File {
+            install_path: format!("{install}/Contents/Info.plist"),
+            staged: plist,
+            role: Role::BundleInfo,
+            program: None,
+            mode: 0o644,
+            sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
+        });
+    }
+    // A pkg's uninstaller (macOS has no uninstall for a package).
     if product.outputs.contains(&Output::Pkg) {
-        let names = crate::macos::pkg_names(config, &layout.product, product)?;
         let text = crate::macos::uninstaller(&names);
-        let staged = bundle.join(crate::macos::UNINSTALLER);
+        let (staged, install_path) = match (&bundle, &tool) {
+            (Some(bundle), _) => (bundle.join(crate::macos::UNINSTALLER), names.uninstaller()),
+            (None, Some(tool)) => (
+                tool.join(crate::macos::TOOL_UNINSTALLER),
+                names.uninstaller(),
+            ),
+            (None, None) => {
+                return Err(DistError::Layout(format!(
+                    "product {id}'s macOS tree has neither a bundle nor a tool directory"
+                )));
+            }
+        };
         if let Some(parent) = staged.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DistError::io(parent, e))?;
         }
@@ -1578,7 +1604,7 @@ fn prepare_macos(
                 .map_err(|e| DistError::io(&staged, e))?;
         }
         layout.files.push(File {
-            install_path: format!("{}/{}", layout.install_root, crate::macos::UNINSTALLER),
+            install_path,
             staged,
             role: Role::Uninstaller,
             program: None,
@@ -1586,34 +1612,59 @@ fn prepare_macos(
             sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
         });
     }
-    let nested: Vec<PathBuf> = layout
-        .files
-        .iter()
-        .filter(|f| matches!(f.role, Role::Core { .. } | Role::Helper | Role::Sidecar))
-        .map(|f| f.staged.clone())
-        .collect();
-    crate::macos::sign_bundle(tools, &bundle, &nested, signer)?;
-    let seal = bundle
-        .join("Contents")
-        .join("_CodeSignature")
-        .join("CodeResources");
-    layout.files.push(File {
-        install_path: format!(
-            "{}/Contents/_CodeSignature/CodeResources",
-            layout.install_root
-        ),
-        staged: seal,
-        role: Role::CodeSignature,
-        program: None,
-        mode: 0o644,
-        sha256: String::new(),
-    });
+    let code = |under: &Path, launchers: bool| -> Vec<PathBuf> {
+        layout
+            .files
+            .iter()
+            .filter(|f| f.staged.starts_with(under))
+            .filter(|f| {
+                if launchers {
+                    f.role == Role::Launcher
+                } else {
+                    matches!(f.role, Role::Core { .. } | Role::Helper | Role::Sidecar)
+                }
+            })
+            .map(|f| f.staged.clone())
+            .collect()
+    };
+    if let Some(tool) = &tool {
+        crate::macos::sign_tool(tools, &code(tool, true), &code(tool, false), signer)?;
+    }
+    if let (Some(bundle), Some(install)) = (&bundle, &names.bundle) {
+        crate::macos::sign_bundle(tools, bundle, &code(bundle, false), signer)?;
+        let seal = bundle
+            .join("Contents")
+            .join("_CodeSignature")
+            .join("CodeResources");
+        layout.files.push(File {
+            install_path: format!("{install}/Contents/_CodeSignature/CodeResources"),
+            staged: seal,
+            role: Role::CodeSignature,
+            program: None,
+            mode: 0o644,
+            sha256: String::new(),
+        });
+    }
     for file in &mut layout.files {
         crate::layout::recheck_record(&file.staged, &file.role, "signed")?;
         let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
         file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
     }
     crate::layout::write_manifest(layout)
+}
+
+/// A pkg's LaunchDaemons: a service's ([`crate::macos::launch_daemons`]),
+/// none for a tool or a product of cli programs.
+fn pkg_daemons(
+    config: &Config,
+    id: &str,
+    product: &crate::config::Product,
+) -> Result<Vec<(String, String)>, DistError> {
+    if product.service.is_some() {
+        crate::macos::launch_daemons(config, id, product)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 /// A laid-out tree's files, for an SBOM.

@@ -325,15 +325,21 @@ fn a_command_is_one_products() {
     );
 }
 
+/// A cli program on macOS installs from a pkg (its tool directory, its
+/// link): the dmg holds the app bundle alone.
 #[test]
-fn macos_outputs_hold_no_cli_program_in_the_app_bundle() {
-    refused(
-        &(edit(
+fn a_cli_program_ships_on_macos_in_a_pkg() {
+    let macos = |outputs: &str| {
+        edit(
             "outputs = [\"deb\", \"tar\", \"zip\", \"msi\"]",
-            "outputs = [\"dmg\"]",
-        ) + "\n[product.trove.macos]\nbundle-id = \"com.example.trove\"\n"),
-        "a cli program has no place there",
+            &format!("outputs = [{outputs}]"),
+        ) + "\n[product.trove.macos]\nbundle-id = \"com.example.trove\"\n"
+    };
+    refused(
+        &macos("\"dmg\""),
+        "its cli programs, and their PATH links, need a pkg",
     );
+    parse(&macos("\"pkg\""));
 }
 
 fn build(dir: &str, flags: &[&str], args: &[&str]) -> Step {

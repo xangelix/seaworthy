@@ -3,24 +3,30 @@
 //!
 //! | | Linux | Windows | macOS |
 //! | --- | --- | --- | --- |
-//! | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` |
-//! | Launchers (each program's) | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
-//! | Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
-//! | Sidecars | — | beside the cores, one copy | — |
-//! | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | — |
-//! | Data files (`[[files]]`) | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>` |
+//! | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app`, and the tool directory `/usr/local/<vendor>/<product>` |
+//! | Launchers (each program's) | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>`; `bin/<executable>` |
+//! | Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib`; `Frameworks/lib<core>_<cpu>.dylib` |
+//! | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
+//! | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS/<helper>`, else `bin/<helper>` |
+//! | Data files (`[[files]]`) | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>`; `Resources/<destination>` |
 //! | Icons | `[desktop]`: `/usr/share/icons/hicolor/<size>/apps/<app-id>.<ext>` | `[desktop]`: `tree/<Vendor>/<Directory>.ico`, for the MSI only | `[macos] icon`: `Contents/Resources/<file>.icns` |
 //!
-//! On macOS a bundle keeps executable code in `Contents/MacOS` and
-//! `Contents/Frameworks`, and everything else in `Contents/Resources` (code
-//! signing seals them so; a data file beside the executable breaks the
-//! signature). `package` writes the bundle's `Info.plist`, with the
-//! release's version, and signs the bundle (`crate::macos`).
+//! On macOS the app bundle holds the bundled program (the `gui` program,
+//! or the single-program form's service or desktop app) and the tool
+//! directory every other program, laid out like a bundle's `Contents`
+//! (`bin/` for `MacOS/`), so a launcher finds its cores in `../Frameworks`
+//! and its data in `../Resources` either way. A bundle keeps executable
+//! code in `Contents/MacOS` and `Contents/Frameworks`, and everything else
+//! in `Contents/Resources` (code signing seals them so; a data file beside
+//! the executable breaks the signature). `package` writes the bundle's
+//! `Info.plist`, with the release's version, and signs the bundle and the
+//! tool directory's binaries (`crate::macos`).
 //!
 //! Each tree is staged under `<out>/<product>/<triple>/tree/` exactly as
 //! it installs (Linux: `tree/opt/<vendor>/<product>/…`; Windows:
-//! `tree/<Vendor>/<Directory>/…`; macOS: `tree/<Display Name>.app/…`), every
-//! file mode 0755. Linux binaries are
+//! `tree/<Vendor>/<Directory>/…`; macOS: `tree/<Display Name>.app/…`, and
+//! the tool directory at its install path), every file mode 0755. Linux
+//! binaries are
 //! stripped with `strip --strip-all` (`$STRIP` overrides the tool), and
 //! each stripped copy's record is read back, so stripping can never cost a
 //! core its `.cpureq`. `layout.json` beside the tree lists every file with
@@ -278,9 +284,25 @@ pub fn layout(
         let base = out.join(id).join(triple);
         prepare(&base)?;
         let tree = base.join("tree");
-        let (install_root, staged_root) = if macos {
+        // macOS: the app bundle holds the bundled program (the gui
+        // program, or a single-program service's or desktop app's); the
+        // tool directory (`/usr/local/<vendor>/<id>`) the others, laid out
+        // like a bundle's `Contents` (`bin/` for `MacOS/`), so a launcher
+        // finds its cores in `../Frameworks` either way.
+        let bundle_root = (macos && product.bundled_program().is_some()).then(|| {
             let bundle = crate::macos::bundle_name(product);
             (format!("/Applications/{bundle}"), tree.join(&bundle))
+        });
+        let tool_root = (macos && product.programs().iter().any(|p| !p.bundled)).then(|| {
+            let root = crate::macos::tool_directory(config, id);
+            let staged = tree.join(root.trim_start_matches('/'));
+            (root, staged)
+        });
+        let (install_root, staged_root) = if macos {
+            bundle_root
+                .clone()
+                .or_else(|| tool_root.clone())
+                .ok_or_else(|| DistError::Layout(format!("product {id} has no program")))?
         } else if windows {
             let root = format!(
                 "{}\\{}",
@@ -296,11 +318,12 @@ pub fn layout(
             let staged = tree.join("opt").join(&vendor_lower).join(id);
             (root, staged)
         };
-        let join_install = |relative: &str| {
+        let main_root = (install_root.clone(), staged_root.clone());
+        let join_install = |root: &str, relative: &str| {
             if windows {
-                format!("{install_root}\\{}", relative.replace('/', "\\"))
+                format!("{root}\\{}", relative.replace('/', "\\"))
             } else {
-                format!("{install_root}/{relative}")
+                format!("{root}/{relative}")
             }
         };
         let mut files = Vec::new();
@@ -318,11 +341,12 @@ pub fn layout(
         };
         let (mut data_files, mut data_bytes) = (0_usize, 0_u64);
         let mut place = |source: &Path,
+                         (root, staged_root): &(String, PathBuf),
                          relative: &str,
                          role: Role,
                          program: Option<&str>|
          -> Result<(), DistError> {
-            let install_path = join_install(relative);
+            let install_path = join_install(root, relative);
             if windows && PROGRAM_FILES.len() + install_path.len() > MAX_WINDOWS_PATH {
                 return Err(DistError::Layout(format!(
                     "{install_path} (from {}): {} characters under {PROGRAM_FILES}, past Windows' {MAX_WINDOWS_PATH}-character path limit, where Windows Installer and Explorer fail",
@@ -345,11 +369,11 @@ pub fn layout(
             }
             let parts: Vec<&str> = relative.split('/').collect();
             for depth in 1..parts.len() {
-                let directory = fold(&join_install(&parts[..depth].join("/")));
+                let directory = fold(&join_install(root, &parts[..depth].join("/")));
                 if claimed.contains(&directory) {
                     return Err(DistError::Layout(format!(
                         "{} (from {}) would install as both a file and a directory",
-                        join_install(&parts[..depth].join("/")),
+                        join_install(root, &parts[..depth].join("/")),
                         source.display()
                     )));
                 }
@@ -419,36 +443,65 @@ pub fn layout(
                 stem.to_owned()
             }
         };
+        // Where a program's launcher and cores go: (root, launcher's
+        // directory, cores' directory).
+        let program_place = |bundled: bool| -> Result<(&(String, PathBuf), &str, &str), DistError> {
+            match (os, bundled) {
+                (Os::Macos, true) => bundle_root
+                    .as_ref()
+                    .map(|root| (root, "Contents/MacOS/", "Contents/Frameworks/")),
+                (Os::Macos, false) => tool_root.as_ref().map(|root| (root, "bin/", "Frameworks/")),
+                (Os::Windows, _) => Some((&main_root, "", "")),
+                (Os::Linux, _) => Some((&main_root, "", "lib/")),
+            }
+            .ok_or_else(|| {
+                DistError::Layout(format!("product {id} has no macOS root for a program"))
+            })
+        };
         for program in &platform.inputs.programs {
             let executable = &program.program.executable;
-            let launcher = if macos {
-                format!("Contents/MacOS/{executable}")
-            } else {
-                exe(executable)
-            };
+            let (root, directory, _) = program_place(program.program.bundled)?;
             place(
                 &program.launcher,
-                &launcher,
+                root,
+                &format!("{directory}{}", exe(executable)),
                 Role::Launcher,
                 Some(executable),
             )?;
         }
         for program in &platform.inputs.programs {
             let core = &program.program.core;
+            let (root, _, directory) = program_place(program.program.bundled)?;
             for (cpu, file, _) in &program.cores {
-                let relative = match os {
+                let name = match os {
                     Os::Windows => format!("{core}_{cpu}.dll"),
-                    Os::Linux => format!("lib/lib{core}_{cpu}.so"),
-                    Os::Macos => format!("Contents/Frameworks/lib{core}_{cpu}.dylib"),
+                    Os::Linux => format!("lib{core}_{cpu}.so"),
+                    Os::Macos => format!("lib{core}_{cpu}.dylib"),
                 };
                 place(
                     file,
-                    &relative,
+                    root,
+                    &format!("{directory}{name}"),
                     Role::Core { cpu: cpu.clone() },
                     Some(&program.program.executable),
                 )?;
             }
         }
+        // The roots holding cores, each with the sidecars beside them (one
+        // copy per directory), and data files under their resources.
+        let roots: Vec<(&(String, PathBuf), &str, &str)> = if macos {
+            bundle_root
+                .iter()
+                .map(|root| (root, "Contents/Frameworks/", "Contents/Resources/"))
+                .chain(
+                    tool_root
+                        .iter()
+                        .map(|root| (root, "Frameworks/", "Resources/")),
+                )
+                .collect()
+        } else {
+            vec![(&main_root, "", "")]
+        };
         for sidecar in &platform.sidecars {
             let name = sidecar
                 .file_name()
@@ -456,23 +509,28 @@ pub fn layout(
                 .ok_or_else(|| {
                     DistError::Layout(format!("{} has no file name", sidecar.display()))
                 })?;
-            let relative = if macos {
-                format!("Contents/Frameworks/{name}")
-            } else {
-                name
-            };
-            place(sidecar, &relative, Role::Sidecar, None)?;
+            for (root, frameworks, _) in &roots {
+                place(
+                    sidecar,
+                    root,
+                    &format!("{frameworks}{name}"),
+                    Role::Sidecar,
+                    None,
+                )?;
+            }
         }
         if let Some(helper) = &platform.inputs.helper {
-            let relative = match os {
-                Os::Windows => exe(product.helper.as_deref().unwrap_or("update")),
-                Os::Linux => format!("libexec/{vendor_lower}-{id}-update"),
-                Os::Macos => format!(
-                    "Contents/MacOS/{}",
-                    product.helper.as_deref().unwrap_or("update")
-                ),
+            let name = product.helper.as_deref().unwrap_or("update");
+            // macOS: beside the bundle's launcher, else the tool's.
+            let (root, relative) = match os {
+                Os::Windows => (&main_root, exe(name)),
+                Os::Linux => (&main_root, format!("libexec/{vendor_lower}-{id}-update")),
+                Os::Macos => match &bundle_root {
+                    Some(bundle) => (bundle, format!("Contents/MacOS/{name}")),
+                    None => (&main_root, format!("bin/{name}")),
+                },
             };
-            place(helper, &relative, Role::Helper, None)?;
+            place(helper, root, &relative, Role::Helper, None)?;
         }
         let platform_kind: Platform = os.platform();
         for extra in product
@@ -481,15 +539,21 @@ pub fn layout(
             .filter(|f| f.platforms.contains(&platform_kind))
         {
             for (source, relative) in data_sources(&config.dir, extra)? {
-                let relative = if macos {
-                    format!("Contents/Resources/{relative}")
-                } else {
-                    relative
-                };
-                place(&source, &relative, Role::Asset, None)?;
+                for (root, _, resources) in &roots {
+                    place(
+                        &source,
+                        root,
+                        &format!("{resources}{relative}"),
+                        Role::Asset,
+                        None,
+                    )?;
+                }
             }
         }
-        if macos && let Some(path) = product.macos.as_ref().and_then(|m| m.icon.as_ref()) {
+        if let (Some((bundle_install, bundle_staged)), Some(path)) = (
+            &bundle_root,
+            product.macos.as_ref().and_then(|m| m.icon.as_ref()),
+        ) {
             let source = inside(&config.dir, path)?;
             let bytes = read_data(&source)?;
             if bytes.get(..4) != Some(b"icns".as_slice()) {
@@ -499,7 +563,7 @@ pub fn layout(
                 )));
             }
             let relative = format!("Contents/Resources/{}", crate::macos::ICON_FILE);
-            let install_path = join_install(&relative);
+            let install_path = join_install(bundle_install, &relative);
             if files
                 .iter()
                 .any(|f: &File| fold(&f.install_path) == fold(&install_path))
@@ -508,7 +572,7 @@ pub fn layout(
                     "a data file would install as {install_path}, the bundle's icon (macos.icon)"
                 )));
             }
-            let staged = staged_root.join(&relative);
+            let staged = bundle_staged.join(&relative);
             write_data(&staged, &bytes)?;
             files.push(File {
                 install_path,

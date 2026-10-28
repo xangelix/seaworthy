@@ -152,13 +152,13 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `executable` | without `programs` | The launcher executable's file stem (`AcmeAgent`). |
 | `core` | without `programs` | The core cdylib's crate name (`acme_agent_core`). |
 | `programs` | no | `[[product.<id>.programs]]`: several programs, each its own launcher and cores ([below](#productidprograms)). Without it, `executable`, `core`, `launcher` and `linux.command` describe the product's one program. |
-| `outputs` | yes | The deliverables, each once: `msi`, `zip`, `deb`, `rpm`, `pacman`, `tar`, `dmg` (a desktop app), `pkg` (a macOS service). |
+| `outputs` | yes | The deliverables, each once: `msi`, `zip`, `deb`, `rpm`, `pacman`, `tar`, `dmg` (a desktop app alone), `pkg` (a macOS service, a tool, or a product with `cli` programs: [packaging.md](packaging.md#macos)). |
 | `kind` | no | `service` (the default; needs `[service]`), `desktop` (run by the logged-in user; its helper is started through the interactive-users grant or a polkit rule) or `tool` (no service, no helper start right). |
 | `launcher` | no | The launcher crate's path from the workspace root (the directory of `build-plan --manifest`), for builds that follow the build plan. |
 | `helper` | unless `updates.default = "off"` | The update helper executable's file stem, different from every program's executable. A helper needs `release-signatures` and `release-keys`. One per product, whatever its programs. |
 | `helper-crate` | no | The helper's crate path from the workspace root: the build plan builds it from its own manifest, so only its own features are enabled (without it the helper is built `--bin <helper>` from the workspace root, which unifies every member's features). |
 | `windows-directory` | with `msi` | The Windows install directory under the vendor's (default: the display name's last word). It also names the state directory, the policy registry key and the Group Policy namespace, so it must never follow a display-name change. |
-| `conflicts` | no | What this product can't be installed beside. A product id of this `seaworthy.toml`: on every platform both build for, the Linux packages conflict (deb `Conflicts:`, rpm `Conflicts:`, pacman `conflict`), and the MSI refuses to install while the other's MSI is installed (found by its UpgradeCode, never removed); it holds both ways, so listing it on one product is enough. Anything else is a plain Linux package name (`[a-z0-9][a-z0-9.-]+`), which the Linux packages alone conflict with (so a Linux package must be an output); never a package this file builds (name its product) or one `linux.replaces` names. Unlike `linux.replaces`, nothing is replaced: an upgrade never swaps one product for another. Products that conflict may share a command, `windows-directory`, `desktop.app-id` and their shortcuts' name, which only one installation holds; no product conflicts with itself. |
+| `conflicts` | no | What this product can't be installed beside. A product id of this `seaworthy.toml`: on every platform both build for, the Linux packages conflict (deb `Conflicts:`, rpm `Conflicts:`, pacman `conflict`),, the MSI refuses to install while the other's MSI is installed (found by its UpgradeCode, never removed), and the macOS pkg while the other's pkg is (its receipt); it holds both ways, so listing it on one product is enough. Anything else is a plain Linux package name (`[a-z0-9][a-z0-9.-]+`), which the Linux packages alone conflict with (so a Linux package must be an output); never a package this file builds (name its product) or one `linux.replaces` names. Unlike `linux.replaces`, nothing is replaced: an upgrade never swaps one product for another. Products that conflict may share a command, `windows-directory`, `desktop.app-id` and their shortcuts' name, which only one installation holds; no product conflicts with itself. |
 | `fips` | no | Whether this product's cores carry the AWS-LC FIPS module (default: `defaults.fips`): `verify` applies the FIPS checks to its binaries alone, so one `seaworthy.toml` can list a product per crypto build (`trove-fips` with `fips = true`, `trove-portable` with `fips = false`), each program's `features` choosing the build. |
 | `upgrade-code` | no | The MSI's UpgradeCode, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, which ties every release together. Default: derived from the vendor and the id; set it to keep an existing code before renaming either, and to the code a product's earlier MSIs carry when another tool built them ([packaging.md](packaging.md#migrating-an-existing-product)). `seaworthy check` notes an `msi` product without one. |
 | `updates.default` | no | The install-time update policy: `auto` (the default), `notify` or `off`. |
@@ -189,7 +189,7 @@ role = "gui"
 | `executable` | required | The launcher's file stem. No two programs of a product share one (case-insensitively), nor with the helper. |
 | `core` | required | The core cdylib's crate name. No two programs of a product share one: their cores install side by side as `<core>_<cpu>`. |
 | `launcher` | — | The launcher crate's path from the workspace root, as above. |
-| `role` | required | `cli`: put on `PATH` as `command` (`/usr/bin/<command>` in the Linux packages; Windows' `PATH` is not set yet). `gui`: the program `[product.<id>.desktop]`'s menu entry and shortcuts start, and the macOS app bundle's executable; at most one per product. |
+| `role` | required | `cli`: put on `PATH` as `command` (`/usr/bin/<command>` in the Linux packages, `/usr/local/bin/<command>` in the macOS pkg; Windows' `PATH` is not set yet), installed on macOS in the product's tool directory. `gui`: the program `[product.<id>.desktop]`'s menu entry and shortcuts start, and the macOS app bundle's executable; at most one per product. |
 | `command` | a `cli` program's executable | The name it is put on `PATH` as (`[a-z0-9][a-z0-9._+-]*`, at most 64 bytes): a `cli` program's executable must be such a name unless it sets one, and a `gui` program is put on `PATH` only when it names one. No two programs, nor two products, share one. |
 | `features` | `[]` | Cargo features of the core crate this program's cores build with (`--features`): names of `[A-Za-z0-9_+.-]` or `<package>/<feature>`, each once. Only the cores: the launcher builds as its crate says. |
 | `default-features` | `true` | `false` builds the cores with `--no-default-features`. |
@@ -204,7 +204,9 @@ product.
 
 The single-program keys are shorthand for one program: `executable`, `core` and `launcher` as
 given, with the core crate's default features; a `gui` program for `kind = "desktop"`, a `cli`
-program otherwise; on `PATH` only as `linux.command`, and only on Linux, as before. A `tool`
+program otherwise; on `PATH` only as `linux.command`, and only on Linux, as before; on macOS in the
+app bundle, as before, but for `kind = "tool"`, which has none (its program installs in the tool
+directory). A `tool`
 product may hold a `gui` program, and a `desktop` product `cli` programs: `kind` decides the service
 and the helper's start right, a program's `role` how people reach it.
 
@@ -271,15 +273,17 @@ drop every directive. See [services.md](services.md) for what each platform's re
 | `mime-types` | `[]` | The `.desktop` entry's `MimeType`: the media types the app opens (`["inode/directory"]` for folders), which file managers offer it for. With any, `Exec` takes the file it's opened with (`%f`: one per launch, so an app that takes one path starts once per file picked). |
 | `wm-class` | — | `StartupWMClass`: the window class (X11) or app id (Wayland) the app's windows carry. |
 
-`[product.<id>.macos]` (required with a macOS output):
+`[product.<id>.macos]` (required with a macOS output; `icon`, `category` and `localizations`
+describe the app bundle, so a product without one, whose programs all install in its tool
+directory, sets none of them):
 
 | Key | Meaning |
 |---|---|
-| `bundle-id` | `CFBundleIdentifier`, reverse-DNS (`com.example.acme.viewer`). Required and never derived: macOS keys an app's permissions, preferences and notarization to it, so it must never change. |
+| `bundle-id` | `CFBundleIdentifier`, reverse-DNS (`com.example.acme.viewer`), and the pkg's identifier (its receipt). Required and never derived: macOS keys an app's permissions, preferences and notarization to it, so it must never change. |
 | `icon` | The app icon (`.icns`). |
 | `category` | `LSApplicationCategoryType` (`public.app-category.utilities`). |
 | `localizations` | `CFBundleLocalizations`: the languages the app speaks, as language IDs (`["en", "de", "pt-BR", "zh-Hans"]`), each once. An app that carries its translations in its binary has no `.lproj` directories for macOS to find them by: without the list, the system's own text in the app (the standard menus and panels) stays English, and System Settings offers no per-app language. |
-| `entitlements` | An XML property list (`.plist` or `.entitlements`, relative to `seaworthy.toml`) of the entitlements a Developer ID signature gives the main executable: the hardened runtime's exceptions the app needs (`com.apple.security.cs.allow-jit`, …). Ad hoc signatures carry none. |
+| `entitlements` | An XML property list (`.plist` or `.entitlements`, relative to `seaworthy.toml`) of the entitlements a Developer ID signature gives the main executable (and each launcher in the tool directory): the hardened runtime's exceptions the app needs (`com.apple.security.cs.allow-jit`, …). Ad hoc signatures carry none. |
 
 `[[product.<id>.files]]`: a data file, or a directory with everything below it, installed under the
 install root (data only: see [packaging.md](packaging.md#layout)):
@@ -323,7 +327,7 @@ key = "<the key's 40- or 64-hex fingerprint>"
 
 [apple]                               # macOS: Developer ID signing, then notarization
 identity = "Developer ID Application: Acme Inc (ABCDE12345)"
-installer-identity = "Developer ID Installer: Acme Inc (ABCDE12345)"   # a service's pkg
+installer-identity = "Developer ID Installer: Acme Inc (ABCDE12345)"   # a pkg
 keychain = "/Users/runner/acme-build.keychain-db"
 notary-profile = "acme-notary"
 ```
@@ -367,7 +371,7 @@ notary-profile = "acme-notary"
 | Key | Meaning |
 |---|---|
 | `identity` | The Developer ID Application identity in the keychain: its common name (`Developer ID Application: <name> (<team>)`) or its certificate's SHA-1 (40 hex characters). Required. |
-| `installer-identity` | The Developer ID Installer identity, which signs a service's pkg (required for a pkg). |
+| `installer-identity` | The Developer ID Installer identity, which signs a pkg (required for a pkg). |
 | `keychain` | The keychain holding the identities and the notary profile (default: the user's search list). |
 | `notary-profile` | The `xcrun notarytool store-credentials` profile holding the notary service's credentials (an App Store Connect API key, or an Apple ID with an app-specific password), kept in the keychain, never in a file `seaworthy` reads. Required: a Developer ID-signed download that isn't notarized is refused by Gatekeeper anyway. |
 | `timeout-seconds` | How long notarization may take (default 1800; at most 3000). |
