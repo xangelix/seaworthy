@@ -18,19 +18,23 @@ artifacts ──▶ verify ──▶ layout ──▶ package ──▶ repo ─
 ## The artifact directory
 
 ```text
-<artifacts>/<triple>/launcher/<executable>[.exe]
-<artifacts>/<triple>/helper/<helper>[.exe]          when the update helper ships
-<artifacts>/<triple>/cores/<cpu>/lib<core>.so       Linux (x86_64-unknown-linux-gnu)
-<artifacts>/<triple>/cores/<cpu>/<core>.dll         Windows (x86_64-pc-windows-msvc), with the sidecars
-<artifacts>/<triple>/cores/<cpu>/lib<core>.dylib    macOS (aarch64-apple-darwin)
+<artifacts>/<triple>/launcher/<executable>[.exe]     each program's
+<artifacts>/<triple>/helper/<helper>[.exe]           when the update helper ships
+<artifacts>/<triple>/cores/<build>/lib<core>.so      Linux (x86_64-unknown-linux-gnu)
+<artifacts>/<triple>/cores/<build>/<core>.dll        Windows (x86_64-pc-windows-msvc), with the sidecars
+<artifacts>/<triple>/cores/<build>/lib<core>.dylib   macOS (aarch64-apple-darwin)
 ```
+
+`<build>` is the CPU target, or `<cpu>.f<8 hex>` for a program whose core builds with cargo features
+of its own (`features`, `default-features = false`; the hex is from the feature set's SHA-256), so
+two products building one core crate with different features keep apart.
 
 Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
 the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
-the launcher and helper once (in the target directory `base`), the core once per CPU target in its
-own target directory (named for the CPU), the per-CPU flags as `target.<triple>.rustflags`. It
-refuses a product whose cargo configuration sets `build.rustflags`, which cargo would ignore once
-target flags are set.
+each program's launcher and the helper once (in the target directory `base`), each program's core
+once per CPU target with its features, in its build's own target directory (`<build>` above), the
+per-CPU flags as `target.<triple>.rustflags`. It refuses a product whose cargo configuration sets
+`build.rustflags`, which cargo would ignore once target flags are set.
 
 ### Extra build flags
 
@@ -50,7 +54,7 @@ Each is split on whitespace, and its words follow the plan's flags in that build
 `{workspace}`, the workspace manifest's directory as an absolute path (cargo runs each
 dependency's `rustc` in that dependency's own directory, so a relative path would name a different
 file for each crate); `{triple}`, the target triple; and `{cpu}`, the step's target directory: the
-core's CPU, or `base`. A flag that chooses the CPU or its features (`target-cpu`, `target-feature`)
+core's build (its CPU, or `<cpu>.f<8 hex>` for a core with features of its own), or `base`. A flag that chooses the CPU or its features (`target-cpu`, `target-feature`)
 is refused: the plan sets them per core, and each core's requirement record must name exactly what
 it was built for. So is a quote (the flags travel as TOML strings) and any other `{placeholder}`.
 
@@ -104,16 +108,17 @@ workflow's `remap-paths: false`) turns remapping off.
 `seaworthy verify` runs every check and reports every finding together, so one run names everything
 wrong:
 
-1. **Presence and kind.** The launcher, the helper (when shipped) and one core per CPU target, on
-   every platform the outputs need; each a regular file of the platform's format: ELF64 x86-64
+1. **Presence and kind.** Each program's launcher and one core per CPU target, and the helper
+   (when shipped), on every platform the outputs need; each a regular file of the platform's format: ELF64 x86-64
    executables and shared libraries on Linux, PE32+ AMD64 executables and DLLs on Windows, thin
    arm64 Mach-O executables and dylibs on macOS.
 2. **Core records.** Each core's `.cpureq` parses, names this platform's triple and this
    directory's CPU, and lists only feature names `seaworthy-levels` knows.
-3. **The launcher's `.cpulist`** names the product's core and exactly the configured targets, in
+3. **Each launcher's `.cpulist`** names its program's core and exactly the configured targets, in
    order.
-4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build,
-   and the copies are byte-identical: a difference means an accidental per-target FIPS build.
+4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build
+   of every program, and the copies are byte-identical: a difference means an accidental
+   per-target FIPS build.
 5. **FIPS** (`defaults.fips`). Every Linux core passes the static-link checks of
    `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no second
    libcrypto, no other module version. On Windows and macOS every core loads the pinned module's
@@ -149,8 +154,8 @@ floor and the packages' dependency together.
 | | Linux | Windows | macOS |
 |---|---|---|---|
 | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` |
-| Launcher | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
-| Cores | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
+| Launchers (each program's) | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
+| Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
 | Sidecars | — | beside the cores, one copy | `Contents/Frameworks` |
 | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS` (pkg only) |
 | Data files | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>` |
@@ -197,10 +202,10 @@ under `<out>/<product>/`:
 nFPM 2.47.0 (`$NFPM`; `scripts/ci/install-nfpm.sh` installs the pinned release, verified by SHA-256)
 builds the deb, rpm and pacman packages from the Linux tree. A service's packages carry its systemd
 unit, a `sysusers.d` entry for its sandbox user, a vendor preset and, with the update helper, the
-helper's path and service units. A desktop product's carry its menu entry, hicolor icons and an
-optional `/usr/bin/<command>` link to the launcher, and, with the helper, the helper's unit and a
-polkit rule letting an active local session start exactly that unit
-([updates.md](updates.md)).
+helper's path and service units. A product with a `gui` program carries its menu entry (starting
+that program) and hicolor icons, and every product a `/usr/bin/<command>` link to each program put on
+`PATH`; a desktop product with the helper carries the helper's unit and a polkit rule letting an
+active local session start exactly that unit ([updates.md](updates.md)).
 
 One package-script lifecycle, spelled for each format:
 

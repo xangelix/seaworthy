@@ -4,8 +4,8 @@
 //! | | Linux | Windows | macOS |
 //! | --- | --- | --- | --- |
 //! | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` |
-//! | Launcher | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
-//! | Cores | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
+//! | Launchers (each program's) | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>` |
+//! | Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib` |
 //! | Sidecars | — | beside the cores, one copy | — |
 //! | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | — |
 //! | Data files (`[[files]]`) | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>` |
@@ -141,6 +141,8 @@ pub struct File {
     pub staged: PathBuf,
     /// What it is.
     pub role: Role,
+    /// The program a launcher or core is of: its executable's file stem.
+    pub program: Option<String>,
     /// Its Unix mode.
     pub mode: u32,
     /// SHA-256 of the staged (shipped) bytes, hex.
@@ -172,10 +174,23 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The launcher's install path.
+    /// The first program's launcher (the program a service runs).
     #[must_use]
     pub fn launcher(&self) -> Option<&File> {
         self.files.iter().find(|f| f.role == Role::Launcher)
+    }
+
+    /// Program `executable`'s launcher.
+    #[must_use]
+    pub fn launcher_of(&self, executable: &str) -> Option<&File> {
+        self.files
+            .iter()
+            .find(|f| f.role == Role::Launcher && f.program.as_deref() == Some(executable))
+    }
+
+    /// Every program's launcher, in `seaworthy.toml`'s order.
+    pub fn launchers(&self) -> impl Iterator<Item = &File> {
+        self.files.iter().filter(|f| f.role == Role::Launcher)
     }
 
     /// The helper's install path, when shipped.
@@ -211,6 +226,8 @@ struct ManifestFile<'a> {
     install_path: &'a str,
     path: String,
     role: &'a Role,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    program: Option<&'a str>,
     mode: u32,
     sha256: &'a str,
 }
@@ -300,7 +317,11 @@ pub fn layout(
             }
         };
         let (mut data_files, mut data_bytes) = (0_usize, 0_u64);
-        let mut place = |source: &Path, relative: &str, role: Role| -> Result<(), DistError> {
+        let mut place = |source: &Path,
+                         relative: &str,
+                         role: Role,
+                         program: Option<&str>|
+         -> Result<(), DistError> {
             let install_path = join_install(relative);
             if windows && PROGRAM_FILES.len() + install_path.len() > MAX_WINDOWS_PATH {
                 return Err(DistError::Layout(format!(
@@ -357,6 +378,7 @@ pub fn layout(
                     install_path,
                     staged,
                     role,
+                    program: None,
                     mode: 0o644,
                     sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
                 });
@@ -384,6 +406,7 @@ pub fn layout(
                 install_path,
                 staged,
                 role,
+                program: program.map(str::to_owned),
                 mode: 0o755,
                 sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
             });
@@ -396,19 +419,35 @@ pub fn layout(
                 stem.to_owned()
             }
         };
-        let launcher = if macos {
-            format!("Contents/MacOS/{}", product.executable)
-        } else {
-            exe(&product.executable)
-        };
-        place(&platform.inputs.launcher, &launcher, Role::Launcher)?;
-        for (cpu, core, _) in &platform.inputs.cores {
-            let relative = match os {
-                Os::Windows => format!("{}_{cpu}.dll", product.core),
-                Os::Linux => format!("lib/lib{}_{cpu}.so", product.core),
-                Os::Macos => format!("Contents/Frameworks/lib{}_{cpu}.dylib", product.core),
+        for program in &platform.inputs.programs {
+            let executable = &program.program.executable;
+            let launcher = if macos {
+                format!("Contents/MacOS/{executable}")
+            } else {
+                exe(executable)
             };
-            place(core, &relative, Role::Core { cpu: cpu.clone() })?;
+            place(
+                &program.launcher,
+                &launcher,
+                Role::Launcher,
+                Some(executable),
+            )?;
+        }
+        for program in &platform.inputs.programs {
+            let core = &program.program.core;
+            for (cpu, file, _) in &program.cores {
+                let relative = match os {
+                    Os::Windows => format!("{core}_{cpu}.dll"),
+                    Os::Linux => format!("lib/lib{core}_{cpu}.so"),
+                    Os::Macos => format!("Contents/Frameworks/lib{core}_{cpu}.dylib"),
+                };
+                place(
+                    file,
+                    &relative,
+                    Role::Core { cpu: cpu.clone() },
+                    Some(&program.program.executable),
+                )?;
+            }
         }
         for sidecar in &platform.sidecars {
             let name = sidecar
@@ -422,7 +461,7 @@ pub fn layout(
             } else {
                 name
             };
-            place(sidecar, &relative, Role::Sidecar)?;
+            place(sidecar, &relative, Role::Sidecar, None)?;
         }
         if let Some(helper) = &platform.inputs.helper {
             let relative = match os {
@@ -433,7 +472,7 @@ pub fn layout(
                     product.helper.as_deref().unwrap_or("update")
                 ),
             };
-            place(helper, &relative, Role::Helper)?;
+            place(helper, &relative, Role::Helper, None)?;
         }
         let platform_kind: Platform = os.platform();
         for extra in product
@@ -447,7 +486,7 @@ pub fn layout(
                 } else {
                     relative
                 };
-                place(&source, &relative, Role::Asset)?;
+                place(&source, &relative, Role::Asset, None)?;
             }
         }
         if macos && let Some(path) = product.macos.as_ref().and_then(|m| m.icon.as_ref()) {
@@ -475,6 +514,7 @@ pub fn layout(
                 install_path,
                 staged,
                 role: Role::Icon,
+                program: None,
                 mode: 0o644,
                 sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
             });
@@ -499,6 +539,7 @@ pub fn layout(
                         install_path: format!("{}\\{name}", config.defaults.vendor),
                         staged,
                         role: Role::Icon,
+                        program: None,
                         mode: 0o644,
                         sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
                     });
@@ -545,6 +586,7 @@ pub fn layout(
                         install_path,
                         staged,
                         role: Role::Icon,
+                        program: None,
                         mode: 0o644,
                         sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
                     });
@@ -597,6 +639,7 @@ pub(crate) fn write_manifest(layout: &Layout) -> Result<(), DistError> {
                     .to_string_lossy()
                     .replace('\\', "/"),
                 role: &f.role,
+                program: f.program.as_deref(),
                 mode: f.mode,
                 sha256: &f.sha256,
             })

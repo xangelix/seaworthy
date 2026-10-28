@@ -503,13 +503,23 @@ pub struct Product {
     /// The launcher crate's path, relative to the workspace root (the
     /// directory of the CI template's `manifest`, build-plan's
     /// `--manifest`), for the CI templates that build it; `seaworthy`
-    /// reads only built artifacts.
+    /// reads only built artifacts. The single-program form: with
+    /// `[[programs]]`, each program names its own.
     #[serde(default)]
     pub launcher: Option<PathBuf>,
-    /// The launcher executable's file stem (`AcmeForensicCollector`).
-    pub executable: String,
-    /// The core cdylib's crate name (`acme_collector_core`).
-    pub core: String,
+    /// The launcher executable's file stem (`AcmeForensicCollector`):
+    /// required in the single-program form, refused with `[[programs]]`.
+    #[serde(default)]
+    pub executable: Option<String>,
+    /// The core cdylib's crate name (`acme_collector_core`): required in
+    /// the single-program form, refused with `[[programs]]`.
+    #[serde(default)]
+    pub core: Option<String>,
+    /// `[[product.<id>.programs]]`: the product's programs, each its own
+    /// launcher and per-CPU cores ([`Product::programs`]). Empty: the
+    /// single-program form (`executable`, `core`, `launcher`).
+    #[serde(default)]
+    pub programs: Vec<ProgramEntry>,
     /// The update helper executable's file stem. Required unless
     /// `updates.default = "off"`.
     #[serde(default)]
@@ -561,6 +571,152 @@ pub struct Product {
     /// with a macOS output.
     #[serde(default)]
     pub macos: Option<Macos>,
+}
+
+/// What a program is to the people who run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    /// A command-line program, put on `PATH` as its `command`
+    /// (`/usr/bin/<command>` in the Linux packages).
+    Cli,
+    /// A graphical program: the product's menu entry and shortcuts
+    /// (`[product.<id>.desktop]`) start it, and on macOS it is the app
+    /// bundle's executable. A product has at most one.
+    Gui,
+}
+
+/// `[[product.<id>.programs]]`: one program of a product, as written.
+///
+/// ```toml
+/// [[product.trove.programs]]
+/// executable = "trove"
+/// launcher = "crates/trove/cli"
+/// core = "trove_cli_core"
+/// role = "cli"
+/// features = ["fips"]
+/// default-features = false
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ProgramEntry {
+    /// The launcher executable's file stem.
+    pub executable: String,
+    /// The launcher crate's path, relative to the workspace root (as the
+    /// single-program form's `launcher`).
+    #[serde(default)]
+    pub launcher: Option<PathBuf>,
+    /// The core cdylib's crate name.
+    pub core: String,
+    /// `cli` or `gui`.
+    pub role: Role,
+    /// The name it is put on `PATH` as (`[a-z0-9][a-z0-9._+-]*`): a
+    /// `cli` program's defaults to its executable, which must then be such
+    /// a name; a `gui` program is put on `PATH` only when it names one.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// The core crate's cargo features this program's cores build with
+    /// (`--features`), each core build in a target directory of its own
+    /// ([`Program::build_dir`]).
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Whether the core crate's default features stay on (default `true`;
+    /// `false` builds with `--no-default-features`).
+    #[serde(default = "default_true")]
+    pub default_features: bool,
+}
+
+/// One program of a product as every step sees it ([`Product::programs`]):
+/// a `[[programs]]` entry, or the single-program form's keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    /// The launcher executable's file stem.
+    pub executable: String,
+    /// The launcher crate's path from the workspace root, when given.
+    pub launcher: Option<PathBuf>,
+    /// The core cdylib's crate name.
+    pub core: String,
+    /// `cli` or `gui`.
+    pub role: Role,
+    /// The Linux packages' `/usr/bin/<command>` link to the launcher.
+    pub linux_command: Option<String>,
+    /// The macOS pkg's `/usr/local/bin/<command>` link to the launcher.
+    pub macos_command: Option<String>,
+    /// The core's cargo features, sorted.
+    pub features: Vec<String>,
+    /// Whether the core crate's default features stay on.
+    pub default_features: bool,
+    /// macOS: in the product's app bundle (a `gui` program, or the
+    /// single-program form's service or desktop app), else in its tool
+    /// directory.
+    pub bundled: bool,
+}
+
+impl Program {
+    /// Whether the core builds with its crate's default features alone.
+    #[must_use]
+    pub fn default_build(&self) -> bool {
+        self.default_features && self.features.is_empty()
+    }
+
+    /// The core build's name for `cpu`: its cargo target directory, and
+    /// its directory under `<triple>/cores/` in the artifact directory.
+    /// `<cpu>` for a core built with its crate's default features (every
+    /// single-program product's); `<cpu>.f<8 hex>` otherwise, the hex
+    /// from the feature set's SHA-256, so a core crate built with other
+    /// features never shares a target directory or an artifact path with
+    /// another build of it, and two products building it alike build it
+    /// once.
+    #[must_use]
+    pub fn build_dir(&self, cpu: &str) -> String {
+        if self.default_build() {
+            return cpu.to_owned();
+        }
+        let mut text = format!("seaworthy core features\0{}", self.default_features);
+        for feature in &self.features {
+            text.push('\0');
+            text.push_str(feature);
+        }
+        let digest = seaworthy_crypto::digest::sha256(text.as_bytes());
+        format!(
+            "{cpu}.f{}",
+            hex::encode(digest.get(..4).unwrap_or_default())
+        )
+    }
+
+    /// The cargo arguments choosing the core's features:
+    /// `--no-default-features` and `--features <a,b>`, as set.
+    #[must_use]
+    pub fn feature_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if !self.default_features {
+            args.push("--no-default-features".to_owned());
+        }
+        if !self.features.is_empty() {
+            args.push("--features".to_owned());
+            args.push(self.features.join(","));
+        }
+        args
+    }
+}
+
+/// A cargo feature as `--features` takes it: a name of `[A-Za-z0-9_+.-]`
+/// starting with a letter, digit or `_`, or `<package>/<name>`; at most 64
+/// bytes.
+fn is_feature(text: &str) -> bool {
+    let name = |part: &str| {
+        part.bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_+.-".contains(&b))
+    };
+    text.len() <= 64
+        && match text.split_once('/') {
+            Some((package, feature)) => name(package) && name(feature),
+            None => name(text),
+        }
 }
 
 /// `[product.<id>.macos]`: what the app bundle says about itself.
@@ -1752,8 +1908,10 @@ impl Config {
                     claims.push(("service.state-directory", state.clone()));
                 }
             }
-            if let Some(command) = &p.linux.command {
-                claims.push(("linux.command", command.clone()));
+            for program in p.programs() {
+                if let Some(command) = program.linux_command {
+                    claims.push(("linux.command", command));
+                }
             }
             if let Some(desktop) = &p.desktop {
                 claims.push((
@@ -1803,23 +1961,7 @@ impl Config {
                 &format!("at most {MAX_DISPLAY_NAME} and {MAX_DESCRIPTION} characters"),
             ));
         }
-        if !is_windows_name(&p.executable) {
-            return Err(at(
-                "executable",
-                "a file stem ([A-Za-z0-9][A-Za-z0-9._-]*), not a Windows device name",
-            ));
-        }
-        let core_ok = p
-            .core
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphabetic())
-            && p.core
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
-        if !core_ok {
-            return Err(at("core", "a crate name ([A-Za-z][A-Za-z0-9_]*)"));
-        }
+        self.validate_programs(id, p)?;
         if p.helper.is_some() && !self.signs_manifests() {
             return Err(at(
                 "helper",
@@ -1834,11 +1976,14 @@ impl Config {
                 ));
             }
             (Some(helper), _)
-                if !is_windows_name(helper) || helper.eq_ignore_ascii_case(&p.executable) =>
+                if !is_windows_name(helper)
+                    || p.programs()
+                        .iter()
+                        .any(|program| helper.eq_ignore_ascii_case(&program.executable)) =>
             {
                 return Err(at(
                     "helper",
-                    "a file stem, not a Windows device name, different from the executable (case-insensitively: NTFS)",
+                    "a file stem, not a Windows device name, different from every program's executable (case-insensitively: NTFS)",
                 ));
             }
             _ => {}
@@ -1995,6 +2140,12 @@ impl Config {
             return Err(at(
                 "outputs",
                 "pkg holds a macOS service (kind = \"service\"): its LaunchDaemon; a desktop app ships as a dmg",
+            ));
+        }
+        if macos_output && p.programs().iter().any(|program| !program.bundled) {
+            return Err(at(
+                "outputs",
+                "the macOS outputs hold the app bundle, which holds the gui program alone: a cli program has no place there",
             ));
         }
         // macOS's identity is its own: a pkg's LaunchDaemon runs as root
@@ -2170,6 +2321,156 @@ impl Config {
         self.validate_desktop_and_files(id, p)
     }
 
+    /// The product's programs: the single-program form's keys or
+    /// `[[programs]]` (never both), each executable a file stem, each core
+    /// a crate name, none shared within the product (case-insensitively:
+    /// NTFS, and macOS's default file system), at most one `gui` program,
+    /// each command a command name, each feature a cargo feature.
+    fn validate_programs(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        let at = |key: &str, why: &str| DistError::Config(format!("product.{id}.{key}: {why}"));
+        if p.programs.is_empty() {
+            if p.executable.is_none() {
+                return Err(at(
+                    "executable",
+                    "required: the launcher's file stem (or list the product's programs as [[product.<id>.programs]])",
+                ));
+            }
+            if p.core.is_none() {
+                return Err(at(
+                    "core",
+                    "required: the core cdylib's crate name (or list the product's programs as [[product.<id>.programs]])",
+                ));
+            }
+        } else {
+            for (key, set) in [
+                ("executable", p.executable.is_some()),
+                ("core", p.core.is_some()),
+                ("launcher", p.launcher.is_some()),
+                ("linux.command", p.linux.command.is_some()),
+            ] {
+                if set {
+                    return Err(at(
+                        key,
+                        "the single-program form's key: with [[programs]], each program names its own (executable, core, launcher, command)",
+                    ));
+                }
+            }
+        }
+        let programs = p.programs();
+        let mut gui = None;
+        for (n, program) in programs.iter().enumerate() {
+            let key = |field: &str| {
+                if p.programs.is_empty() {
+                    field.to_owned()
+                } else {
+                    format!("programs[{n}].{field}")
+                }
+            };
+            if !is_windows_name(&program.executable) {
+                return Err(at(
+                    &key("executable"),
+                    "a file stem ([A-Za-z0-9][A-Za-z0-9._-]*), not a Windows device name",
+                ));
+            }
+            let core_ok = program
+                .core
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+                && program
+                    .core
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !core_ok {
+                return Err(at(&key("core"), "a crate name ([A-Za-z][A-Za-z0-9_]*)"));
+            }
+            let earlier = programs.get(..n).unwrap_or_default();
+            if earlier
+                .iter()
+                .any(|e| e.executable.eq_ignore_ascii_case(&program.executable))
+            {
+                return Err(at(
+                    &key("executable"),
+                    &format!(
+                        "{:?} is another program's executable too (case-insensitively: NTFS)",
+                        program.executable
+                    ),
+                ));
+            }
+            // The launcher finds its cores as `<core>_<cpu>` beside the
+            // others: two programs of one core would load each other's.
+            if earlier
+                .iter()
+                .any(|e| e.core.eq_ignore_ascii_case(&program.core))
+            {
+                return Err(at(
+                    &key("core"),
+                    &format!(
+                        "{:?} is another program's core too: the cores of a product's programs install side by side, named <core>_<cpu>",
+                        program.core
+                    ),
+                ));
+            }
+            if program.role == Role::Gui {
+                if let Some(first) = gui {
+                    return Err(at(
+                        &key("role"),
+                        &format!(
+                            "programs[{first}] is the product's gui program already: the menu entry, the shortcuts and the macOS app bundle are one program's (a second app is a second product)"
+                        ),
+                    ));
+                }
+                gui = Some(n);
+            }
+            if !p.programs.is_empty()
+                && let Some(command) = &program.linux_command
+            {
+                if !is_command_name(command) {
+                    let why = if p.programs.get(n).is_some_and(|e| e.command.is_none()) {
+                        format!(
+                            "a cli program is put on PATH as its executable, and {:?} isn't a command name ([a-z0-9][a-z0-9._+-]*, at most 64 bytes): set command",
+                            program.executable
+                        )
+                    } else {
+                        "a command name ([a-z0-9][a-z0-9._+-]*, at most 64 bytes)".to_owned()
+                    };
+                    return Err(at(&key("command"), &why));
+                }
+                if earlier
+                    .iter()
+                    .any(|e| e.linux_command.as_deref() == Some(command))
+                {
+                    return Err(at(
+                        &key("command"),
+                        &format!("{command:?} is another program's command too"),
+                    ));
+                }
+            }
+            for (i, feature) in program.features.iter().enumerate() {
+                if !is_feature(feature) {
+                    return Err(at(
+                        &key("features"),
+                        &format!(
+                            "{feature:?} isn't a cargo feature ([A-Za-z0-9_+.-], or <package>/<feature>; at most 64 bytes)"
+                        ),
+                    ));
+                }
+                if program
+                    .features
+                    .get(..i)
+                    .unwrap_or_default()
+                    .contains(feature)
+                {
+                    return Err(at(
+                        &key("features"),
+                        &format!("{feature:?} is listed twice"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `[product.<id>.desktop]`, `[[product.<id>.files]]` and
     /// `linux.command`. The icons' and files' contents are checked
     /// when `layout` reads them.
@@ -2227,10 +2528,10 @@ impl Config {
             }
         }
         if let Some(desktop) = &p.desktop {
-            if p.kind != Kind::Desktop {
+            if p.gui_program().is_none() {
                 return Err(at(
                     "desktop",
-                    "only a desktop app (kind = \"desktop\") has a menu entry, icons and shortcuts",
+                    "only a desktop app (kind = \"desktop\", or a [[programs]] entry with role = \"gui\") has a menu entry, icons and shortcuts",
                 ));
             }
             if let Some(app_id) = &desktop.app_id
@@ -2531,9 +2832,81 @@ impl Product {
             self.display_name
                 .split_whitespace()
                 .last()
-                .unwrap_or(&self.executable)
-                .to_owned()
+                .map(str::to_owned)
+                .or_else(|| self.programs().first().map(|p| p.executable.clone()))
+                .unwrap_or_default()
         })
+    }
+
+    /// The product's programs, in `seaworthy.toml`'s order: each
+    /// `[[programs]]` entry, or the single-program form's one program.
+    /// That one is a `gui` program for `kind = "desktop"` and a `cli`
+    /// program otherwise; its PATH link is `linux.command`, on Linux
+    /// alone, as before; on macOS it stays in the app bundle, but for
+    /// `kind = "tool"`, which has no bundle. A `[[programs]]` `cli`
+    /// program's command defaults to its executable, and a program's
+    /// command links on Linux and in the macOS pkg alike.
+    #[must_use]
+    pub fn programs(&self) -> Vec<Program> {
+        if self.programs.is_empty() {
+            return vec![Program {
+                executable: self.executable.clone().unwrap_or_default(),
+                launcher: self.launcher.clone(),
+                core: self.core.clone().unwrap_or_default(),
+                role: if self.kind == Kind::Desktop {
+                    Role::Gui
+                } else {
+                    Role::Cli
+                },
+                linux_command: self.linux.command.clone(),
+                macos_command: None,
+                features: Vec::new(),
+                default_features: true,
+                bundled: self.kind != Kind::Tool,
+            }];
+        }
+        self.programs
+            .iter()
+            .map(|entry| {
+                let command = entry
+                    .command
+                    .clone()
+                    .or_else(|| (entry.role == Role::Cli).then(|| entry.executable.clone()));
+                let mut features = entry.features.clone();
+                features.sort();
+                Program {
+                    executable: entry.executable.clone(),
+                    launcher: entry.launcher.clone(),
+                    core: entry.core.clone(),
+                    role: entry.role,
+                    linux_command: command.clone(),
+                    macos_command: command,
+                    features,
+                    default_features: entry.default_features,
+                    bundled: entry.role == Role::Gui,
+                }
+            })
+            .collect()
+    }
+
+    /// The program the service runs: the first.
+    #[must_use]
+    pub fn service_program(&self) -> Option<Program> {
+        self.programs().into_iter().next()
+    }
+
+    /// The `gui` program, which the menu entry, the shortcuts and the macOS
+    /// app bundle start.
+    #[must_use]
+    pub fn gui_program(&self) -> Option<Program> {
+        self.programs().into_iter().find(|p| p.role == Role::Gui)
+    }
+
+    /// The program the macOS app bundle holds, if any: the `gui` program,
+    /// or the single-program form's service or desktop app.
+    #[must_use]
+    pub fn bundled_program(&self) -> Option<Program> {
+        self.programs().into_iter().find(|p| p.bundled)
     }
 
     /// Whether the update helper ships with this product.

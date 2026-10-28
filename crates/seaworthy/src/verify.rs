@@ -76,7 +76,7 @@ use object::{
 };
 
 use crate::config::{Config, Product, is_windows_reserved, parse_macos_version};
-use crate::inputs::{Os, PlatformInputs, expected, glob_matches};
+use crate::inputs::{Os, PlatformInputs, ProgramInputs, expected, glob_matches};
 
 /// Where a macOS binary's linked libraries may come from: the system's
 /// own (`/usr/lib`, `/System/Library`). A library outside them — a
@@ -557,40 +557,43 @@ impl Run {
         product: &Product,
         inputs: &PlatformInputs,
     ) -> Vec<PathBuf> {
-        let triple = inputs.triple;
         let os = inputs.os();
-        let windows = os == Os::Windows;
         let targets = if os == Os::Macos {
             &config.defaults.macos_targets
         } else {
             &config.defaults.targets
         };
 
-        // The launcher and its CPU list.
-        if let Some(bytes) = self.read(&inputs.launcher)
-            && self.binary(
-                &inputs.launcher,
+        // Each program's launcher and its CPU list.
+        for program in &inputs.programs {
+            let launcher = &program.launcher;
+            let Some(bytes) = self.read(launcher) else {
+                continue;
+            };
+            if !self.binary(
+                launcher,
                 &bytes,
                 os,
                 BinaryKind::Executable,
                 config,
                 product,
-            )
-        {
+            ) {
+                continue;
+            }
             match seaworthy_levels::cpu_list_from_bytes(&bytes) {
                 Ok(list) => {
-                    if list.core != product.core {
+                    if list.core != program.program.core {
                         self.finding(
-                            &inputs.launcher,
+                            launcher,
                             format!(
                                 "its .cpulist names core {:?}, seaworthy.toml says {:?}",
-                                list.core, product.core
+                                list.core, program.program.core
                             ),
                         );
                     }
                     if &list.cpus != targets {
                         self.finding(
-                            &inputs.launcher,
+                            launcher,
                             format!(
                                 "its .cpulist lists {:?}, seaworthy.toml's {} are {:?} (same CPUs, same order)",
                                 list.cpus,
@@ -600,7 +603,7 @@ impl Run {
                         );
                     }
                 }
-                Err(e) => self.finding(&inputs.launcher, format!("not a seaworthy launcher: {e}")),
+                Err(e) => self.finding(launcher, format!("not a seaworthy launcher: {e}")),
             }
         }
         if let Some(helper) = &inputs.helper
@@ -609,12 +612,36 @@ impl Run {
             self.binary(helper, &bytes, os, BinaryKind::Executable, config, product);
         }
 
-        // The cores and their records.
-        let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
+        // Each program's cores and their records.
         // Windows FIPS: the module's DLLs the cores import, which the
         // sidecars must ship.
         let mut module_imports: BTreeSet<String> = BTreeSet::new();
-        for (cpu, core, _) in &inputs.cores {
+        for program in &inputs.programs {
+            self.cores(config, product, inputs, program, &mut module_imports);
+        }
+
+        if os == Os::Linux {
+            Vec::new()
+        } else {
+            self.sidecars(config, product, inputs, &module_imports)
+        }
+    }
+
+    /// One program's cores: each one's format, runtime dependencies,
+    /// record and FIPS module, and which can never be chosen.
+    fn cores(
+        &mut self,
+        config: &Config,
+        product: &Product,
+        inputs: &PlatformInputs,
+        program: &ProgramInputs,
+        module_imports: &mut BTreeSet<String>,
+    ) {
+        let triple = inputs.triple;
+        let os = inputs.os();
+        let windows = os == Os::Windows;
+        let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
+        for (cpu, core, _) in &program.cores {
             let Some(bytes) = self.read(core) else {
                 continue;
             };
@@ -716,16 +743,16 @@ impl Run {
                 .iter()
                 .find(|(_, f)| f.is_subset(later_features))
             {
+                // A product of several programs names whose core it is.
+                let whose = if inputs.programs.len() > 1 {
+                    format!(" ({})", program.program.core)
+                } else {
+                    String::new()
+                };
                 self.warnings.push(format!(
-                    "{triple}: the {later} core can never be chosen — every CPU that runs it also runs the {earlier} core, which comes first in targets"
+                    "{triple}: the {later} core can never be chosen — every CPU that runs it also runs the {earlier} core, which comes first in targets{whose}"
                 ));
             }
-        }
-
-        if os == Os::Linux {
-            Vec::new()
-        } else {
-            self.sidecars(config, product, inputs, &module_imports)
         }
     }
 
@@ -747,7 +774,7 @@ impl Run {
         let mut claimed: BTreeMap<String, &str> = BTreeMap::new();
         for glob in product.sidecars.for_os(os) {
             let mut first: Option<(PathBuf, String)> = None;
-            for (cpu, _, dir) in &inputs.cores {
+            for (cpu, _, dir) in inputs.cores() {
                 let matches: Vec<PathBuf> = std::fs::read_dir(dir)
                     .map(|entries| {
                         entries

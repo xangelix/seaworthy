@@ -297,7 +297,11 @@ pub fn launch_daemons(
     use seaworthy_service::render::launchd;
     let names = pkg_names(config, id, product)?;
     let refused = |e: seaworthy_service::ServiceError| DistError::Config(e.to_string());
-    let program = format!("{}/Contents/MacOS/{}", names.bundle, product.executable);
+    let executable = product
+        .service_program()
+        .map(|p| p.executable)
+        .unwrap_or_default();
+    let program = format!("{}/Contents/MacOS/{executable}", names.bundle);
     let spec = config.macos_service_spec(id, product, Path::new(&program))?;
     let log = |label: &str| mac_join(&names.logs, &format!("{label}.log"));
     let mut daemons = vec![(
@@ -784,7 +788,13 @@ pub fn info_plist(
     let mut entries: Vec<(&str, String)> = vec![
         ("CFBundleDevelopmentRegion", "en".to_owned()),
         ("CFBundleDisplayName", product.display_name.clone()),
-        ("CFBundleExecutable", product.executable.clone()),
+        (
+            "CFBundleExecutable",
+            product
+                .bundled_program()
+                .map(|p| p.executable)
+                .unwrap_or_default(),
+        ),
     ];
     if icon {
         entries.push(("CFBundleIconFile", ICON_FILE.to_owned()));

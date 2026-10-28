@@ -5,12 +5,16 @@
 //! triple:
 //!
 //! ```text
-//! <artifacts>/<triple>/launcher/<executable>[.exe]   the launcher (the baseline build)
+//! <artifacts>/<triple>/launcher/<executable>[.exe]   each program's launcher (the baseline build)
 //! <artifacts>/<triple>/helper/<helper>[.exe]         the update helper, when shipped
-//! <artifacts>/<triple>/cores/<cpu>/<core file>       one core per CPU target:
+//! <artifacts>/<triple>/cores/<build>/<core file>     each program's core, one per CPU target:
 //!                                                    lib<core>.so / <core>.dll / lib<core>.dylib
-//! <artifacts>/<triple>/cores/<cpu>/<sidecar>         Windows, macOS: that build's FIPS module DLL(s) / dylib
+//! <artifacts>/<triple>/cores/<build>/<sidecar>       Windows, macOS: the FIPS module DLL(s) / dylib
 //! ```
+//!
+//! `<build>` is the core build's name ([`crate::config::Program::build_dir`]):
+//! the CPU, or `<cpu>.f<8 hex>` for a program whose core builds with its
+//! own cargo features.
 //!
 //! The triples: [`LINUX`], [`WINDOWS`] and, for macOS outputs, [`MACOS`]
 //! (Apple Silicon, with `defaults.macos-targets`' CPUs).
@@ -21,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, Output, Product};
+use crate::config::{Config, Output, Product, Program};
 
 /// The Linux target triple.
 pub const LINUX: &str = "x86_64-unknown-linux-gnu";
@@ -71,17 +75,26 @@ impl Os {
     }
 }
 
+/// One program's expected artifacts on one platform.
+#[derive(Debug, Clone)]
+pub struct ProgramInputs {
+    /// The program.
+    pub program: Program,
+    /// Its launcher.
+    pub launcher: PathBuf,
+    /// `(cpu, core file, the build's directory)`, in preference order.
+    pub cores: Vec<(String, PathBuf, PathBuf)>,
+}
+
 /// One platform's expected artifacts for one product.
 #[derive(Debug, Clone)]
 pub struct PlatformInputs {
     /// The target triple.
     pub triple: &'static str,
-    /// The launcher.
-    pub launcher: PathBuf,
+    /// Each program's launcher and cores, in `seaworthy.toml`'s order.
+    pub programs: Vec<ProgramInputs>,
     /// The update helper, when shipped.
     pub helper: Option<PathBuf>,
-    /// `(cpu, core file, the build's directory)`, in preference order.
-    pub cores: Vec<(String, PathBuf, PathBuf)>,
 }
 
 impl PlatformInputs {
@@ -95,6 +108,12 @@ impl PlatformInputs {
     #[must_use]
     pub fn os(&self) -> Os {
         Os::of_triple(self.triple).unwrap_or(Os::Linux)
+    }
+
+    /// Every program's cores, `(cpu, core file, the build's directory)`,
+    /// program by program.
+    pub fn cores(&self) -> impl Iterator<Item = &(String, PathBuf, PathBuf)> {
+        self.programs.iter().flat_map(|p| p.cores.iter())
     }
 }
 
@@ -120,19 +139,32 @@ pub fn expected(config: &Config, product: &Product, artifacts: &Path) -> Vec<Pla
                 stem.to_owned()
             }
         };
-        let core_file = match os {
-            Os::Windows => format!("{}.dll", product.core),
-            Os::Linux => format!("lib{}.so", product.core),
-            Os::Macos => format!("lib{}.dylib", product.core),
-        };
         let cpus = if os == Os::Macos {
             &config.defaults.macos_targets
         } else {
             &config.defaults.targets
         };
+        let programs = product
+            .programs()
+            .into_iter()
+            .map(|program| {
+                let core_file = core_file(os, &program.core);
+                ProgramInputs {
+                    launcher: root.join("launcher").join(exe(&program.executable)),
+                    cores: cpus
+                        .iter()
+                        .map(|cpu| {
+                            let dir = root.join("cores").join(program.build_dir(cpu));
+                            (cpu.clone(), dir.join(&core_file), dir)
+                        })
+                        .collect(),
+                    program,
+                }
+            })
+            .collect();
         platforms.push(PlatformInputs {
             triple,
-            launcher: root.join("launcher").join(exe(&product.executable)),
+            programs,
             helper: product
                 .ships_helper_on(os)
                 .then(|| {
@@ -142,16 +174,21 @@ pub fn expected(config: &Config, product: &Product, artifacts: &Path) -> Vec<Pla
                         .map(|h| root.join("helper").join(exe(h)))
                 })
                 .flatten(),
-            cores: cpus
-                .iter()
-                .map(|cpu| {
-                    let dir = root.join("cores").join(cpu);
-                    (cpu.clone(), dir.join(&core_file), dir)
-                })
-                .collect(),
         });
     }
     platforms
+}
+
+/// A core's file name as cargo builds it: `lib<core>.so`, `<core>.dll` or
+/// `lib<core>.dylib` (`core` is a crate name with no `-`, so the library's
+/// name is the crate's as is).
+#[must_use]
+pub fn core_file(os: Os, core: &str) -> String {
+    match os {
+        Os::Windows => format!("{core}.dll"),
+        Os::Linux => format!("lib{core}.so"),
+        Os::Macos => format!("lib{core}.dylib"),
+    }
 }
 
 /// Matches a file name against a glob whose only wildcard is `*`.

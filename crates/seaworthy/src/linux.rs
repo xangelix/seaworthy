@@ -32,8 +32,10 @@
 //!
 //! A desktop product with `[product.<id>.desktop]` also carries its
 //! menu entry, `/usr/share/applications/<app-id>.desktop` ([`desktop_entry`],
-//! Desktop Entry Specification 1.5), and its hicolor icons; `linux.command`
-//! adds `/usr/bin/<command>`, a link to the launcher. Those directories
+//! Desktop Entry Specification 1.5, starting the `gui` program), and its
+//! hicolor icons; each program's command (`linux.command`, or a
+//! `[[programs]]` entry's) adds `/usr/bin/<command>`, a link to its
+//! launcher. Those directories
 //! belong to the system (the icon theme, the menu), so the package owns
 //! only its files there; the distributions' triggers refresh the menu and
 //! the icon cache.
@@ -91,7 +93,8 @@ pub struct LinuxPackage {
     pub directories: Vec<String>,
     /// Every file, the tree first.
     pub files: Vec<PackagedFile>,
-    /// Its symbolic links (`/usr/bin/<command>`).
+    /// Its symbolic links (`/usr/bin/<command>`, one per program put on
+    /// `PATH`).
     pub links: Vec<PackagedLink>,
     /// What the package scripts manage.
     pub units: Units,
@@ -145,27 +148,38 @@ pub fn linux_package(
         mode: f.mode,
         source: Source::Staged(f.staged.clone()),
     }));
-    let launcher_path = || {
+    let launcher_path = |executable: &str| {
         layout
-            .launcher()
+            .launcher_of(executable)
             .map(|l| l.install_path.clone())
-            .ok_or_else(|| DistError::Layout(format!("product {id}'s Linux tree has no launcher")))
+            .ok_or_else(|| {
+                DistError::Layout(format!(
+                    "product {id}'s Linux tree has no launcher {executable}"
+                ))
+            })
     };
-    if let Some(desktop) = &product.desktop {
+    if let (Some(desktop), Some(gui)) = (&product.desktop, product.gui_program()) {
         let app_id = desktop.app_id(config, id);
         let icon = (!layout.desktop_files.is_empty()).then_some(app_id.as_str());
         files.push(PackagedFile {
             dst: format!("/usr/share/applications/{app_id}.desktop"),
             mode: 0o644,
-            source: Source::Generated(desktop_entry(product, desktop, &launcher_path()?, icon)),
+            source: Source::Generated(desktop_entry(
+                product,
+                desktop,
+                &launcher_path(&gui.executable)?,
+                icon,
+            )),
         });
     }
     let mut links = Vec::new();
-    if let Some(command) = &product.linux.command {
-        links.push(PackagedLink {
-            dst: format!("/usr/bin/{command}"),
-            target: launcher_path()?,
-        });
+    for program in product.programs() {
+        if let Some(command) = &program.linux_command {
+            links.push(PackagedLink {
+                dst: format!("/usr/bin/{command}"),
+                target: launcher_path(&program.executable)?,
+            });
+        }
     }
     let mut units = Units::default();
     if product.service.is_some() {

@@ -1421,6 +1421,8 @@ fn prepare_windows(
 ) -> Result<(), DistError> {
     use crate::layout::Role;
     let display = &product.display_name;
+    // A product of several programs names each one's binaries by it.
+    let several = product.programs().len() > 1;
     for file in &mut layout.files {
         // Data files are shipped as read: never stamped or signed (layout
         // refused any carrying code).
@@ -1432,18 +1434,24 @@ fn prepare_windows(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let description = match &file.role {
-            Role::Launcher => Some(display.clone()),
-            Role::Core { cpu } => Some(format!("{display} ({cpu})")),
-            Role::Helper => Some(format!("{display} updater")),
+        let program = file.program.as_deref().filter(|_| several);
+        let description = match (&file.role, program) {
+            (Role::Launcher, None) => Some(display.clone()),
+            (Role::Launcher, Some(program)) => Some(format!("{display} ({program})")),
+            (Role::Core { cpu }, None) => Some(format!("{display} ({cpu})")),
+            (Role::Core { cpu }, Some(program)) => Some(format!("{display} ({program}, {cpu})")),
+            (Role::Helper, _) => Some(format!("{display} updater")),
             // The FIPS DLL pair is the module's own: never stamped (it is
             // Authenticode-signed like every binary).
-            Role::Sidecar
-            | Role::Asset
-            | Role::Icon
-            | Role::BundleInfo
-            | Role::CodeSignature
-            | Role::Uninstaller => None,
+            (
+                Role::Sidecar
+                | Role::Asset
+                | Role::Icon
+                | Role::BundleInfo
+                | Role::CodeSignature
+                | Role::Uninstaller,
+                _,
+            ) => None,
         };
         if let Some(description) = description {
             let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
@@ -1549,6 +1557,7 @@ fn prepare_macos(
         install_path: format!("{}/Contents/Info.plist", layout.install_root),
         staged: plist,
         role: Role::BundleInfo,
+        program: None,
         mode: 0o644,
         sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
     });
@@ -1572,6 +1581,7 @@ fn prepare_macos(
             install_path: format!("{}/{}", layout.install_root, crate::macos::UNINSTALLER),
             staged,
             role: Role::Uninstaller,
+            program: None,
             mode: 0o755,
             sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
         });
@@ -1594,6 +1604,7 @@ fn prepare_macos(
         ),
         staged: seal,
         role: Role::CodeSignature,
+        program: None,
         mode: 0o644,
         sha256: String::new(),
     });

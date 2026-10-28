@@ -148,18 +148,62 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 |---|---|---|
 | `display-name` | yes | The name shown to people (menus, Programs and Features, the shortcuts, the macOS bundle). |
 | `description` | yes | One-line package description. |
-| `executable` | yes | The launcher executable's file stem (`AcmeAgent`). |
-| `core` | yes | The core cdylib's crate name (`acme_agent_core`). |
+| `executable` | without `programs` | The launcher executable's file stem (`AcmeAgent`). |
+| `core` | without `programs` | The core cdylib's crate name (`acme_agent_core`). |
+| `programs` | no | `[[product.<id>.programs]]`: several programs, each its own launcher and cores ([below](#productidprograms)). Without it, `executable`, `core`, `launcher` and `linux.command` describe the product's one program. |
 | `outputs` | yes | The deliverables, each once: `msi`, `zip`, `deb`, `rpm`, `pacman`, `tar`, `dmg` (a desktop app), `pkg` (a macOS service). |
 | `kind` | no | `service` (the default; needs `[service]`), `desktop` (run by the logged-in user; its helper is started through the interactive-users grant or a polkit rule) or `tool` (no service, no helper start right). |
 | `launcher` | no | The launcher crate's path from the workspace root (the directory of `build-plan --manifest`), for builds that follow the build plan. |
-| `helper` | unless `updates.default = "off"` | The update helper executable's file stem, different from `executable`. A helper needs `release-signatures` and `release-keys`. |
+| `helper` | unless `updates.default = "off"` | The update helper executable's file stem, different from every program's executable. A helper needs `release-signatures` and `release-keys`. One per product, whatever its programs. |
 | `helper-crate` | no | The helper's crate path from the workspace root: the build plan builds it from its own manifest, so only its own features are enabled (without it the helper is built `--bin <helper>` from the workspace root, which unifies every member's features). |
 | `windows-directory` | with `msi` | The Windows install directory under the vendor's (default: the display name's last word). It also names the state directory, the policy registry key and the Group Policy namespace, so it must never follow a display-name change. |
 | `upgrade-code` | no | The MSI's UpgradeCode, `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, which ties every release together. Default: derived from the vendor and the id; set it to keep an existing code before renaming either, and to the code a product's earlier MSIs carry when another tool built them ([packaging.md](packaging.md#migrating-an-existing-product)). `seaworthy check` notes an `msi` product without one. |
 | `updates.default` | no | The install-time update policy: `auto` (the default), `notify` or `off`. |
 | `sidecars.windows` | no | File-name globs (`*` only) matched in each Windows core build: each matches exactly one file, identical in every build, shipped beside the cores (the FIPS module's DLL). |
 | `sidecars.macos` | with `fips` and a macOS output | The same for macOS (`libaws_lc_fips_*_crypto.dylib`), shipped in `Contents/Frameworks`. |
+
+`[[product.<id>.programs]]`: a product of several programs (a command-line tool and an app, say),
+in place of `executable`, `core`, `launcher` and `linux.command`, which can't be set beside it:
+
+```toml
+[[product.trove.programs]]
+executable = "trove"               # /usr/bin/trove
+launcher = "crates/trove/cli"
+core = "trove_cli_core"
+role = "cli"
+features = ["fips"]
+default-features = false
+
+[[product.trove.programs]]
+executable = "TroveApp"            # the menu entry, the shortcuts, the macOS app bundle
+launcher = "crates/trove/app"
+core = "trove_app_core"
+role = "gui"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `executable` | required | The launcher's file stem. No two programs of a product share one (case-insensitively), nor with the helper. |
+| `core` | required | The core cdylib's crate name. No two programs of a product share one: their cores install side by side as `<core>_<cpu>`. |
+| `launcher` | — | The launcher crate's path from the workspace root, as above. |
+| `role` | required | `cli`: put on `PATH` as `command` (`/usr/bin/<command>` in the Linux packages; Windows' `PATH` is not set yet). `gui`: the program `[product.<id>.desktop]`'s menu entry and shortcuts start, and the macOS app bundle's executable; at most one per product. |
+| `command` | a `cli` program's executable | The name it is put on `PATH` as (`[a-z0-9][a-z0-9._+-]*`, at most 64 bytes): a `cli` program's executable must be such a name unless it sets one, and a `gui` program is put on `PATH` only when it names one. No two programs, nor two products, share one. |
+| `features` | `[]` | Cargo features of the core crate this program's cores build with (`--features`): names of `[A-Za-z0-9_+.-]` or `<package>/<feature>`, each once. Only the cores: the launcher builds as its crate says. |
+| `default-features` | `true` | `false` builds the cores with `--no-default-features`. |
+
+Every program gets its own launcher and one core per CPU target (`targets`, `macos-targets`). A core
+built with features of its own builds in a target directory of its own, named for the CPU and the
+feature set (`<cpu>.f<8 hex>`, the hex from the feature set's SHA-256), and lands there in the
+artifact directory ([packaging.md](packaging.md#the-artifact-directory)), so products building one
+core crate with different features (one per crypto profile, say) never share a build, while two
+building it alike build it once. A service runs the first program. The update helper stays one per
+product.
+
+The single-program keys are shorthand for one program: `executable`, `core` and `launcher` as
+given, with the core crate's default features; a `gui` program for `kind = "desktop"`, a `cli`
+program otherwise; on `PATH` only as `linux.command`, and only on Linux, as before. A `tool`
+product may hold a `gui` program, and a `desktop` product `cli` programs: `kind` decides the service
+and the helper's start right, a program's `role` how people reach it.
 
 `[product.<id>.linux]`:
 
@@ -168,7 +212,7 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `depends.deb`, `depends.rpm`, `depends.pacman` | Package dependencies per format, in each format's own syntax (deb alternatives with `\|`). |
 | `needed` | Shared libraries the binaries may need beyond the base system's; every Linux format in `outputs` must then declare the packages that provide them. |
 | `glibc` | The oldest glibc the Linux binaries must run on, `2.N` (default `2.34`). |
-| `command` | `/usr/bin/<command>`, a link to the launcher in the Linux packages (`[a-z0-9][a-z0-9._+-]*`). dpkg and rpm replace an unowned file there without asking: pick a name nothing else uses. |
+| `command` | `/usr/bin/<command>`, a link to the launcher in the Linux packages (`[a-z0-9][a-z0-9._+-]*`), in the single-program form (a `[[programs]]` entry names its own). dpkg and rpm replace an unowned file there without asking: pick a name nothing else uses. |
 | `replaces` | Packages this product supersedes: the same program packaged under other names before it took `<vendor>-<id>`. Every format conflicts with and replaces them (deb `Conflicts:` and `Replaces:`, rpm `Conflicts:` and `Obsoletes:`, pacman `conflicts` and `replaces`), so an install removes them instead of failing on files both ship (a `/usr/bin` link, a menu entry). Never a package this `seaworthy.toml` builds. |
 
 `[product.<id>.service]` (`kind = "service"` only):
@@ -208,15 +252,15 @@ The directives (each `true` or `false`): `no-new-privileges`, `protect-system-st
 must read the whole host should start from `none` and turn back on what it can keep, rather than
 drop every directive. See [services.md](services.md) for what each platform's renderer writes.
 
-`[product.<id>.desktop]` (`kind = "desktop"` only; without it a desktop product installs its files
-and nothing else):
+`[product.<id>.desktop]` (a product with a `gui` program only: `kind = "desktop"`, or a
+`[[programs]]` entry with `role = "gui"`; without it the app installs its files and nothing else):
 
 | Key | Default | Meaning |
 |---|---|---|
 | `app-id` | `<vendor>-<id>`, lowercase | The menu entry's id: the `.desktop` file's and the icons' name. |
 | `linux-icons` | `[]` | Square PNGs of the hicolor sizes (16, 22, 24, 32, 48, 64, 96, 128, 192, 256, 512), one per size, and at most one SVG. |
 | `windows-icon` | — | An `.ico`: Programs and Features' and the shortcuts' icon. Without it the shortcuts show the launcher's own icon resource. |
-| `start-menu` | `true` | A Start-menu shortcut to the launcher. |
+| `start-menu` | `true` | A Start-menu shortcut to the `gui` program's launcher. |
 | `desktop-shortcut` | `false` | A shortcut on every user's desktop. |
 | `categories` | `["Utility"]` | The `.desktop` entry's `Categories`: at least one freedesktop main category. |
 | `keywords` | `[]` | The `.desktop` entry's `Keywords`. |

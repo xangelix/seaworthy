@@ -3,8 +3,9 @@
 *Built artifacts in, verified install trees and packages out. Nothing compiles here.*
 
 The seaworthy command-line tool, also usable as a library. It turns already-built artifacts and a
-product's `seaworthy.toml` into every deliverable. A product ships as a launcher plus one core per
-CPU target (`seaworthy-launcher`), optionally with an update helper (`seaworthy-updater`).
+product's `seaworthy.toml` into every deliverable. A product ships one or more programs, each a
+launcher plus one core per CPU target (`seaworthy-launcher`), optionally with an update helper
+(`seaworthy-updater`).
 `seaworthy` proves those binaries are what the configuration says, lays out each platform's install
 tree, and builds every output from those trees:
 
@@ -57,7 +58,7 @@ seaworthy glibc-check      [--floor X.Y] FILE…
 | `adopt-msi` | Takes back an MSI WiX built on Windows from `package`'s `.wxs`: payload checked against the signed tree, its security-relevant tables against the `.wxs`, signed, listed. |
 | `repo` | Every product's release as signed APT, DNF and pacman repositories, the release tree and `publish-plan.json`. |
 | `publish` | Uploads what `repo` built to an S3-compatible store (feature `publish-s3`, on by default). |
-| `build-plan` | The build steps one target triple needs: the launcher and helper once, the core per CPU target. |
+| `build-plan` | The build steps one target triple needs: each program's launcher and the helper once, each program's core per CPU target. |
 | `ci-order` | The release-ordering lint for **GitLab CI only**: every server deploy job waits for every client publication. |
 | `version` | Every package format's spelling of a release version and sequence. |
 | `manifest-version` | A `Cargo.toml`'s `[package]` version, read as TOML (a workspace-inherited one resolved). |
@@ -199,12 +200,14 @@ A library caller that never publishes takes `default-features = false`.
 The artifact directory the build leaves for `seaworthy`:
 
 ```text
-<artifacts>/<triple>/launcher/<executable>[.exe]
-<artifacts>/<triple>/helper/<helper>[.exe]          when the helper ships
-<artifacts>/<triple>/cores/<cpu>/lib<core>.so       Linux
-<artifacts>/<triple>/cores/<cpu>/<core>.dll         Windows, beside the sidecars
-<artifacts>/<triple>/cores/<cpu>/lib<core>.dylib    macOS
+<artifacts>/<triple>/launcher/<executable>[.exe]     each program's
+<artifacts>/<triple>/helper/<helper>[.exe]           when the helper ships
+<artifacts>/<triple>/cores/<build>/lib<core>.so      Linux
+<artifacts>/<triple>/cores/<build>/<core>.dll        Windows, beside the sidecars
+<artifacts>/<triple>/cores/<build>/lib<core>.dylib   macOS
 ```
+
+`<build>` is the CPU target, or `<cpu>.f<8 hex>` for a core built with cargo features of its own.
 
 `build-plan` prints the build that fills it, and the GitLab templates carry it out.
 

@@ -120,12 +120,13 @@
 //!   `https://` fails the install (never a removal); the helper checks the
 //!   whole URL (`seaworthy_updater::read_admin_server`). Group Policy's
 //!   `Server` wins over it.
-//! - **A desktop app** (`[product.<id>.desktop]`): the icon
+//! - **A desktop app** (`[product.<id>.desktop]`, the `gui` program): the icon
 //!   (`desktop.windows-icon`, staged as `tree/<Vendor>/<Directory>.ico`) in
 //!   the Icon table, as Programs and Features' icon (`ARPPRODUCTICON`) and
 //!   the shortcuts'; a Start-menu shortcut (`ProgramMenuFolder\<display
 //!   name>.lnk`, unless `start-menu = false`) and a desktop one
-//!   (`desktop-shortcut = true`, every user's desktop) to the launcher,
+//!   (`desktop-shortcut = true`, every user's desktop) to the `gui`
+//!   program's launcher,
 //!   started in the install directory. Each shortcut's component keys on an
 //!   HKCU value under the product's key, as Windows Installer's validation
 //!   requires of a component in the Start-menu or desktop folder: ICE38 and
@@ -810,11 +811,13 @@ pub fn wxs(
         ),
     );
 
+    // The shortcuts start the gui program's launcher.
+    let gui = product.gui_program().map(|p| p.executable);
     let mut launcher_id = None;
     for (n, (file, relative)) in layout.files.iter().zip(&relatives).enumerate() {
         let file_id = identifier("f", relative, n);
         let component_id = identifier("c", relative, n);
-        if file.role == Role::Launcher {
+        if file.role == Role::Launcher && file.program == gui {
             launcher_id = Some(file_id.clone());
         }
         line(
@@ -831,8 +834,14 @@ pub fn wxs(
                 xml(&file.install_path)
             ),
         );
+        // The service runs the first program's launcher (the layout's
+        // first launcher).
+        let service_launcher = file.role == Role::Launcher
+            && layout
+                .launcher()
+                .is_some_and(|first| first.install_path == file.install_path);
         match (&file.role, &service) {
-            (Role::Launcher, Some((record, _, _, _))) => {
+            (Role::Launcher, Some((record, _, _, _))) if service_launcher => {
                 let mut install = format!(
                     "<ServiceInstall Id=\"Service\" Name=\"{}\" DisplayName=\"{}\" Description=\"{}\" Type=\"ownProcess\" Start=\"auto\" ErrorControl=\"normal\" Vital=\"yes\" Account=\"{}\"",
                     xml(&record.name),

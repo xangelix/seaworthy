@@ -690,7 +690,7 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                         "{} {}: verified ({} cores)",
                         v.product(),
                         platform.inputs.triple,
-                        platform.inputs.cores.len()
+                        platform.inputs.cores().count()
                     );
                 }
             }

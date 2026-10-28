@@ -6,7 +6,9 @@
 //! `seaworthy` never compiles: the plan is data, which
 //! `scripts/ci/seaworthy.sh build` (Linux) and
 //! `scripts/ci/seaworthy-build.ps1` (Windows) carry out. Per product whose
-//! outputs need the triple:
+//! outputs need the triple, for each of its programs
+//! ([`crate::config::Product::programs`]: `[[programs]]`, or the
+//! single-program keys):
 //!
 //! - **the launcher**, once, built for plain x86-64 (`--bin <executable>`,
 //!   from `launcher`'s manifest when `seaworthy.toml` names it) in the target
@@ -24,12 +26,18 @@
 //! subdirectory (a template built from its repository's root) builds the
 //! crates its `seaworthy.toml` names, not
 //! paths beside the repository root.
-//! - **the core**, once per CPU target (`-p <core>`), each in its own target
-//!   directory named for the CPU, with `-C target-cpu=<cpu>` (given as
-//!   `target.<triple>.rustflags`, which joins the product's own);
+//! - **the core**, once per CPU target (`-p <core>`, with the program's
+//!   `--no-default-features` and `--features`), each in its own target
+//!   directory named for the build ([`crate::config::Program::build_dir`]:
+//!   the CPU, or `<cpu>.f<8 hex>` for a core built with features of its
+//!   own, so builds of one crate with other features never share one),
+//!   with `-C target-cpu=<cpu>` (given as `target.<triple>.rustflags`,
+//!   which joins the product's own), copied to that build's directory
+//!   under `<triple>/cores/`;
 //! - on Windows and macOS, **each sidecar** (`sidecars.windows` /
-//!   `sidecars.macos`, the FIPS module's DLL or dylib) from the FIRST CPU
-//!   target's core build, beside every core. Each
+//!   `sidecars.macos`, the FIPS module's DLL or dylib) from the product's
+//!   FIRST program's FIRST CPU target's core build, beside every core of
+//!   every program of the product. Each
 //!   CPU's build compiles the module (its core links against it), but MSVC
 //!   output isn't byte-reproducible across target directories (timestamps,
 //!   PDB paths), and a release ships one module binary: the cores import it
@@ -67,8 +75,8 @@
 //! ignores `build.rustflags` once any target flags are set, so
 //! [`check_cargo_config`] refuses it.
 //!
-//! The launcher's and helper's build steps use the target directory
-//! `base`; each core's, its CPU's name. The scripts that carry the plan
+//! The launchers' and helper's build steps use the target directory
+//! `base`; each core's, its build's name. The scripts that carry the plan
 //! out rely on it: they add the caller's `SEAWORTHY_RUSTFLAGS` to every
 //! build and `SEAWORTHY_CORE_RUSTFLAGS` to each step whose target
 //! directory isn't `base` (`docs/packaging.md`, "Extra build flags").
@@ -89,7 +97,7 @@ use std::path::Path;
 
 use crate::DistError;
 use crate::config::{Config, Output};
-use crate::inputs::{LINUX, MACOS, Os, WINDOWS};
+use crate::inputs::{LINUX, MACOS, Os, WINDOWS, core_file};
 
 /// One step of the build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +231,7 @@ pub fn plan_for(
     } else {
         &config.defaults.targets
     };
-    // The CPU build whose FIPS module library ships beside every core.
+    // The CPU whose build's FIPS module library ships beside every core.
     let module_cpu = cpus.first().cloned();
     let mut plan = Plan::default();
     let mut any = false;
@@ -276,18 +284,21 @@ pub fn plan_for(
         ]
         .concat();
         let core_flags = rpath("@loader_path");
-        let mut launcher_args = vec!["--bin".to_owned(), product.executable.clone()];
-        launcher_args.extend(manifest("launcher", &product.launcher)?);
-        launcher_args.extend(deployment.iter().cloned());
-        plan.built(
-            Step::Build {
-                target_dir: "base".to_owned(),
-                rustflags: executable_flags.clone(),
-                args: launcher_args,
-            },
-            format!("base/{triple}/release/{}{exe}", product.executable),
-            format!("{triple}/launcher/{}{exe}", product.executable),
-        )?;
+        let programs = product.programs();
+        for program in &programs {
+            let mut launcher_args = vec!["--bin".to_owned(), program.executable.clone()];
+            launcher_args.extend(manifest("launcher", &program.launcher)?);
+            launcher_args.extend(deployment.iter().cloned());
+            plan.built(
+                Step::Build {
+                    target_dir: "base".to_owned(),
+                    rustflags: executable_flags.clone(),
+                    args: launcher_args,
+                },
+                format!("base/{triple}/release/{}{exe}", program.executable),
+                format!("{triple}/launcher/{}{exe}", program.executable),
+            )?;
+        }
         if let Some(helper) = product
             .helper
             .as_ref()
@@ -306,42 +317,46 @@ pub fn plan_for(
                 format!("{triple}/helper/{helper}{exe}"),
             )?;
         }
-        // `core` is a crate name with no `-` (config validation): the
-        // library file's name as is.
-        let core_file = match os {
-            Os::Windows => format!("{}.dll", product.core),
-            Os::Linux => format!("lib{}.so", product.core),
-            Os::Macos => format!("lib{}.dylib", product.core),
-        };
-        for cpu in cpus {
-            plan.built(
-                Step::Build {
-                    target_dir: cpu.clone(),
-                    rustflags: [
-                        vec!["-C".to_owned(), format!("target-cpu={cpu}")],
-                        crt.clone(),
-                        core_flags.clone(),
-                    ]
-                    .concat(),
-                    args: [
-                        vec!["-p".to_owned(), product.core.clone()],
-                        deployment.clone(),
-                    ]
-                    .concat(),
-                },
-                format!("{cpu}/{triple}/release/{core_file}"),
-                format!("{triple}/cores/{cpu}/{core_file}"),
-            )?;
-            if !product.sidecars.for_os(os).is_empty() {
-                let from = module_cpu.as_ref().unwrap_or(cpu);
-                for pattern in product.sidecars.for_os(os) {
-                    let step = Step::Sidecars {
-                        directory: format!("{from}/{triple}/release/build"),
-                        pattern: pattern.clone(),
-                        to: format!("{triple}/cores/{cpu}"),
-                    };
-                    if !sidecars.contains(&step) {
-                        sidecars.push(step);
+        // The core build whose FIPS module library ships beside every core
+        // of the product: its first program's, for the first CPU.
+        let module_dir = programs
+            .first()
+            .zip(module_cpu.as_ref())
+            .map(|(program, cpu)| program.build_dir(cpu));
+        for program in &programs {
+            let core_file = core_file(os, &program.core);
+            for cpu in cpus {
+                let dir = program.build_dir(cpu);
+                plan.built(
+                    Step::Build {
+                        target_dir: dir.clone(),
+                        rustflags: [
+                            vec!["-C".to_owned(), format!("target-cpu={cpu}")],
+                            crt.clone(),
+                            core_flags.clone(),
+                        ]
+                        .concat(),
+                        args: [
+                            vec!["-p".to_owned(), program.core.clone()],
+                            program.feature_args(),
+                            deployment.clone(),
+                        ]
+                        .concat(),
+                    },
+                    format!("{dir}/{triple}/release/{core_file}"),
+                    format!("{triple}/cores/{dir}/{core_file}"),
+                )?;
+                if !product.sidecars.for_os(os).is_empty() {
+                    let from = module_dir.as_ref().unwrap_or(&dir);
+                    for pattern in product.sidecars.for_os(os) {
+                        let step = Step::Sidecars {
+                            directory: format!("{from}/{triple}/release/build"),
+                            pattern: pattern.clone(),
+                            to: format!("{triple}/cores/{dir}"),
+                        };
+                        if !sidecars.contains(&step) {
+                            sidecars.push(step);
+                        }
                     }
                 }
             }
