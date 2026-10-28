@@ -119,10 +119,11 @@ wrong:
 4. **Sidecars.** Each Windows (or macOS) sidecar glob matches exactly one file in every core build
    of every program, and the copies are byte-identical: a difference means an accidental
    per-target FIPS build.
-5. **FIPS** (the product's `fips`, else `defaults.fips`). Every Linux core passes the static-link checks of
-   `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no second
-   libcrypto, no other module version. On Windows and macOS every core loads the pinned module's
-   library, and the sidecars ship it.
+5. **FIPS** (the product's `fips`, else `defaults.fips`). Every Linux core passes the static-link
+   checks of `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no
+   second libcrypto, no other module version. On Windows and macOS every core loads the pinned
+   module's library, and the sidecars ship it. The pinned module is `defaults.fips-module`'s
+   release, else `seaworthy-crypto`'s ([fips.md](fips.md#a-products-module-release)).
 6. **Runtime dependencies.** Windows binaries link the C runtime statically. Linux binaries need
    only the base system's libraries plus those the product declares in `linux.needed`, and no glibc
    newer than the floor (`linux.glibc`, default 2.34): every entry of the version-needs table counts,
@@ -135,8 +136,9 @@ An import table, dynamic section or version table that doesn't parse, and a stri
 are findings, never a pass: the checks would otherwise pass vacuously. `verify` also warns about a
 core no CPU would ever choose (its features include every feature of a more preferred core).
 
-`seaworthy fips-check FILE…` and `seaworthy glibc-check [--floor X.Y] FILE…` apply the FIPS and glibc
-rules to single files, for binaries built outside a product (a separate FIPS builder, for example).
+`seaworthy fips-check [--module VERSION] FILE…` and `seaworthy glibc-check [--floor X.Y] FILE…`
+apply the FIPS and glibc rules to single files, for binaries built outside a product (a separate
+FIPS builder, for example).
 
 **Building for the glibc floor.** A build on a current distribution picks up symbol versions the
 package's `glibc` dependency says nothing about (glibc 2.38's `__isoc23_*`, std's weakly referenced

@@ -182,3 +182,134 @@ fn a_products_fips_decides_its_checks() {
         );
     }
 }
+
+/// The module releases `defaults.fips-module` accepts: the pinned one is
+/// among them, its prefix the one `seaworthy-crypto` pins.
+#[test]
+fn the_known_modules_include_the_pinned_one() {
+    use seaworthy::config::{FIPS_MODULES, fips_module, pinned_fips_module};
+    let pinned = pinned_fips_module();
+    assert!(FIPS_MODULES.contains(&pinned));
+    assert_eq!(
+        pinned.sys,
+        seaworthy_crypto::module::EXPECTED_FIPS_SYS_VERSION
+    );
+    assert_eq!(
+        pinned.module,
+        seaworthy_crypto::module::EXPECTED_FIPS_MODULE_VERSION
+    );
+    assert_eq!(
+        pinned.symbol_prefix(),
+        seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
+    );
+    let older = fips_module("0.14.2").unwrap();
+    assert_eq!(older.module, "4.2.0");
+    assert_eq!(older.symbol_prefix(), "aws_lc_fips_0_14_2_");
+    for unknown in ["0.13.0", "0.14.4", "0.14", "latest", ""] {
+        assert!(fips_module(unknown).is_none(), "{unknown}");
+    }
+}
+
+/// `fips-module` names a known release, and only where a product carries
+/// the module.
+#[test]
+fn the_fips_module_is_a_known_release_of_a_fips_build() {
+    let config = Config::parse(&profiles(false, "fips-module = \"0.14.2\"")).unwrap();
+    assert_eq!(config.fips_module().sys, "0.14.2");
+    assert_eq!(config.fips_symbol_prefix(), "aws_lc_fips_0_14_2_");
+    let pinned = Config::parse(&profiles(false, "")).unwrap();
+    assert_eq!(
+        pinned.fips_symbol_prefix(),
+        seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
+    );
+    for unknown in ["0.13.0", "0.14.4", "4.2.0"] {
+        let err = Config::parse(&profiles(false, &format!("fips-module = \"{unknown}\"")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!(
+                "defaults.fips-module \"{unknown}\" isn't an aws-lc-fips-sys release"
+            )) && err.contains("0.14.2 builds AWS-LC FIPS 4.2.0")
+                && err.contains("0.14.3 builds AWS-LC FIPS 4.2.0"),
+            "{err}"
+        );
+    }
+    let err =
+        Config::parse(&profiles(false, "fips-module = \"0.14.2\"").replace("fips = true\n", ""))
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("no product carries the FIPS module"), "{err}");
+}
+
+/// `verify` holds the FIPS product to the module `fips-module` names: its
+/// symbols on Linux, its DLL on Windows; another release's are refused.
+#[test]
+fn verify_follows_the_chosen_module() {
+    let older = Config::parse(&profiles(false, "fips-module = \"0.14.2\"")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    artifacts(&older, dir.path(), "aws_lc_fips_0_14_2_");
+    assert_eq!(findings(&older, "fips", dir.path()), Vec::<String>::new());
+    // The same binaries against the default (the pinned 0.14.3).
+    let pinned = Config::parse(&profiles(false, "")).unwrap();
+    let found = findings(&pinned, "fips", dir.path());
+    for needle in [
+        "no aws_lc_fips_0_14_3_* symbols",
+        "AWS-LC FIPS symbols of a version other than aws_lc_fips_0_14_3_",
+        "does not import aws_lc_fips_0_14_3_crypto.dll",
+    ] {
+        assert!(
+            found.iter().any(|f| f.contains(needle)),
+            "{needle}: {found:#?}"
+        );
+    }
+    // And 0.14.3's binaries against fips-module = "0.14.2".
+    let dir = tempfile::tempdir().unwrap();
+    artifacts(&pinned, dir.path(), "aws_lc_fips_0_14_3_");
+    assert_eq!(findings(&pinned, "fips", dir.path()), Vec::<String>::new());
+    let found = findings(&older, "fips", dir.path());
+    assert!(
+        found
+            .iter()
+            .any(|f| f.contains("does not import aws_lc_fips_0_14_2_crypto.dll")),
+        "{found:#?}"
+    );
+}
+
+/// `fips-check --module` checks one binary against a known release.
+#[test]
+fn fips_check_takes_the_module_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = write(
+        dir.path(),
+        "core.so",
+        &Elf {
+            sections: vec![(".cpureq".into(), record(LINUX, "x86-64-v2", V2))],
+            symbols: vec![
+                ("aws_lc_fips_0_14_2_awslc_version_string".to_owned(), true),
+                ("aws_lc_fips_0_14_2_RAND_bytes".to_owned(), true),
+            ],
+            ..Elf::default()
+        }
+        .build(),
+    );
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+            .arg("fips-check")
+            .args(args)
+            .arg(&binary)
+            .output()
+            .unwrap()
+    };
+    let ok = run(&["--module", "0.14.2"]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("aws_lc_fips_0_14_2_*"));
+    let pinned = run(&[]);
+    assert_eq!(pinned.status.code(), Some(1));
+    let unknown = run(&["--module", "0.13.0"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("0.14.2, 0.14.3"));
+}

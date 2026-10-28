@@ -25,9 +25,11 @@
 //!    per-target FIPS build.
 //! 5. **FIPS** (the product's `fips`, else `defaults.fips`): every Linux core passes
 //!    `scripts/verify-fips-binary.sh`'s checks over its symbol table, read
-//!    as `nm` reads it ([`fips_symbol_findings`]). On Windows every core
+//!    as `nm` reads it ([`fips_symbol_findings`]), for the module
+//!    `defaults.fips-module` pins (default: `seaworthy-crypto`'s; its
+//!    symbol prefix, [`Config::fips_symbol_prefix`]). On Windows every core
 //!    imports the pinned module's crypto DLL, and the sidecars ship every
-//!    DLL of the module any core imports (the pinned aws-lc-fips-sys 0.14
+//!    DLL of the module any core imports (aws-lc-fips-sys 0.14
 //!    builds one, `<prefix>crypto.dll`; older releases added a
 //!    `<prefix>rust_wrapper.dll`, which the imports would then name). On
 //!    macOS, where AWS-LC builds the module as a dylib too, every core
@@ -640,6 +642,8 @@ impl Run {
         let triple = inputs.triple;
         let os = inputs.os();
         let windows = os == Os::Windows;
+        // The module the product's cores must carry (defaults.fips-module).
+        let prefix = config.fips_symbol_prefix();
         let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
         for (cpu, core, _) in &program.cores {
             let Some(bytes) = self.read(core) else {
@@ -695,26 +699,27 @@ impl Run {
                 Err(e) => self.finding(core, format!("no valid requirement record: {e}")),
             }
             if config.fips(product) && os == Os::Linux {
-                for finding in
-                    fips_symbol_findings(&bytes, seaworthy_crypto::module::FIPS_SYMBOL_PREFIX)
-                {
+                for finding in fips_symbol_findings(&bytes, &prefix) {
                     self.finding(core, finding);
                 }
             }
             if config.fips(product) && windows {
-                let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
                 let crypto = format!("{prefix}crypto.dll");
                 let imports = pe_imports(&bytes).unwrap_or_default();
                 if !imports.contains(&crypto) {
                     self.finding(
                         core,
-                        format!("does not import {crypto} — not a FIPS build of the pinned module"),
+                        format!("does not import {crypto} — not a FIPS build of the pinned module (defaults.fips-module)"),
                     );
                 }
-                module_imports.extend(imports.into_iter().filter(|name| name.starts_with(prefix)));
+                module_imports.extend(
+                    imports
+                        .into_iter()
+                        .filter(|name| name.starts_with(prefix.as_str())),
+                );
             }
             if config.fips(product) && os == Os::Macos {
-                let module = format!("lib{}", seaworthy_crypto::module::FIPS_SYMBOL_PREFIX);
+                let module = format!("lib{prefix}");
                 let crypto = format!("{module}crypto.dylib");
                 let loads: Vec<String> = macho_facts(&bytes)
                     .map(|facts| {
@@ -729,7 +734,7 @@ impl Run {
                     self.finding(
                         core,
                         format!(
-                            "does not load @rpath/{crypto} — not a FIPS build of the pinned module"
+                            "does not load @rpath/{crypto} — not a FIPS build of the pinned module (defaults.fips-module)"
                         ),
                     );
                 }
@@ -823,17 +828,13 @@ impl Run {
                         if self.binary(&path, &bytes, os, BinaryKind::Library, config, product)
                             && os == Os::Macos
                             && config.fips(product)
-                            && name.starts_with(&format!(
-                                "lib{}",
-                                seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
-                            ))
+                            && name.starts_with(&format!("lib{}", config.fips_symbol_prefix()))
                         {
                             // The module itself: its symbols pass the
                             // Linux cores' checks (scripts/verify-fips-binary.sh).
-                            for finding in fips_symbol_findings(
-                                &bytes,
-                                seaworthy_crypto::module::FIPS_SYMBOL_PREFIX,
-                            ) {
+                            for finding in
+                                fips_symbol_findings(&bytes, &config.fips_symbol_prefix())
+                            {
                                 self.finding(&path, finding);
                             }
                         }

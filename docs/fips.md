@@ -134,6 +134,26 @@ target/release/examples/fips_selfcheck --expect-fips
 - `cargo test -p seaworthy-crypto --features fips` runs the FIPS-only tests, including the
   assertion that the linked module is AWS-LC FIPS 4.2.0.
 
+## A product's module release
+
+`seaworthy-crypto` pins `aws-lc-fips-sys` 0.14.3; a product's own cores may be built with another
+release of the same module. `seaworthy.toml`'s `[defaults] fips-module` names the release its FIPS
+products' cores carry, and `verify` (and `seaworthy fips-check --module`) then require that
+release's symbol prefix (`aws_lc_fips_<major>_<minor>_<patch>_`) and module libraries
+(`aws_lc_fips_<…>_crypto.dll`, `libaws_lc_fips_<…>_crypto.dylib`) instead of the pin's. Only a
+release known to build a validated, or in-process, AWS-LC FIPS module is accepted:
+
+| `fips-module` | AWS-LC FIPS module | Status |
+|---|---|---|
+| `0.14.2` | 4.2.0 | CMVP: in process, Comment Resolution |
+| `0.14.3` (the pin, the default) | 4.2.0 | CMVP: in process, Comment Resolution |
+
+Another release joins the table (`FIPS_MODULES` in `crates/seaworthy/src/config.rs`) once the
+module release it builds and its symbol prefix are confirmed: build a core with it, check it with
+`scripts/verify-fips-binary.sh --prefix aws_lc_fips_<…>_`, add a row and a test in
+`crates/seaworthy/tests/fips_builds.rs`, and its status here. Nothing else changes: the checks
+derive every name from the release.
+
 Call `seaworthy_crypto::module::startup_self_check()` first thing in `main` of a FIPS
 application: the module's CPU-jitter entropy source runs its startup health tests on the first
 random draw and aborts the process when they fail, which is rare on bare metal and more frequent

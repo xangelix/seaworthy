@@ -45,7 +45,7 @@ seaworthy version          --release VERSION --sequence N [--json]
 seaworthy manifest-version --manifest Cargo.toml
 seaworthy keygen           --algorithm ml-dsa-87|ecdsa-p256|ed25519 --secret FILE --public FILE
 seaworthy sign-statement   --algorithm ml-dsa-87|ecdsa-p256|ed25519 --key FILE [--raw]
-seaworthy fips-check       FILE…
+seaworthy fips-check       [--module VERSION] FILE…
 seaworthy glibc-check      [--floor X.Y] FILE…
 ```
 
@@ -64,7 +64,7 @@ seaworthy glibc-check      [--floor X.Y] FILE…
 | `manifest-version` | A `Cargo.toml`'s `[package]` version, read as TOML (a workspace-inherited one resolved). |
 | `keygen` | A new release key: secret (hex, mode 0600) and public (hex), never over an existing file; prints the key id. |
 | `sign-statement` | Signs a canonical release statement read on stdin: the reference command signer. |
-| `fips-check` | `verify`'s FIPS symbol checks over single ELF files. |
+| `fips-check` | `verify`'s FIPS symbol checks over single ELF files (`--module`: another known `aws-lc-fips-sys` release). |
 | `glibc-check` | `verify`'s glibc floor over single ELF files (default 2.34). |
 
 Exit codes: 0 success, 1 a refusal (invalid configuration, failed checks, a tool that failed), 2 a
