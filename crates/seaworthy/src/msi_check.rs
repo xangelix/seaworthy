@@ -28,7 +28,9 @@
 //! The tables come from `msiinfo export -s` (SQL text: it never writes a
 //! table's binary streams to disk, as the tab-separated export does), and
 //! [`parse_sql_export`] reads them strictly: a line it can't read is a
-//! refusal, never skipped.
+//! refusal, never skipped. A table the check reads must have every column
+//! it reads ([`COLUMNS`]): a column it can't find is a finding, never an
+//! empty value.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
@@ -107,6 +109,56 @@ pub const COMPARED: &[&str] = &[
 pub fn is_read(table: &str) -> bool {
     is_forbidden(table) || SEQUENCES.contains(&table) || COMPARED.contains(&table)
 }
+
+/// The columns [`findings`] reads, by table, as Windows Installer's schema
+/// names them (and WiX builds them). A [`Table`] reads a column it doesn't
+/// have as empty, the same as NULL, so a misnamed column here would compare
+/// an MSI's value as empty: [`findings`] refuses a table that lacks one.
+/// (The [`SEQUENCES`] are read by `Action` and `Condition`.)
+pub const COLUMNS: &[(&str, &[&str])] = &[
+    (
+        "CustomAction",
+        &["Action", "Type", "Source", "Target", "ExtendedType"],
+    ),
+    (
+        "ServiceInstall",
+        &[
+            "ServiceInstall",
+            "Name",
+            "DisplayName",
+            "ServiceType",
+            "StartType",
+            "ErrorControl",
+            "LoadOrderGroup",
+            "Dependencies",
+            "StartName",
+            "Password",
+            "Arguments",
+            "Component_",
+            "Description",
+        ],
+    ),
+    (
+        "ServiceControl",
+        &["Name", "Event", "Arguments", "Wait", "Component_"],
+    ),
+    ("Registry", &["Root", "Key", "Name", "Value"]),
+    (
+        "MsiLockPermissionsEx",
+        &["LockObject", "Table", "SDDLText", "Condition"],
+    ),
+    (
+        "Shortcut",
+        &["Directory_", "Name", "Target", "Arguments", "WkDir"],
+    ),
+    ("Upgrade", &["UpgradeCode"]),
+    (
+        "Directory",
+        &["Directory", "Directory_Parent", "DefaultDir"],
+    ),
+    ("Component", &["Component", "Directory_", "KeyPath"]),
+    ("File", &["File", "Component_", "FileName"]),
+];
 
 /// Windows Installer's standard actions, less the two that reboot the
 /// machine (`ForceReboot`, `ScheduleReboot`), which a seaworthy MSI never
@@ -1066,6 +1118,23 @@ pub fn findings(
             ));
         }
     }
+    let read = COLUMNS.iter().copied().chain(
+        SEQUENCES
+            .iter()
+            .map(|name| (*name, &["Action", "Condition"][..])),
+    );
+    for (name, columns) in read {
+        let Some(table) = tables.get(name) else {
+            continue;
+        };
+        for column in columns {
+            if !table.columns.iter().any(|c| c == column) {
+                findings.push(format!(
+                    "its {name} table has no {column} column (the check reads it)"
+                ));
+            }
+        }
+    }
     let resolver = Resolver::new(tables);
 
     // Custom actions.
@@ -1260,7 +1329,7 @@ pub fn findings(
             findings.push(format!("a descriptor on {resolved} with a condition"));
         }
         let count = locks
-            .entry((table.to_owned(), resolved, get(row, "SDDL").to_owned()))
+            .entry((table.to_owned(), resolved, get(row, "SDDLText").to_owned()))
             .or_insert(0);
         *count = count.saturating_add(1);
     }
@@ -1688,7 +1757,7 @@ mod tests {
                     "MsiLockPermissionsEx",
                     "LockObject",
                     "Table",
-                    "SDDL",
+                    "SDDLText",
                     "Condition",
                 ],
                 &[
@@ -1809,6 +1878,86 @@ mod tests {
         let expected = expected_from_wxs(WXS).unwrap();
         let found = findings(&expected, &wix_tables(), CODE);
         assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// [`wix_tables`]'s descriptors as `msiinfo export -s` (msitools 0.106)
+    /// prints a table of the schema WiX builds `MsiLockPermissionsEx` with:
+    /// the SDDL is the `SDDLText` column, and a NULL `Condition` is left
+    /// out of the row.
+    const LOCK_EXPORT: &str = "CREATE TABLE `MsiLockPermissionsEx` (`MsiLockPermissionsEx` CHAR(72) NOT NULL, `LockObject` CHAR(72) NOT NULL, `Table` CHAR(32) NOT NULL, `SDDLText` CHAR(0) NOT NULL, `Condition` CHAR(255) PRIMARY KEY `MsiLockPermissionsEx`)\n\
+        INSERT INTO `MsiLockPermissionsEx` (`MsiLockPermissionsEx`, `LockObject`, `Table`, `SDDLText`) VALUES ('lockA', 'HelperService', 'ServiceInstall', 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)')\n\
+        INSERT INTO `MsiLockPermissionsEx` (`MsiLockPermissionsEx`, `LockObject`, `Table`, `SDDLText`) VALUES ('lockB', 'StateDir', 'CreateFolder', 'O:SYD:P(A;OICI;FA;;;SY)')\n";
+
+    /// [`wix_tables`] with its descriptors read from `export`.
+    fn with_locks(export: &str) -> BTreeMap<String, Table> {
+        let mut tables = wix_tables();
+        let locks = parse_sql_export(export).unwrap();
+        tables.insert(locks.name.clone(), locks);
+        tables
+    }
+
+    #[test]
+    fn descriptors_as_msiinfo_exports_them_are_compared_by_their_sddl() {
+        // A service MSI's descriptors, read as adopt-msi reads them: each
+        // matches the .wxs's PermissionEx, SDDL and all.
+        let expected = expected_from_wxs(WXS).unwrap();
+        let found = findings(&expected, &with_locks(LOCK_EXPORT), CODE);
+        assert!(found.is_empty(), "{found:#?}");
+        // Another SDDL on the same directory is found, both ways.
+        let other = LOCK_EXPORT.replace("O:SYD:P(A;OICI;FA;;;SY)", "O:SYD:P(A;OICI;FA;;;WD)");
+        let found = findings(&expected, &with_locks(&other), CODE);
+        let lock = |sddl: &str| {
+            format!("(\"CreateFolder\", \"CommonAppDataFolder/Acme/Agent/state\", \"{sddl}\")")
+        };
+        for wanted in [
+            format!(
+                "descriptor {}, which the .wxs doesn't declare",
+                lock("O:SYD:P(A;OICI;FA;;;WD)")
+            ),
+            format!(
+                "the .wxs's descriptor {} is missing",
+                lock("O:SYD:P(A;OICI;FA;;;SY)")
+            ),
+        ] {
+            assert!(found.contains(&wanted), "{wanted}: {found:#?}");
+        }
+    }
+
+    #[test]
+    fn a_table_without_a_column_the_check_reads_is_found() {
+        let expected = expected_from_wxs(WXS).unwrap();
+        // The SDDL under another column name is never read as an empty
+        // SDDL.
+        let renamed = LOCK_EXPORT.replace("`SDDLText`", "`SDDL`");
+        let found = findings(&expected, &with_locks(&renamed), CODE);
+        let wanted = "its MsiLockPermissionsEx table has no SDDLText column (the check reads it)";
+        assert!(found.iter().any(|f| f == wanted), "{found:#?}");
+        // Every column the check reads, gone from its table.
+        let sequences = SEQUENCES
+            .iter()
+            .map(|name| (*name, &["Action", "Condition"][..]));
+        let mut checked = 0_usize;
+        for (name, columns) in COLUMNS.iter().copied().chain(sequences) {
+            let tables = wix_tables();
+            if !tables.contains_key(name) {
+                assert!(SEQUENCES.contains(&name), "wix_tables lacks {name}");
+                continue;
+            }
+            for column in columns {
+                let mut tables = tables.clone();
+                let table = tables.get_mut(name).unwrap();
+                table.columns.retain(|c| c != column);
+                for row in &mut table.rows {
+                    row.remove(*column);
+                }
+                let found = findings(&expected, &tables, CODE);
+                let wanted =
+                    format!("its {name} table has no {column} column (the check reads it)");
+                assert!(found.contains(&wanted), "{wanted}: {found:#?}");
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 40, "{checked}");
     }
 
     #[test]
@@ -1960,7 +2109,15 @@ mod tests {
             "descriptor",
         );
         check(
-            &|t| set(t, "MsiLockPermissionsEx", 1, "SDDL", "D:(A;OICI;FA;;;WD)"),
+            &|t| {
+                set(
+                    t,
+                    "MsiLockPermissionsEx",
+                    1,
+                    "SDDLText",
+                    "D:(A;OICI;FA;;;WD)",
+                )
+            },
             "descriptor",
         );
         check(
