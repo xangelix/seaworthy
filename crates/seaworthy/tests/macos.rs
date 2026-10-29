@@ -450,6 +450,7 @@ fn an_alias_installs_beside_the_bundle_s_executable() {
 /// An alias of the bundle's executable is signed as that program is (the
 /// hardened runtime, the entitlements) after the nested code and before the
 /// bundle seals it, and its signature checked.
+#[cfg(unix)]
 #[test]
 fn an_alias_is_signed_as_its_program_before_the_bundle() {
     let dir = tempfile::tempdir().unwrap();
