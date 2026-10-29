@@ -1216,8 +1216,10 @@ fn verify_signature(
 }
 
 /// Signs a staged bundle from the inside out: each of `nested` (the cores,
-/// the helper, the sidecars), then the bundle, which signs its main
-/// executable and seals everything else; then checks the result
+/// the helper, the sidecars), each of `programs` (the main executable's
+/// aliases, with the entitlements it carries: the same program), then the
+/// bundle, which signs its main executable and seals everything else; then
+/// checks the result
 /// (`codesign --verify --deep --strict`, and for a Developer ID every
 /// signature against the Developer ID requirement for the pinned team).
 ///
@@ -1229,6 +1231,7 @@ pub fn sign_bundle(
     tools: &Tools,
     bundle: &Path,
     nested: &[PathBuf],
+    programs: &[PathBuf],
     signer: &MacSigner<'_>,
 ) -> Result<(), DistError> {
     for code in nested {
@@ -1238,9 +1241,12 @@ pub fn sign_bundle(
         MacSigner::AdHoc => None,
         MacSigner::DeveloperId { entitlements, .. } => *entitlements,
     };
+    for program in programs {
+        codesign(tools, signer, program, true, entitlements)?;
+    }
     codesign(tools, signer, bundle, true, entitlements)?;
     if matches!(signer, MacSigner::DeveloperId { .. }) {
-        for code in nested {
+        for code in nested.iter().chain(programs) {
             verify_signature(tools, signer, code, false)?;
         }
     }

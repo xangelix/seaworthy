@@ -593,6 +593,11 @@ pub struct Product {
     /// program names its own.
     #[serde(default)]
     pub launcher_bin: Option<String>,
+    /// Other names the launcher is installed under too, beside it
+    /// ([`Program::aliases`]). The single-program form: with
+    /// `[[programs]]`, each program names its own.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// The core cdylib's crate name (`acme_collector_core`): required in
     /// the single-program form, refused with `[[programs]]`.
     #[serde(default)]
@@ -1024,6 +1029,10 @@ pub struct ProgramEntry {
     /// the single-program form's `launcher-bin`).
     #[serde(default)]
     pub launcher_bin: Option<String>,
+    /// Other names the launcher is installed under too, beside it
+    /// ([`Program::aliases`]).
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// The core cdylib's crate name.
     pub core: String,
     /// `cli` or `gui`.
@@ -1055,6 +1064,13 @@ pub struct Program {
     /// The launcher's cargo binary (`--bin`): `launcher-bin`, else the
     /// executable.
     pub launcher_bin: String,
+    /// Other names (file stems) the launcher is installed under too, each a
+    /// copy beside it: started by one, the program runs as ever (its cores
+    /// found beside it) and reads that name as its first argument, so a
+    /// program acting by the name it was started as (an askpass helper,
+    /// a multi-call binary) needs no link of its own making. Never put on
+    /// `PATH`, nor started by a shortcut or a service.
+    pub aliases: Vec<String>,
     /// The core cdylib's crate name.
     pub core: String,
     /// `cli` or `gui`.
@@ -3482,12 +3498,13 @@ impl Config {
                 ("core", p.core.is_some()),
                 ("launcher", p.launcher.is_some()),
                 ("launcher-bin", p.launcher_bin.is_some()),
+                ("aliases", !p.aliases.is_empty()),
                 ("linux.command", p.linux.command.is_some()),
             ] {
                 if set {
                     return Err(at(
                         key,
-                        "the single-program form's key: with [[programs]], each program names its own (executable, core, launcher, launcher-bin, command)",
+                        "the single-program form's key: with [[programs]], each program names its own (executable, core, launcher, launcher-bin, aliases, command)",
                     ));
                 }
             }
@@ -3616,6 +3633,37 @@ impl Config {
                     return Err(at(
                         &key("command"),
                         &format!("{command:?} is another program's command too"),
+                    ));
+                }
+            }
+            for (i, alias) in program.aliases.iter().enumerate() {
+                if !is_windows_name(alias) {
+                    return Err(at(
+                        &key("aliases"),
+                        &format!(
+                            "{alias:?} isn't a file stem ([A-Za-z0-9][A-Za-z0-9._-]*), or is a Windows device name"
+                        ),
+                    ));
+                }
+                // Each name installs one file beside the launchers (and,
+                // on macOS, beside the helper in a bundle).
+                let taken = programs
+                    .iter()
+                    .any(|other| other.executable.eq_ignore_ascii_case(alias))
+                    || p.helper
+                        .as_ref()
+                        .is_some_and(|helper| helper.eq_ignore_ascii_case(alias))
+                    || earlier
+                        .iter()
+                        .flat_map(|e| &e.aliases)
+                        .chain(program.aliases.get(..i).unwrap_or_default())
+                        .any(|other| other.eq_ignore_ascii_case(alias));
+                if taken {
+                    return Err(at(
+                        &key("aliases"),
+                        &format!(
+                            "{alias:?} is another name of the product's already (a program's executable or alias, or the helper; case-insensitively: NTFS)"
+                        ),
                     ));
                 }
             }
@@ -4127,6 +4175,7 @@ impl Product {
                     .unwrap_or_else(|| executable.clone()),
                 executable,
                 launcher: self.launcher.clone(),
+                aliases: self.aliases.clone(),
                 core: self.core.clone().unwrap_or_default(),
                 role: if self.kind == Kind::Desktop {
                     Role::Gui
@@ -4156,6 +4205,7 @@ impl Product {
                         .launcher_bin
                         .clone()
                         .unwrap_or_else(|| entry.executable.clone()),
+                    aliases: entry.aliases.clone(),
                     core: entry.core.clone(),
                     role: entry.role,
                     linux_command: command.clone(),

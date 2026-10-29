@@ -158,6 +158,7 @@ floor and the packages' dependency together.
 |---|---|---|---|
 | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` (the bundle); `/usr/local/<vendor>/<product>` (lowercase: the tool directory) |
 | Launchers (each program's) | `<executable>` | `<executable>.exe` | the bundle's `Contents/MacOS/<executable>`; the tool directory's `bin/<executable>` |
+| Aliases (`aliases`: each a copy of its program's launcher) | `<alias>` | `<alias>.exe` | beside its launcher (signed before the bundle, with its entitlements) |
 | Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | beside the launcher's directory: `Contents/Frameworks/lib<core>_<cpu>.dylib`, `Frameworks/lib<core>_<cpu>.dylib` |
 | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | the bundle's `Contents/MacOS`, else the tool directory's `bin` (not in a dmg) |

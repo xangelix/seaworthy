@@ -1440,8 +1440,8 @@ fn prepare_windows(
             .unwrap_or_default();
         let program = file.program.as_deref().filter(|_| several);
         let description = match (&file.role, program) {
-            (Role::Launcher, None) => Some(display.clone()),
-            (Role::Launcher, Some(program)) => Some(format!("{display} ({program})")),
+            (Role::Launcher | Role::Alias, None) => Some(display.clone()),
+            (Role::Launcher | Role::Alias, Some(program)) => Some(format!("{display} ({program})")),
             (Role::Core { cpu }, None) => Some(format!("{display} ({cpu})")),
             (Role::Core { cpu }, Some(program)) => Some(format!("{display} ({program}, {cpu})")),
             (Role::Helper, _) => Some(format!("{display} updater")),
@@ -1626,14 +1626,17 @@ fn prepare_macos(
             sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
         });
     }
-    let code = |under: &Path, launchers: bool| -> Vec<PathBuf> {
+    // The code under a root: the programs' (each launcher and alias, which
+    // carry the entitlements), or everything else nested (cores, sidecars,
+    // the helper).
+    let code = |under: &Path, programs: bool| -> Vec<PathBuf> {
         layout
             .files
             .iter()
             .filter(|f| f.staged.starts_with(under))
             .filter(|f| {
-                if launchers {
-                    f.role == Role::Launcher
+                if programs {
+                    matches!(f.role, Role::Launcher | Role::Alias)
                 } else {
                     matches!(f.role, Role::Core { .. } | Role::Helper | Role::Sidecar)
                 }
@@ -1645,7 +1648,15 @@ fn prepare_macos(
         crate::macos::sign_tool(tools, &code(tool, true), &code(tool, false), signer)?;
     }
     if let (Some(bundle), Some(install)) = (&bundle, &names.bundle) {
-        crate::macos::sign_bundle(tools, bundle, &code(bundle, false), signer)?;
+        // The bundle's own executable is signed with the bundle; its aliases
+        // (copies of it beside it) before, as the program they are.
+        let aliases: Vec<PathBuf> = layout
+            .files
+            .iter()
+            .filter(|f| f.role == Role::Alias && f.staged.starts_with(bundle))
+            .map(|f| f.staged.clone())
+            .collect();
+        crate::macos::sign_bundle(tools, bundle, &code(bundle, false), &aliases, signer)?;
         let seal = bundle
             .join("Contents")
             .join("_CodeSignature")

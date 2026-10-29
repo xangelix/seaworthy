@@ -400,6 +400,105 @@ fn layout_stages_an_app_bundle() {
     assert!(err.contains("the bundle's icon"), "{err}");
 }
 
+/// An alias of the bundle's executable installs beside it in
+/// `Contents/MacOS`, where the launcher finds the cores in `../Frameworks`;
+/// the bundle's executable stays the launcher.
+#[test]
+fn an_alias_installs_beside_the_bundle_s_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    let text = DESKTOP.replace(
+        "core = \"acme_core\"",
+        "core = \"acme_core\"\naliases = [\"acme-askpass\"]",
+    );
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("seaworthy.toml"), &text).unwrap();
+    let config = Config::load(&project.join("seaworthy.toml")).unwrap();
+    let verified = verified(&config, dir.path());
+    let layouts = seaworthy::layout::layout(
+        &config,
+        "viewer",
+        &verified,
+        &dir.path().join("dist"),
+        seaworthy::layout::Options::default(),
+    )
+    .unwrap();
+    let paths: Vec<(&str, &seaworthy::layout::Role)> = layouts[0]
+        .files
+        .iter()
+        .map(|f| (f.install_path.as_str(), &f.role))
+        .collect();
+    assert_eq!(
+        paths[..2],
+        [
+            (
+                "/Applications/Acme Viewer.app/Contents/MacOS/AcmeTool",
+                &seaworthy::layout::Role::Launcher
+            ),
+            (
+                "/Applications/Acme Viewer.app/Contents/MacOS/acme-askpass",
+                &seaworthy::layout::Role::Alias
+            ),
+        ]
+    );
+    assert_eq!(
+        layouts[0].launcher().unwrap().install_path,
+        "/Applications/Acme Viewer.app/Contents/MacOS/AcmeTool"
+    );
+}
+
+/// An alias of the bundle's executable is signed as that program is (the
+/// hardened runtime, the entitlements) after the nested code and before the
+/// bundle seals it, and its signature checked.
+#[test]
+fn an_alias_is_signed_as_its_program_before_the_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = mac_stubs(dir.path());
+    let id = developer_id(dir.path());
+    let bundle = dir.path().join("Acme Viewer.app");
+    let core = bundle.join("Contents/Frameworks/libacme_core_apple-m1.dylib");
+    let alias = bundle.join("Contents/MacOS/acme-askpass");
+    for file in [&core, &alias] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, b"code").unwrap();
+    }
+    let entitlements = dir.path().join("entitlements.plist");
+    let signer = seaworthy::macos::MacSigner::DeveloperId {
+        id: &id,
+        team_id: TEAM,
+        entitlements: Some(&entitlements),
+    };
+    seaworthy::macos::sign_bundle(
+        &tools,
+        &bundle,
+        std::slice::from_ref(&core),
+        std::slice::from_ref(&alias),
+        &signer,
+    )
+    .unwrap();
+    let keychain = id.keychain.as_ref().unwrap().display().to_string();
+    let requirement = seaworthy::macos::developer_id_requirement(TEAM);
+    let entitled = entitlements.display();
+    let (core, alias, bundle) = (core.display(), alias.display(), bundle.display());
+    assert_eq!(
+        calls(dir.path()),
+        [
+            format!(
+                "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|{core}"
+            ),
+            format!(
+                "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|--entitlements|{entitled}|{alias}"
+            ),
+            format!(
+                "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|--entitlements|{entitled}|{bundle}"
+            ),
+            format!("codesign|--verify|--strict|--test-requirement|{requirement}|{core}"),
+            format!("codesign|--verify|--strict|--test-requirement|{requirement}|{alias}"),
+            format!("codesign|--verify|--strict|--deep|--test-requirement|{requirement}|{bundle}"),
+        ]
+    );
+}
+
 #[test]
 fn the_info_plist_names_the_bundle_and_the_release() {
     let config = config(DESKTOP).unwrap();
@@ -1323,7 +1422,8 @@ fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
         team_id: TEAM,
         entitlements: Some(&entitlements),
     };
-    seaworthy::macos::sign_bundle(&tools, &bundle, std::slice::from_ref(&core), &signer).unwrap();
+    seaworthy::macos::sign_bundle(&tools, &bundle, std::slice::from_ref(&core), &[], &signer)
+        .unwrap();
     let dmg = dir.path().join("acme-viewer.dmg");
     seaworthy::macos::build_dmg(
         &tools,
@@ -1377,7 +1477,7 @@ fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
     std::fs::remove_file(dir.path().join("calls")).unwrap();
     let adhoc = seaworthy::macos::MacSigner::AdHoc;
     let bundle_path = dir.path().join("Acme Viewer.app");
-    seaworthy::macos::sign_bundle(&tools, &bundle_path, &[], &adhoc).unwrap();
+    seaworthy::macos::sign_bundle(&tools, &bundle_path, &[], &[], &adhoc).unwrap();
     assert_eq!(
         calls(dir.path()),
         [
@@ -1404,7 +1504,7 @@ fn another_team_s_signature_and_a_rejected_notarization_are_refused() {
         entitlements: None,
     };
     std::fs::write(dir.path().join("wrong-team"), "").unwrap();
-    let err = seaworthy::macos::sign_bundle(&tools, &bundle, &[], &signer)
+    let err = seaworthy::macos::sign_bundle(&tools, &bundle, &[], &[], &signer)
         .unwrap_err()
         .to_string();
     std::fs::remove_file(dir.path().join("wrong-team")).unwrap();
