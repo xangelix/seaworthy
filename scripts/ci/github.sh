@@ -261,9 +261,6 @@ data_path() {
             . | ..) fail "data-path $(quoted "$path") holds a \`$segment\` segment" ;;
         esac
     done
-    if [ -e "$path" ] || [ -L "$path" ]; then
-        fail "data-path $(quoted "$path") is in the repository already: unpack the artifact where nothing is"
-    fi
     local root checkout work parent resolved landing place
     root="$(pwd -P)"
     checkout="$(lower "$root/${SEAWORTHY_CHECKOUT:-.seaworthy}")"
@@ -287,6 +284,11 @@ data_path() {
             "$place"/*) fail "data-path $(quoted "$path") lands in seaworthy's own $(quoted "${place##*/}"): unpack the data elsewhere" ;;
         esac
     done
+    # Last: on a file system that ignores case (macOS's), seaworthy's own directories spelled
+    # otherwise are there already, and are refused above for what they are.
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        fail "data-path $(quoted "$path") is in the repository already: unpack the artifact where nothing is"
+    fi
     say "the data artifact $artifact lands in $path"
 }
 
