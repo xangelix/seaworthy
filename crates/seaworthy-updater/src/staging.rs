@@ -96,8 +96,21 @@ impl Drop for StagedFile {
 /// lockfile, held for a whole helper run. The lockfile itself is left in
 /// place (deleting a lockfile races its next opener); it is empty, 0600, and
 /// opened without following a symlink.
+///
+/// Dropping it unlocks before closing: a `flock` lock belongs to the open
+/// file description, and a child process this one is starting holds a copy
+/// of every descriptor until its exec, so a close alone could leave the lock
+/// held a moment longer.
 pub(crate) struct TargetLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for TargetLock {
+    fn drop(&mut self) {
+        // A failed unlock leaves the close, which releases it once no copy
+        // of the descriptor is open.
+        let _ = self.file.unlock();
+    }
 }
 
 impl TargetLock {
@@ -125,7 +138,7 @@ impl TargetLock {
             ))));
         }
         match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self { file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(UpdateError::UpdateInProgress),
             Err(std::fs::TryLockError::Error(error)) => Err(UpdateError::Io(error)),
         }
@@ -264,29 +277,21 @@ mod tests {
 
     /// The cross-process lock is exclusive (flock locks are per
     /// open file description, so a second open in THIS process contends
-    /// exactly like another process would).
+    /// exactly like another process would), and free once dropped, even
+    /// while a copy of its descriptor (a starting child's) is still open.
     #[test]
     fn the_target_lock_is_exclusive_until_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let lock_path = dir.path().join(".lock");
         let held = TargetLock::try_acquire(&lock_path).unwrap();
+        let copy = held.file.try_clone().unwrap();
         assert!(matches!(
             TargetLock::try_acquire(&lock_path),
             Err(UpdateError::UpdateInProgress)
         ));
         drop(held);
-        // A sibling test's child holds a copy of every descriptor from its
-        // fork until its exec closes them (they're close-on-exec), the lock's
-        // among them: the dropped lock comes free once that child has exec'd.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while let Err(error) = TargetLock::try_acquire(&lock_path) {
-            assert!(
-                matches!(error, UpdateError::UpdateInProgress)
-                    && std::time::Instant::now() < deadline,
-                "the dropped lock isn't free: {error}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        TargetLock::try_acquire(&lock_path).unwrap();
+        drop(copy);
         // A directory where the lockfile should be is refused.
         assert!(TargetLock::try_acquire(dir.path()).is_err());
     }
