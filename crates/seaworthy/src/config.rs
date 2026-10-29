@@ -491,6 +491,15 @@ pub struct Linux {
     /// Package dependencies per format, in each format's own syntax.
     #[serde(default)]
     pub depends: Depends,
+    /// Weak dependencies a package manager installs beside the package
+    /// unless told not to (deb `Recommends:`, rpm `Recommends:`): what most
+    /// installs want, the program working without it. pacman has none.
+    #[serde(default)]
+    pub recommends: WeakDepends,
+    /// Weaker still: packages offered beside it, never installed by default
+    /// (deb `Suggests:`, rpm `Suggests:`). pacman has none.
+    #[serde(default)]
+    pub suggests: WeakDepends,
     /// Shared libraries the binaries may need (`DT_NEEDED`) beyond the base
     /// system's (`verify::BASE_NEEDED`); each needs its package in
     /// `depends`.
@@ -565,6 +574,19 @@ pub struct Depends {
     /// pacman `depends` entries.
     #[serde(default)]
     pub pacman: Vec<String>,
+}
+
+/// `linux.recommends` or `linux.suggests`: weak dependencies, per format
+/// that has them, in each format's own syntax.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeakDepends {
+    /// deb entries (alternatives with `|`).
+    #[serde(default)]
+    pub deb: Vec<String>,
+    /// rpm entries.
+    #[serde(default)]
+    pub rpm: Vec<String>,
 }
 
 /// `[product.<id>]`.
@@ -2910,19 +2932,28 @@ impl Config {
                 "with fips, a macOS build ships the FIPS module's dylib beside the cores (AWS-LC builds the module only as a dynamic library off Linux): sidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]",
             ));
         }
-        for entry in p
-            .linux
-            .depends
-            .deb
-            .iter()
-            .chain(&p.linux.depends.rpm)
-            .chain(&p.linux.depends.pacman)
-        {
-            if !is_plain_text(entry) || entry.contains(',') {
-                return Err(at(
-                    "linux.depends",
-                    "one dependency per entry, without commas, control characters or `$`",
-                ));
+        let l = &p.linux;
+        for (key, entries) in [
+            (
+                "linux.depends",
+                [&l.depends.deb, &l.depends.rpm, &l.depends.pacman].as_slice(),
+            ),
+            (
+                "linux.recommends",
+                [&l.recommends.deb, &l.recommends.rpm].as_slice(),
+            ),
+            (
+                "linux.suggests",
+                [&l.suggests.deb, &l.suggests.rpm].as_slice(),
+            ),
+        ] {
+            for entry in entries.iter().copied().flatten() {
+                if !is_plain_text(entry) || entry.contains(',') {
+                    return Err(at(
+                        key,
+                        "one dependency per entry, without commas, control characters or `$`",
+                    ));
+                }
             }
         }
         match (p.kind, &p.service) {

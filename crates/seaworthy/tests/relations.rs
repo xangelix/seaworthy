@@ -380,3 +380,64 @@ fn the_msi_refuses_to_install_beside_a_conflicting_product() {
     );
     seaworthy::msi_check::expected_from_wxs(&wxs).unwrap();
 }
+
+/// `linux.recommends` and `linux.suggests`: each format's weak dependencies
+/// in its package's metadata (deb's and rpm's; pacman has none), after the
+/// ones seaworthy adds itself, each once; held to `depends`' rules.
+#[test]
+fn weak_dependencies_reach_the_deb_and_the_rpm() {
+    let text = format!(
+        "{}linux.recommends = {{ deb = [\"git-lfs\", \"hicolor-icon-theme\"], rpm = [\"git-lfs\"] }}\nlinux.suggests = {{ deb = [\"nodejs (>= 18)\"], rpm = [\"nodejs >= 18\"] }}\n",
+        profile("solo", "Acme Solo", "")
+    );
+    let config = Config::parse(&format!("{DEFAULTS}{text}")).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let layouts = layouts(&config, "solo", out.path());
+    let linux = layout_for(&layouts, seaworthy::inputs::LINUX);
+    let package = seaworthy::linux::linux_package(&config, "solo", linux).unwrap();
+    let versions = common::release().package_versions().unwrap();
+    let field = |format: seaworthy::config::Output, key: &str| -> Vec<String> {
+        let work = out.path().join(format.name());
+        let path = seaworthy::nfpm::write_config(
+            &config, "solo", &package, format, &versions, "", 0, &work,
+        )
+        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        json.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|v| v.as_str().unwrap().to_owned()).collect())
+            .unwrap_or_default()
+    };
+    use seaworthy::config::Output;
+    assert_eq!(
+        field(Output::Deb, "recommends"),
+        ["git-lfs", "hicolor-icon-theme"]
+    );
+    assert_eq!(field(Output::Deb, "suggests"), ["nodejs (>= 18)"]);
+    assert_eq!(field(Output::Rpm, "recommends"), ["git-lfs"]);
+    assert_eq!(field(Output::Rpm, "suggests"), ["nodejs >= 18"]);
+    assert!(field(Output::Pacman, "recommends").is_empty());
+    assert!(field(Output::Pacman, "suggests").is_empty());
+    // One entry each, as depends: no commas, no `$`.
+    for bad in ["\"git-lfs, ssh\"", "\"$HOME\""] {
+        let err = Config::parse(&format!(
+            "{DEFAULTS}{}linux.suggests = {{ deb = [{bad}] }}\n",
+            profile("solo", "Acme Solo", "")
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("product.solo.linux.suggests: one dependency per entry"),
+            "{err}"
+        );
+    }
+    // pacman has none to name.
+    let err = Config::parse(&format!(
+        "{DEFAULTS}{}linux.recommends = {{ pacman = [\"git-lfs\"] }}\n",
+        profile("solo", "Acme Solo", "")
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("unknown field `pacman`"), "{err}");
+}

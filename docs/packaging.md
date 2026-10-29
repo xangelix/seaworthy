@@ -238,8 +238,8 @@ helper's path and service units. A product with a `gui` program carries its menu
 that program) and hicolor icons, and every product a `/usr/bin/<command>` link to each program put
 on `PATH`; a desktop product with the helper carries the helper's unit and a polkit rule letting an
 active local session start exactly that unit ([updates.md](updates.md)). The products and packages
-a product conflicts with (`conflicts`) are every format's conflicts, and `linux.provides` its
-provides; neither replaces anything, so a package manager never swaps one product for another (one
+a product conflicts with (`conflicts`) are every format's conflicts, `linux.provides` its
+provides, and `linux.recommends` and `linux.suggests` deb's and rpm's weak dependencies; neither replaces anything, so a package manager never swaps one product for another (one
 per crypto build: installing another profile means removing the installed one first).
 
 One package-script lifecycle, spelled for each format:

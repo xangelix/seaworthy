@@ -221,6 +221,8 @@ and the helper's start right, a program's `role` how people reach it.
 | Key | Meaning |
 |---|---|
 | `depends.deb`, `depends.rpm`, `depends.pacman` | Package dependencies per format, in each format's own syntax (deb alternatives with `\|`). |
+| `recommends.deb`, `recommends.rpm` | Weak dependencies (deb `Recommends:`, rpm `Recommends:`): installed beside the package unless the person installing says not to, the program working without them. pacman has none. |
+| `suggests.deb`, `suggests.rpm` | Weaker still (deb `Suggests:`, rpm `Suggests:`): offered, never installed by default. pacman has none. |
 | `needed` | Shared libraries the binaries may need beyond the base system's; every Linux format in `outputs` must then declare the packages that provide them. |
 | `glibc` | The oldest glibc the Linux binaries must run on, `2.N` (default `2.34`). |
 | `command` | `/usr/bin/<command>`, a link to the launcher in the Linux packages (`[a-z0-9][a-z0-9._+-]*`), in the single-program form (a `[[programs]]` entry names its own). dpkg and rpm replace an unowned file there without asking: pick a name nothing else uses. |

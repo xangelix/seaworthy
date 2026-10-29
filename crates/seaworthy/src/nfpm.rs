@@ -31,7 +31,9 @@
 //! update run would fail. A product with menu icons or file types
 //! recommends `hicolor-icon-theme` and `shared-mime-info` (deb, rpm),
 //! whose own triggers update the icon cache and the MIME database: the
-//! packages carry no script for them. A desktop app shipping its helper's unit depends
+//! packages carry no script for them. The product's own weak dependencies
+//! (`linux.recommends`, `linux.suggests`) follow, deb's or rpm's; pacman
+//! has none. A desktop app shipping its helper's unit depends
 //! on `systemd` too, and on polkit (`polkitd | policykit-1` for deb,
 //! `polkit` for rpm and pacman), which reads the rule letting the session
 //! start it.
@@ -268,16 +270,30 @@ pub fn write_config(
     // failing an install from a mirror without it).
     // A product defining file types (shared-mime-info packages) recommends
     // shared-mime-info the same way: its trigger compiles them.
-    let mut recommends: Vec<&str> = Vec::new();
+    let mut recommends: Vec<String> = Vec::new();
     let ships = |prefix: &str| package.files.iter().any(|f| f.dst.starts_with(prefix));
     if format != Output::Pacman {
         if ships("/usr/share/icons/hicolor/") {
-            recommends.push("hicolor-icon-theme");
+            recommends.push("hicolor-icon-theme".to_owned());
         }
         if ships(crate::linux::MIME_PACKAGES_DIR) {
-            recommends.push("shared-mime-info");
+            recommends.push("shared-mime-info".to_owned());
         }
     }
+    // The product's own weak dependencies, its format's (pacman has none).
+    let weak = |depends: &crate::config::WeakDepends| -> Vec<String> {
+        match format {
+            Output::Deb => depends.deb.clone(),
+            Output::Rpm => depends.rpm.clone(),
+            _ => Vec::new(),
+        }
+    };
+    for entry in weak(&product.linux.recommends) {
+        if !recommends.contains(&entry) {
+            recommends.push(entry);
+        }
+    }
+    let suggests = weak(&product.linux.suggests);
     let mut archlinux = json!({"packager": d.maintainer});
     let mut scripts_json = None;
     if let Some(scripts) = crate::scripts::scripts(format, &package.name, &package.units) {
@@ -337,6 +353,9 @@ pub fn write_config(
     });
     if !recommends.is_empty() {
         nfpm["recommends"] = json!(recommends);
+    }
+    if !suggests.is_empty() {
+        nfpm["suggests"] = json!(suggests);
     }
     // The packages this product supersedes (`linux.replaces`): nFPM's
     // `conflicts` and `replaces` (rpm: `Obsoletes:`), so the package
