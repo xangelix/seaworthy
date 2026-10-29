@@ -905,7 +905,12 @@ fn an_alias_installs_the_launcher_again_beside_it() {
     assert_eq!(alias.install_path, "Acme\\Trove\\trove-askpass.exe");
     let wxs = seaworthy::wix::wxs(&config, "trove", windows, &common::release()).unwrap();
     seaworthy::msi_check::expected_from_wxs(&wxs).unwrap();
-    assert!(wxs.contains("\\Acme\\Trove\\trove-askpass.exe\""), "{wxs}");
+    // Words of the test's own in the messages, not the generated source: it is the
+    // release's, which a code scanner follows as data not to log.
+    assert!(
+        wxs.contains("\\Acme\\Trove\\trove-askpass.exe\""),
+        "the alias is a file of the install directory"
+    );
     let gui_file = wxs
         .lines()
         .find(|l| l.contains("<File ") && l.contains("TroveGui.exe"))
@@ -914,11 +919,11 @@ fn an_alias_installs_the_launcher_again_beside_it() {
         .unwrap()
         .to_owned();
     let shortcuts: Vec<&str> = wxs.lines().filter(|l| l.contains("<Shortcut ")).collect();
-    assert_eq!(shortcuts.len(), 2, "{shortcuts:#?}");
+    assert_eq!(shortcuts.len(), 2, "a shortcut each, the gui program's");
     for shortcut in shortcuts {
         assert!(
             shortcut.contains(&format!("Target=\"[#{gui_file}]\"")),
-            "{shortcut}"
+            "a shortcut starts the gui program's launcher, never the alias"
         );
     }
 }
