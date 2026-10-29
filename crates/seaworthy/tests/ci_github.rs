@@ -541,6 +541,140 @@ fn glue(args: &[&str], env: &[(&str, &str)]) -> Output {
     command.output().unwrap()
 }
 
+/// The caller's data artifact: both inputs, checked by the prepare job
+/// before anything builds and by each packaging job before it downloads the
+/// data, which lands where data-path says before the signing step reads it.
+#[test]
+fn the_data_artifact_lands_where_data_path_says_after_its_check() {
+    let (text, workflow) = yaml(".github/workflows/dist.yml");
+    let inputs = &workflow["on"]["workflow_call"]["inputs"];
+    for input in ["data-artifact", "data-path"] {
+        assert_eq!(string(&inputs[input]["default"]), Some(""), "{input}");
+    }
+    assert!(text.contains("SEAWORTHY_DATA_ARTIFACT: ${{ inputs.data-artifact }}"));
+    assert!(text.contains("SEAWORTHY_DATA_PATH: ${{ inputs.data-path }}"));
+    let jobs = workflow["jobs"].as_hash().unwrap();
+    let steps_of = |id: &str| {
+        jobs[&Yaml::String(id.to_owned())]["steps"]
+            .as_vec()
+            .unwrap()
+            .clone()
+    };
+    let check = "bash .seaworthy/scripts/ci/github.sh data-path";
+    let prepare = steps_of("prepare");
+    let checked = prepare
+        .iter()
+        .position(|s| string(&s["run"]) == Some(check))
+        .expect("prepare checks the data artifact");
+    let prepared = prepare
+        .iter()
+        .position(|s| string(&s["run"]).is_some_and(|r| r.contains("seaworthy.sh prepare")))
+        .unwrap();
+    assert!(checked < prepared, "checked before the plans are made");
+    for id in ["package", "package-macos"] {
+        let steps = steps_of(id);
+        let checked = steps
+            .iter()
+            .position(|s| string(&s["run"]) == Some(check))
+            .unwrap_or_else(|| panic!("{id}: the data check"));
+        let downloaded = steps
+            .iter()
+            .position(|s| string(&s["with"]["name"]) == Some("${{ inputs.data-artifact }}"))
+            .unwrap_or_else(|| panic!("{id}: the data's download"));
+        let signed = steps
+            .iter()
+            .position(|s| {
+                string(&s["run"])
+                    .is_some_and(|r| r.starts_with("bash .seaworthy/scripts/ci/github.sh signed "))
+            })
+            .unwrap();
+        assert!(checked < downloaded && downloaded < signed, "{id}");
+        let download = &steps[downloaded];
+        assert_eq!(string(&download["if"]), Some("inputs.data-artifact != ''"));
+        assert_eq!(
+            string(&steps[checked]["if"]),
+            Some("inputs.data-artifact != ''")
+        );
+        assert_eq!(
+            string(&download["with"]["path"]),
+            Some("${{ inputs.data-path }}")
+        );
+        assert!(pinned(string(&download["uses"]).unwrap()), "{id}");
+    }
+}
+
+/// `github.sh data-path`: both inputs or neither; a plain relative path not
+/// there yet, whose existing part resolves inside the workspace and outside
+/// seaworthy's checkout and work directory, however it is spelled or linked.
+#[test]
+fn data_path_keeps_the_data_off_seaworthy_s_own_directories() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path();
+    for dir in [".seaworthy/scripts/ci", "seaworthy-work", "docs", "target"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(root.join("README"), "x").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join(".seaworthy/scripts"), root.join("shortcut")).unwrap();
+        std::os::unix::fs::symlink("/tmp", root.join("outside")).unwrap();
+    }
+    let run = |artifact: &str, path: &str| {
+        let mut command = Command::new("bash");
+        command
+            .arg(repo_root().join("scripts/ci/github.sh"))
+            .arg("data-path")
+            .current_dir(root);
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("SEAWORTHY_") {
+                command.env_remove(k);
+            }
+        }
+        command
+            .env("SEAWORTHY_DATA_ARTIFACT", artifact)
+            .env("SEAWORTHY_DATA_PATH", path)
+            .env("SEAWORTHY_CHECKOUT", ".seaworthy")
+            .env("SEAWORTHY_WORK", "seaworthy-work");
+        command.output().unwrap()
+    };
+    let accepted = |artifact: &str, path: &str| {
+        let out = run(artifact, path);
+        assert!(out.status.success(), "{path}: {}", said(&out));
+    };
+    let refused = |artifact: &str, path: &str, why: &str| {
+        let out = run(artifact, path);
+        assert!(!out.status.success(), "{path} must be refused");
+        assert!(said(&out).contains(why), "{path}: {}", said(&out));
+    };
+    accepted("", "");
+    accepted("web-build", "web");
+    accepted("web-build", "target/web");
+    accepted("web-build", "docs/built/web");
+    refused("web-build", "", "without data-path");
+    refused("", "web", "without data-artifact");
+    refused("web build", "web", "isn't an artifact's name");
+    for path in ["/tmp/web", "web/", "a//b", "web dir", "a\\b"] {
+        refused("web-build", path, "isn't a plain relative path");
+    }
+    refused("web-build", "docs/../web", "holds a `..` segment");
+    refused("web-build", "./web", "holds a `.` segment");
+    refused("web-build", "docs", "in the repository already");
+    refused("web-build", "README/web", "isn't a directory");
+    for path in [
+        ".seaworthy/web",
+        ".SeaWorthy/web",
+        "seaworthy-work/artifacts/x",
+        "Seaworthy-Work",
+    ] {
+        refused("web-build", path, "lands in seaworthy's own");
+    }
+    #[cfg(unix)]
+    {
+        refused("web-build", "shortcut/web", "lands in seaworthy's own");
+        refused("web-build", "outside/web", "leads out of the workspace");
+    }
+}
+
 #[test]
 fn the_oidc_grant_is_azure_s_alone() {
     let token = [

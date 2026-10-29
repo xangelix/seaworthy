@@ -151,6 +151,7 @@ cap them too):
 | `signing-toml` | (generated) | your own `signing.toml` instead of the one generated from the secrets: command signers (a KMS), several manifest algorithms |
 | `ci-signing-toml` | (none) | outside a release, the CI test keys' signing configuration (`seaworthy package --ci-test-signing`) |
 | `publish-toml`, `publish-dry-run` | (none), `false` | on a release, the store to publish to; a dry run checks everything and uploads nothing |
+| `data-artifact`, `data-path` | (none) | an artifact of this run a job of yours built (a web build), unpacked at `data-path` (relative to the repository's root) in the packaging jobs before they read `[[files]]` ([below](#data-built-by-your-own-jobs)) |
 | `toolchain` | the product's `rust-toolchain.toml` | a toolchain for the product's builds |
 | `cargo-args` | (none) | more cargo arguments for every build (`--features fips`); products built in several crypto builds give each program its own `features` in `seaworthy.toml` instead |
 | `rustflags`, `core-rustflags` | (none) | more rustflags for every build, and for the cores alone ([packaging.md](packaging.md#extra-build-flags); `{workspace}`, `{triple}` and `{cpu}` expand) |
@@ -162,6 +163,47 @@ cap them too):
 | `artifact-prefix`, `retention-days` | `seaworthy`, `14` | the uploaded artifacts' names and lifetime (on a public repository, who can read them: [below](#deleting-the-artifacts)) |
 
 Outputs: `version` (the release version) and `packages-artifact` (the packages artifact's name).
+
+## Data built by your own jobs
+
+A data file `[[product.<id>.files]]` ships may be built rather than committed: a web build a
+program serves, generated documentation. Build it in a job of your own before `dist`, upload it as an
+artifact, and name it: the packaging jobs download it where `data-path` says, then package it as they
+package any data file (`layout`'s rules: no native code, nothing Windows would run, no links).
+
+```yaml
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@<sha> # v7.x
+        with:
+          persist-credentials: false
+      - run: scripts/build-web.sh     # writes target/web
+      - uses: actions/upload-artifact@<sha> # v7.x
+        with:
+          name: web
+          path: target/web/
+          if-no-files-found: error
+
+  dist:
+    needs: web
+    uses: xangelix/seaworthy/.github/workflows/dist.yml@<full commit SHA>
+    permissions:
+      contents: read
+    with:
+      data-artifact: web
+      data-path: packaging/web      # seaworthy.toml: [[product.<id>.files]] source = "packaging/web"
+```
+
+The packaging jobs still run none of your code: the artifact is data, unpacked by
+`actions/download-artifact` after `github.sh data-path` has checked where it lands, in the prepare
+job (before anything builds) and again in each packaging job. The path must be a plain relative path
+that holds nothing in the checkout yet (built files never mix with committed ones), and resolve, links
+followed, inside the workspace and outside seaworthy's checkout and work directory, whose scripts and
+tool the signing step runs. Both inputs or neither.
 
 ## Deleting the artifacts
 

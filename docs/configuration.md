@@ -353,7 +353,7 @@ install root (data only: see [packaging.md](packaging.md#layout)):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `source` | required | The file or directory. |
+| `source` | required | The file or directory. One a CI job builds (a web build) reaches the GitHub workflow's packaging jobs as `data-artifact` ([ci-github.md](ci-github.md#data-built-by-your-own-jobs)). |
 | `destination` | the source's name | Where it installs, relative to the install root, `/`-separated. |
 | `platforms` | every platform | `linux`, `windows`, `macos`. On macOS data files install in `Contents/Resources`. |
 | `hidden` | `false` | Ship hidden files found below a directory source. Version-control directories never ship. |

@@ -135,6 +135,14 @@ on:
         description: Check everything publishing would do, and upload nothing.
         type: boolean
         default: false
+      data-artifact:
+        description: An artifact of this run, built by a job of the caller's before this workflow (a web build, generated documents), unpacked at data-path in the packaging jobs before they read seaworthy.toml's [[files]]. Data only, held to layout's rules; the packaging jobs still run no product code.
+        type: string
+        default: ""
+      data-path:
+        description: Where data-artifact is unpacked, relative to the repository's root, for [[files]] to name; somewhere the checkout holds nothing yet, outside seaworthy's own directories.
+        type: string
+        default: ""
       toolchain:
         description: A Rust toolchain for the product's builds instead of its rust-toolchain.toml's.
         type: string
@@ -291,6 +299,10 @@ env:
   # seaworthy-formats' build switch for the product's builds: every step of
   # seaworthy.sh (and the Windows build) refuses it on a release.
   SEAWORTHY_ALLOW_CI_TEST_KEYS: ${{ inputs.ci-test-keys && '1' || '' }}
+  # The caller's data artifact and where it lands (github.sh data-path checks
+  # both before the packaging jobs download it).
+  SEAWORTHY_DATA_ARTIFACT: ${{ inputs.data-artifact }}
+  SEAWORTHY_DATA_PATH: ${{ inputs.data-path }}
 
 defaults:
   run:
@@ -338,6 +350,9 @@ jobs:
           # A release's tool compiles from source: what signs must not come
           # from a cache.
           cache: ${{ (inputs.release || inputs.dev-sign) && 'false' || 'true' }}
+      # The data artifact's place, checked before anything builds.
+      - name: The data artifact (github.sh data-path)
+        run: bash .seaworthy/scripts/ci/github.sh data-path
       - name: Prepare (seaworthy.sh prepare)
         env:
           SEAWORTHY_TOOL_BIN: ${{ steps.seaworthy.outputs.bin }}
@@ -631,6 +646,17 @@ jobs:
           pattern: ${{ inputs.artifact-prefix }}-build-{linux,windows}-*
           merge-multiple: true
           path: seaworthy-work/artifacts
+      # The caller's data for [[files]] (data-artifact), where data-path
+      # says: checked first (never onto seaworthy's checkout or work
+      # directory, nor over the repository's own files).
+      - name: The data artifact (github.sh data-path)
+        if: inputs.data-artifact != ''
+        run: bash .seaworthy/scripts/ci/github.sh data-path
+      - if: inputs.data-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.data-artifact }}
+          path: ${{ inputs.data-path }}
       # Before any secret is in a step's environment.
       - name: The packaging tools
         run: |
@@ -860,6 +886,17 @@ jobs:
           pattern: ${{ inputs.artifact-prefix }}-build-macos-*
           merge-multiple: true
           path: seaworthy-work/artifacts
+      # The caller's data for [[files]] (data-artifact), where data-path
+      # says: checked first (never onto seaworthy's checkout or work
+      # directory, nor over the repository's own files).
+      - name: The data artifact (github.sh data-path)
+        if: inputs.data-artifact != ''
+        run: bash .seaworthy/scripts/ci/github.sh data-path
+      - if: inputs.data-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.data-artifact }}
+          path: ${{ inputs.data-path }}
       # Before any secret is in a step's environment.
       - name: Bash 4.4 or later
         run: |
