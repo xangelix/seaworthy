@@ -31,7 +31,8 @@ two products building one core crate with different features keep apart.
 
 Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
 the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
-each program's launcher and the helper once (in the target directory `base`), each program's core
+each program's launcher (its `launcher-bin`, copied to `launcher/<executable>`) and the helper
+once (in the target directory `base`), each program's core
 once per CPU target with its features, in its build's own target directory (`<build>` above), the
 per-CPU flags as `target.<triple>.rustflags`. It refuses a product whose cargo configuration sets
 `build.rustflags`, which cargo would ignore once target flags are set.

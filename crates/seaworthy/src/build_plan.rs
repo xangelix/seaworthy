@@ -11,8 +11,9 @@
 //! single-program keys):
 //!
 //! - **the launcher**, once, built for plain x86-64 (`--bin <executable>`,
-//!   from `launcher`'s manifest when `seaworthy.toml` names it) in the target
-//!   directory `base`;
+//!   or `--bin <launcher-bin>` when its cargo binary is named apart, shipped
+//!   as the executable; from `launcher`'s manifest when `seaworthy.toml`
+//!   names it) in the target directory `base`;
 //! - **the update helper**, when it ships, the same way (from
 //!   `helper-crate`'s manifest when `seaworthy.toml` names it: built from the
 //!   workspace root, a binary gets the features every workspace member
@@ -286,7 +287,7 @@ pub fn plan_for(
         let core_flags = rpath("@loader_path");
         let programs = product.programs();
         for program in &programs {
-            let mut launcher_args = vec!["--bin".to_owned(), program.executable.clone()];
+            let mut launcher_args = vec!["--bin".to_owned(), program.launcher_bin.clone()];
             launcher_args.extend(manifest("launcher", &program.launcher)?);
             launcher_args.extend(deployment.iter().cloned());
             plan.built(
@@ -295,7 +296,7 @@ pub fn plan_for(
                     rustflags: executable_flags.clone(),
                     args: launcher_args,
                 },
-                format!("base/{triple}/release/{}{exe}", program.executable),
+                format!("base/{triple}/release/{}{exe}", program.launcher_bin),
                 format!("{triple}/launcher/{}{exe}", program.executable),
             )?;
         }

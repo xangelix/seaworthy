@@ -89,6 +89,8 @@ fn programs_resolve_in_order_with_their_roles_commands_and_features() {
             Program {
                 executable: "trove".into(),
                 launcher: Some("crates/trove/cli".into()),
+                // Its cargo binary is its executable unless named apart.
+                launcher_bin: "trove".into(),
                 core: "trove_cli_core".into(),
                 role: Role::Cli,
                 // A cli program is on PATH as its executable.
@@ -101,6 +103,7 @@ fn programs_resolve_in_order_with_their_roles_commands_and_features() {
             Program {
                 executable: "TroveGui".into(),
                 launcher: Some("crates/trove/gui".into()),
+                launcher_bin: "TroveGui".into(),
                 core: "trove_gui_core".into(),
                 role: Role::Gui,
                 // A gui program only when it names a command.
@@ -146,6 +149,7 @@ fn the_single_program_keys_are_one_program() {
         [Program {
             executable: "AcmeOne".into(),
             launcher: Some("crates/one".into()),
+            launcher_bin: "AcmeOne".into(),
             core: "acme_one_core".into(),
             role: Role::Gui,
             linux_command: Some("acme-one".into()),
@@ -177,6 +181,7 @@ fn programs_are_validated() {
         ("executable", "executable = \"trove\""),
         ("core", "core = \"trove_core\""),
         ("launcher", "launcher = \"crates/trove\""),
+        ("launcher-bin", "launcher-bin = \"trove-launcher\""),
         ("linux.command", "linux.command = \"trove\""),
     ] {
         refused(
@@ -264,6 +269,24 @@ fn programs_are_validated() {
             "role = \"cli\"\nflavour = \"x\"",
             "unknown field `flavour`",
         ),
+        // A launcher's cargo binary: a name cargo and the plan take, one
+        // program's alone (each launcher names its own core), never the
+        // helper's.
+        (
+            "role = \"cli\"",
+            "role = \"cli\"\nlauncher-bin = \"trove launcher\"",
+            "programs[0].launcher-bin: a cargo binary's name",
+        ),
+        (
+            "role = \"cli\"",
+            "role = \"cli\"\nlauncher-bin = \"CON\"",
+            "programs[0].launcher-bin: a cargo binary's name",
+        ),
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\nlauncher-bin = \"Trove\"",
+            "programs[1].launcher-bin: \"Trove\" is another program's launcher binary too",
+        ),
     ] {
         refused(&edit(from, to), mentions);
     }
@@ -286,6 +309,68 @@ fn programs_are_validated() {
     assert!(
         err.contains("different from every program's executable"),
         "{err}"
+    );
+    let err = Config::parse(&format!(
+        "{}{}",
+        DEFAULTS.replace(
+            "[defaults]",
+            "[defaults]\nrelease-signatures = [\"ml-dsa-87\"]"
+        ),
+        edit("updates.default = \"off\"", "helper = \"TroveUpdate\"").replace(
+            "role = \"cli\"",
+            "role = \"cli\"\nlauncher-bin = \"troveupdate\""
+        )
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("programs[0].launcher-bin: the update helper's binary too"),
+        "{err}"
+    );
+}
+
+/// A launcher whose cargo binary is named apart from its executable (a
+/// workspace whose development binary already holds that name): the plan
+/// builds that binary and ships it as the executable, in either form.
+#[test]
+fn a_launcher_binary_named_apart_ships_as_the_executable() {
+    let config = parse(&edit(
+        "role = \"gui\"",
+        "role = \"gui\"\nlauncher-bin = \"trove-gui-launcher\"",
+    ));
+    let gui = config.products["trove"].gui_program().unwrap();
+    assert_eq!(gui.launcher_bin, "trove-gui-launcher");
+    assert_eq!(gui.executable, "TroveGui");
+    let steps = plan(&config, WINDOWS, None).unwrap();
+    let launcher = steps
+        .iter()
+        .position(|step| matches!(step, Step::Build { args, .. } if args.contains(&"trove-gui-launcher".to_owned())))
+        .expect("the gui launcher's build");
+    let Step::Build { args, .. } = &steps[launcher] else {
+        unreachable!()
+    };
+    assert_eq!(&args[..2], ["--bin", "trove-gui-launcher"]);
+    assert_eq!(
+        steps[launcher + 1],
+        copy(
+            "base/x86_64-pc-windows-msvc/release/trove-gui-launcher.exe",
+            "x86_64-pc-windows-msvc/launcher/TroveGui.exe",
+        )
+    );
+    // The single-program form's key alike.
+    let one = parse(
+        "[product.one]\ndisplay-name = \"Acme One\"\ndescription = \"One.\"\nexecutable = \"acme-one\"\nlauncher-bin = \"acme-one-launcher\"\ncore = \"acme_one_core\"\nkind = \"tool\"\noutputs = [\"deb\"]\nupdates.default = \"off\"\n",
+    );
+    let steps = plan(&one, LINUX, None).unwrap();
+    assert_eq!(
+        steps[..2],
+        [
+            build("base", &[], &["--bin", "acme-one-launcher"]),
+            copy(
+                "base/x86_64-unknown-linux-gnu/release/acme-one-launcher",
+                "x86_64-unknown-linux-gnu/launcher/acme-one",
+            ),
+        ]
     );
 }
 
