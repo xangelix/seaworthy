@@ -9,6 +9,12 @@
 #                                        (GITHUB_OUTPUT lines)
 #   github.sh build-env <triple> <file>  the caller's build-env for one
 #                                        target, checked, as KEY=VALUE lines
+#   github.sh data-path                  the caller's data artifact
+#                                        (data-artifact) and where it lands
+#                                        (data-path), checked before anything
+#                                        downloads it: both or neither, a
+#                                        plain relative path not there yet,
+#                                        outside seaworthy's own directories
 #   github.sh oidc-grant                 the calling job's grant, in the two
 #                                        jobs that take it as it is (package,
 #                                        adopt-msi): id-token: write with the
@@ -41,6 +47,10 @@
 # dev build, and only in the jobs that sign):
 #
 #   SEAWORTHY_PLATFORMS                 matrix: linux, windows, macos (comma)
+#   SEAWORTHY_DATA_ARTIFACT             data-path: the inputs; with
+#   SEAWORTHY_DATA_PATH                   SEAWORTHY_CHECKOUT and
+#                                         SEAWORTHY_WORK, the directories
+#                                         the data may never reach
 #   SEAWORTHY_BUILD_ENV                 build-env: a JSON object of objects,
 #                                       {"<triple>" or "*": {"NAME": "value"}}
 #   SEAWORTHY_GH_MANIFEST_ALGORITHM     signing-toml: the release-manifest
@@ -95,6 +105,7 @@ openssl() {
 }
 
 fail() { echo "seaworthy (github): FAIL: $*" >&2; exit 1; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 say() { echo "seaworthy (github): $*"; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -219,6 +230,68 @@ check_plain() { # <value>...
 # id-token: write. That grant is Azure Artifact Signing's alone: refused
 # without the azure-* inputs (the job would hold a token it never uses),
 # required with them when the run signs (a release or a dev build).
+# The caller's data artifact (data-artifact: built by a job of the
+# caller's, a web build say) and where the packaging jobs unpack it
+# (data-path), for seaworthy.toml's [[files]] to read. Checked in the
+# workspace (the current directory) before anything downloads it: both or
+# neither; the artifact a name; the path plain and relative ([A-Za-z0-9._-]
+# segments, no `.` or `..`), not there yet (the artifact never mixes with
+# the repository's own files), and its existing part resolving, links
+# followed, inside the workspace and outside seaworthy's checkout and work
+# directory (case-insensitively, as macOS's file system compares): the
+# scripts and tool the signing step runs live there, and the data must
+# never land on them.
+data_path() {
+    local artifact="${SEAWORTHY_DATA_ARTIFACT:-}" path="${SEAWORTHY_DATA_PATH:-}"
+    if [ -z "$artifact" ] && [ -z "$path" ]; then
+        say "no data artifact"
+        return 0
+    fi
+    [ -n "$artifact" ] || fail "data-path is set without data-artifact: name the artifact to unpack there"
+    [ -n "$path" ] || fail "data-artifact is set without data-path: name where to unpack it, relative to the repository's root"
+    [[ "$artifact" =~ ^[A-Za-z0-9._-]{1,128}$ ]] ||
+        fail "data-artifact $(quoted "$artifact") isn't an artifact's name ([A-Za-z0-9._-], at most 128)"
+    [[ "$path" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] ||
+        fail "data-path $(quoted "$path") isn't a plain relative path ([A-Za-z0-9._-] segments joined by /)"
+    local segment
+    local -a segments
+    IFS=/ read -r -a segments <<<"$path"
+    for segment in "${segments[@]}"; do
+        case "$segment" in
+            . | ..) fail "data-path $(quoted "$path") holds a \`$segment\` segment" ;;
+        esac
+    done
+    local root checkout work parent resolved landing place
+    root="$(pwd -P)"
+    checkout="$(lower "$root/${SEAWORTHY_CHECKOUT:-.seaworthy}")"
+    work="$(lower "$root/${SEAWORTHY_WORK:-seaworthy-work}")"
+    # The nearest part of it that exists: a directory, resolved.
+    parent="$(dirname "$path")"
+    while [ "$parent" != . ] && [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+        parent="$(dirname "$parent")"
+    done
+    [ -d "$parent" ] || fail "data-path $(quoted "$path"): $(quoted "$parent") isn't a directory"
+    resolved="$(cd "$parent" && pwd -P)" || fail "data-path $(quoted "$path"): $(quoted "$parent") can't be entered"
+    case "$resolved/" in
+        "$root"/*) ;;
+        *) fail "data-path $(quoted "$path") leads out of the workspace (through $(quoted "$parent"))" ;;
+    esac
+    # Where it will be: the resolved part, then the parts made anew.
+    landing="$(lower "$resolved/${path#"$parent"/}")"
+    [ "$parent" != . ] || landing="$(lower "$resolved/$path")"
+    for place in "$checkout" "$work"; do
+        case "$landing/" in
+            "$place"/*) fail "data-path $(quoted "$path") lands in seaworthy's own $(quoted "${place##*/}"): unpack the data elsewhere" ;;
+        esac
+    done
+    # Last: on a file system that ignores case (macOS's), seaworthy's own directories spelled
+    # otherwise are there already, and are refused above for what they are.
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        fail "data-path $(quoted "$path") is in the repository already: unpack the artifact where nothing is"
+    fi
+    say "the data artifact $artifact lands in $path"
+}
+
 oidc_grant() {
     local azure=0 granted=0
     [ -z "${SEAWORTHY_GH_AZURE_ENDPOINT:-}${SEAWORTHY_GH_AZURE_ACCOUNT:-}${SEAWORTHY_GH_AZURE_PROFILE:-}${AZURE_TENANT_ID:-}${AZURE_CLIENT_ID:-}" ] ||
@@ -618,10 +691,11 @@ case "$step" in
             export_env SEAWORTHY_SIGNING "$signed_file"
         fi
         ;;
+    data-path) data_path ;;
     oidc-grant) oidc_grant ;;
     signed) signed "${1:?usage: github.sh signed <step>}" ;;
     apple-cleanup) apple_cleanup ;;
     assemble) assemble "$@" ;;
     delete-artifacts) delete_artifacts "$@" ;;
-    *) echo "usage: $0 matrix|build-env|oidc-grant|signing-toml|signed|apple-cleanup|assemble|delete-artifacts" >&2; exit 2 ;;
+    *) echo "usage: $0 matrix|build-env|data-path|oidc-grant|signing-toml|signed|apple-cleanup|assemble|delete-artifacts" >&2; exit 2 ;;
 esac

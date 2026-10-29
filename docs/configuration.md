@@ -150,8 +150,10 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `display-name` | yes | The name shown to people (menus, Programs and Features, the shortcuts, the macOS bundle). |
 | `description` | yes | One-line package description. |
 | `executable` | without `programs` | The launcher executable's file stem (`AcmeAgent`). |
+| `launcher-bin` | no | The launcher's cargo binary when it isn't named as `executable` (`acme-agent-launcher`): the build plan builds `--bin <launcher-bin>` and ships it as the executable. For a workspace whose development binary already holds the executable's name (two binaries of one name in a workspace collide in its target directory). `[A-Za-z0-9][A-Za-z0-9_-]*`; never another program's, nor the helper's. |
+| `aliases` | no | Other names the launcher installs under too, each a copy beside it: started by one, the program runs as ever (its cores found beside it) and reads that name as its first argument, for a program that acts by the name it was started as (an askpass helper git or ssh starts, a multi-call binary). File stems, never another name of the product's (a program's executable or alias, the helper), case-insensitively; never on `PATH`, nor started by a shortcut or the service. Stamped and signed as the launcher is. |
 | `core` | without `programs` | The core cdylib's crate name (`acme_agent_core`). |
-| `programs` | no | `[[product.<id>.programs]]`: several programs, each its own launcher and cores ([below](#productidprograms)). Without it, `executable`, `core`, `launcher` and `linux.command` describe the product's one program. |
+| `programs` | no | `[[product.<id>.programs]]`: several programs, each its own launcher and cores ([below](#productidprograms)). Without it, `executable`, `core`, `launcher`, `launcher-bin`, `aliases` and `linux.command` describe the product's one program. |
 | `outputs` | yes | The deliverables, each once: `msi`, `zip`, `deb`, `rpm`, `pacman`, `tar`, `dmg` (a desktop app alone), `pkg` (a macOS service, a tool, or a product with `cli` programs: [packaging.md](packaging.md#macos)). |
 | `kind` | no | `service` (the default; needs `[service]`), `desktop` (run by the logged-in user; its helper is started through the interactive-users grant or a polkit rule) or `tool` (no service, no helper start right). |
 | `launcher` | no | The launcher crate's path from the workspace root (the directory of `build-plan --manifest`), for builds that follow the build plan. |
@@ -168,7 +170,7 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `sidecars.macos` | with `fips` (the product's) and a macOS output | The same for macOS (`libaws_lc_fips_*_crypto.dylib`), shipped in `Contents/Frameworks`. |
 
 `[[product.<id>.programs]]`: a product of several programs (a command-line tool and an app, say),
-in place of `executable`, `core`, `launcher` and `linux.command`, which can't be set beside it:
+in place of `executable`, `core`, `launcher`, `launcher-bin`, `aliases` and `linux.command`, which can't be set beside it:
 
 ```toml
 [[product.trove.programs]]
@@ -191,6 +193,8 @@ role = "gui"
 | `executable` | required | The launcher's file stem. No two programs of a product share one (case-insensitively), nor with the helper. |
 | `core` | required | The core cdylib's crate name. No two programs of a product share one: their cores install side by side as `<core>_<cpu>`. |
 | `launcher` | — | The launcher crate's path from the workspace root, as above. |
+| `launcher-bin` | the executable | The launcher's cargo binary, as above: built by that name, shipped as `executable`. No two programs of a product share one. |
+| `aliases` | `[]` | Other names this program's launcher installs under too, beside it, as above. |
 | `role` | required | `cli`: put on `PATH` as `command` (`/usr/bin/<command>` in the Linux packages, `/usr/local/bin/<command>` in the macOS pkg; on Windows the install directory joins `PATH` with `[product.<id>.msi] path = true`), installed on macOS in the product's tool directory. `gui`: the program `[product.<id>.desktop]`'s menu entry and shortcuts start, and the macOS app bundle's executable; at most one per product. |
 | `command` | a `cli` program's executable | The name it is put on `PATH` as (`[a-z0-9][a-z0-9._+-]*`, at most 64 bytes): a `cli` program's executable must be such a name unless it sets one, and a `gui` program is put on `PATH` only when it names one. No two programs, nor two products, share one. |
 | `features` | `[]` | Cargo features of the core crate this program's cores build with (`--features`): names of `[A-Za-z0-9_+.-]` or `<package>/<feature>`, each once. Only the cores: the launcher builds as its crate says. |
@@ -204,8 +208,8 @@ core crate with different features (one per crypto profile, say) never share a b
 building it alike build it once. A service runs the first program. The update helper stays one per
 product.
 
-The single-program keys are shorthand for one program: `executable`, `core` and `launcher` as
-given, with the core crate's default features; a `gui` program for `kind = "desktop"`, a `cli`
+The single-program keys are shorthand for one program: `executable`, `core`, `launcher`,
+`launcher-bin` and `aliases` as given, with the core crate's default features; a `gui` program for `kind = "desktop"`, a `cli`
 program otherwise; on `PATH` only as `linux.command`, and only on Linux, as before; on macOS in the
 app bundle, as before, but for `kind = "tool"`, which has none (its program installs in the tool
 directory). A `tool`
@@ -217,6 +221,8 @@ and the helper's start right, a program's `role` how people reach it.
 | Key | Meaning |
 |---|---|
 | `depends.deb`, `depends.rpm`, `depends.pacman` | Package dependencies per format, in each format's own syntax (deb alternatives with `\|`). |
+| `recommends.deb`, `recommends.rpm` | Weak dependencies (deb `Recommends:`, rpm `Recommends:`): installed beside the package unless the person installing says not to, the program working without them. pacman has none. |
+| `suggests.deb`, `suggests.rpm` | Weaker still (deb `Suggests:`, rpm `Suggests:`): offered, never installed by default. pacman has none. |
 | `needed` | Shared libraries the binaries may need beyond the base system's; every Linux format in `outputs` must then declare the packages that provide them. |
 | `glibc` | The oldest glibc the Linux binaries must run on, `2.N` (default `2.34`). |
 | `command` | `/usr/bin/<command>`, a link to the launcher in the Linux packages (`[a-z0-9][a-z0-9._+-]*`), in the single-program form (a `[[programs]]` entry names its own). dpkg and rpm replace an unowned file there without asking: pick a name nothing else uses. |
@@ -349,7 +355,7 @@ install root (data only: see [packaging.md](packaging.md#layout)):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `source` | required | The file or directory. |
+| `source` | required | The file or directory. One a CI job builds (a web build) reaches the GitHub workflow's packaging jobs as `data-artifact` ([ci-github.md](ci-github.md#data-built-by-your-own-jobs)). |
 | `destination` | the source's name | Where it installs, relative to the install root, `/`-separated. |
 | `platforms` | every platform | `linux`, `windows`, `macos`. On macOS data files install in `Contents/Resources`. |
 | `hidden` | `false` | Ship hidden files found below a directory source. Version-control directories never ship. |

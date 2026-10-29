@@ -491,6 +491,15 @@ pub struct Linux {
     /// Package dependencies per format, in each format's own syntax.
     #[serde(default)]
     pub depends: Depends,
+    /// Weak dependencies a package manager installs beside the package
+    /// unless told not to (deb `Recommends:`, rpm `Recommends:`): what most
+    /// installs want, the program working without it. pacman has none.
+    #[serde(default)]
+    pub recommends: WeakDepends,
+    /// Weaker still: packages offered beside it, never installed by default
+    /// (deb `Suggests:`, rpm `Suggests:`). pacman has none.
+    #[serde(default)]
+    pub suggests: WeakDepends,
     /// Shared libraries the binaries may need (`DT_NEEDED`) beyond the base
     /// system's (`verify::BASE_NEEDED`); each needs its package in
     /// `depends`.
@@ -567,6 +576,19 @@ pub struct Depends {
     pub pacman: Vec<String>,
 }
 
+/// `linux.recommends` or `linux.suggests`: weak dependencies, per format
+/// that has them, in each format's own syntax.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeakDepends {
+    /// deb entries (alternatives with `|`).
+    #[serde(default)]
+    pub deb: Vec<String>,
+    /// rpm entries.
+    #[serde(default)]
+    pub rpm: Vec<String>,
+}
+
 /// `[product.<id>]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -586,6 +608,18 @@ pub struct Product {
     /// required in the single-program form, refused with `[[programs]]`.
     #[serde(default)]
     pub executable: Option<String>,
+    /// The launcher's cargo binary when it isn't named as `executable`
+    /// (`acme-collector-launcher`, shipped as `AcmeForensicCollector`): the
+    /// build plan builds `--bin <launcher-bin>` and ships it under the
+    /// executable's name. The single-program form: with `[[programs]]`, each
+    /// program names its own.
+    #[serde(default)]
+    pub launcher_bin: Option<String>,
+    /// Other names the launcher is installed under too, beside it
+    /// ([`Program::aliases`]). The single-program form: with
+    /// `[[programs]]`, each program names its own.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// The core cdylib's crate name (`acme_collector_core`): required in
     /// the single-program form, refused with `[[programs]]`.
     #[serde(default)]
@@ -1013,6 +1047,14 @@ pub struct ProgramEntry {
     /// single-program form's `launcher`).
     #[serde(default)]
     pub launcher: Option<PathBuf>,
+    /// The launcher's cargo binary when it isn't named as `executable` (as
+    /// the single-program form's `launcher-bin`).
+    #[serde(default)]
+    pub launcher_bin: Option<String>,
+    /// Other names the launcher is installed under too, beside it
+    /// ([`Program::aliases`]).
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// The core cdylib's crate name.
     pub core: String,
     /// `cli` or `gui`.
@@ -1041,6 +1083,16 @@ pub struct Program {
     pub executable: String,
     /// The launcher crate's path from the workspace root, when given.
     pub launcher: Option<PathBuf>,
+    /// The launcher's cargo binary (`--bin`): `launcher-bin`, else the
+    /// executable.
+    pub launcher_bin: String,
+    /// Other names (file stems) the launcher is installed under too, each a
+    /// copy beside it: started by one, the program runs as ever (its cores
+    /// found beside it) and reads that name as its first argument, so a
+    /// program acting by the name it was started as (an askpass helper,
+    /// a multi-call binary) needs no link of its own making. Never put on
+    /// `PATH`, nor started by a shortcut or a service.
+    pub aliases: Vec<String>,
     /// The core cdylib's crate name.
     pub core: String,
     /// `cli` or `gui`.
@@ -1770,6 +1822,15 @@ pub(crate) fn client_url_ok(text: &str) -> bool {
 /// A name for a Windows file or directory: a file stem, not reserved.
 fn is_windows_name(text: &str) -> bool {
     is_file_stem(text) && !is_windows_reserved(text)
+}
+
+/// A cargo binary's name the build plan can carry and Windows can name a
+/// file by: `[A-Za-z0-9][A-Za-z0-9_-]*`, not a device name.
+fn is_bin_name(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && !is_windows_reserved(text)
 }
 
 /// Text that goes into package metadata: non-empty, no control
@@ -2871,19 +2932,28 @@ impl Config {
                 "with fips, a macOS build ships the FIPS module's dylib beside the cores (AWS-LC builds the module only as a dynamic library off Linux): sidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]",
             ));
         }
-        for entry in p
-            .linux
-            .depends
-            .deb
-            .iter()
-            .chain(&p.linux.depends.rpm)
-            .chain(&p.linux.depends.pacman)
-        {
-            if !is_plain_text(entry) || entry.contains(',') {
-                return Err(at(
-                    "linux.depends",
-                    "one dependency per entry, without commas, control characters or `$`",
-                ));
+        let l = &p.linux;
+        for (key, entries) in [
+            (
+                "linux.depends",
+                [&l.depends.deb, &l.depends.rpm, &l.depends.pacman].as_slice(),
+            ),
+            (
+                "linux.recommends",
+                [&l.recommends.deb, &l.recommends.rpm].as_slice(),
+            ),
+            (
+                "linux.suggests",
+                [&l.suggests.deb, &l.suggests.rpm].as_slice(),
+            ),
+        ] {
+            for entry in entries.iter().copied().flatten() {
+                if !is_plain_text(entry) || entry.contains(',') {
+                    return Err(at(
+                        key,
+                        "one dependency per entry, without commas, control characters or `$`",
+                    ));
+                }
             }
         }
         match (p.kind, &p.service) {
@@ -3458,12 +3528,14 @@ impl Config {
                 ("executable", p.executable.is_some()),
                 ("core", p.core.is_some()),
                 ("launcher", p.launcher.is_some()),
+                ("launcher-bin", p.launcher_bin.is_some()),
+                ("aliases", !p.aliases.is_empty()),
                 ("linux.command", p.linux.command.is_some()),
             ] {
                 if set {
                     return Err(at(
                         key,
-                        "the single-program form's key: with [[programs]], each program names its own (executable, core, launcher, command)",
+                        "the single-program form's key: with [[programs]], each program names its own (executable, core, launcher, launcher-bin, aliases, command)",
                     ));
                 }
             }
@@ -3523,6 +3595,43 @@ impl Config {
                     ),
                 ));
             }
+            // A launcher binary named apart (`launcher-bin`): one named as its
+            // executable is held to the executable's rules above.
+            let named_apart = if p.programs.is_empty() {
+                p.launcher_bin.is_some()
+            } else {
+                p.programs.get(n).is_some_and(|e| e.launcher_bin.is_some())
+            };
+            if named_apart && !is_bin_name(&program.launcher_bin) {
+                return Err(at(
+                    &key("launcher-bin"),
+                    "a cargo binary's name ([A-Za-z0-9][A-Za-z0-9_-]*), not a Windows device name",
+                ));
+            }
+            // One binary per launcher: two programs building one binary
+            // would ship one core's name compiled into both.
+            if earlier
+                .iter()
+                .any(|e| e.launcher_bin.eq_ignore_ascii_case(&program.launcher_bin))
+            {
+                return Err(at(
+                    &key("launcher-bin"),
+                    &format!(
+                        "{:?} is another program's launcher binary too (each program's launcher names its own core)",
+                        program.launcher_bin
+                    ),
+                ));
+            }
+            if named_apart
+                && p.helper
+                    .as_ref()
+                    .is_some_and(|helper| helper.eq_ignore_ascii_case(&program.launcher_bin))
+            {
+                return Err(at(
+                    &key("launcher-bin"),
+                    "the update helper's binary too: the build plan builds both by that name",
+                ));
+            }
             if program.role == Role::Gui {
                 if let Some(first) = gui {
                     return Err(at(
@@ -3555,6 +3664,37 @@ impl Config {
                     return Err(at(
                         &key("command"),
                         &format!("{command:?} is another program's command too"),
+                    ));
+                }
+            }
+            for (i, alias) in program.aliases.iter().enumerate() {
+                if !is_windows_name(alias) {
+                    return Err(at(
+                        &key("aliases"),
+                        &format!(
+                            "{alias:?} isn't a file stem ([A-Za-z0-9][A-Za-z0-9._-]*), or is a Windows device name"
+                        ),
+                    ));
+                }
+                // Each name installs one file beside the launchers (and,
+                // on macOS, beside the helper in a bundle).
+                let taken = programs
+                    .iter()
+                    .any(|other| other.executable.eq_ignore_ascii_case(alias))
+                    || p.helper
+                        .as_ref()
+                        .is_some_and(|helper| helper.eq_ignore_ascii_case(alias))
+                    || earlier
+                        .iter()
+                        .flat_map(|e| &e.aliases)
+                        .chain(program.aliases.get(..i).unwrap_or_default())
+                        .any(|other| other.eq_ignore_ascii_case(alias));
+                if taken {
+                    return Err(at(
+                        &key("aliases"),
+                        &format!(
+                            "{alias:?} is another name of the product's already (a program's executable or alias, or the helper; case-insensitively: NTFS)"
+                        ),
                     ));
                 }
             }
@@ -4058,9 +4198,15 @@ impl Product {
     #[must_use]
     pub fn programs(&self) -> Vec<Program> {
         if self.programs.is_empty() {
+            let executable = self.executable.clone().unwrap_or_default();
             return vec![Program {
-                executable: self.executable.clone().unwrap_or_default(),
+                launcher_bin: self
+                    .launcher_bin
+                    .clone()
+                    .unwrap_or_else(|| executable.clone()),
+                executable,
                 launcher: self.launcher.clone(),
+                aliases: self.aliases.clone(),
                 core: self.core.clone().unwrap_or_default(),
                 role: if self.kind == Kind::Desktop {
                     Role::Gui
@@ -4086,6 +4232,11 @@ impl Product {
                 Program {
                     executable: entry.executable.clone(),
                     launcher: entry.launcher.clone(),
+                    launcher_bin: entry
+                        .launcher_bin
+                        .clone()
+                        .unwrap_or_else(|| entry.executable.clone()),
+                    aliases: entry.aliases.clone(),
                     core: entry.core.clone(),
                     role: entry.role,
                     linux_command: command.clone(),

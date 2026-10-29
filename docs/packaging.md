@@ -31,7 +31,8 @@ two products building one core crate with different features keep apart.
 
 Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
 the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
-each program's launcher and the helper once (in the target directory `base`), each program's core
+each program's launcher (its `launcher-bin`, copied to `launcher/<executable>`) and the helper
+once (in the target directory `base`), each program's core
 once per CPU target with its features, in its build's own target directory (`<build>` above), the
 per-CPU flags as `target.<triple>.rustflags`. It refuses a product whose cargo configuration sets
 `build.rustflags`, which cargo would ignore once target flags are set.
@@ -157,6 +158,7 @@ floor and the packages' dependency together.
 |---|---|---|---|
 | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app` (the bundle); `/usr/local/<vendor>/<product>` (lowercase: the tool directory) |
 | Launchers (each program's) | `<executable>` | `<executable>.exe` | the bundle's `Contents/MacOS/<executable>`; the tool directory's `bin/<executable>` |
+| Aliases (`aliases`: each a copy of its program's launcher) | `<alias>` | `<alias>.exe` | beside its launcher (signed before the bundle, with its entitlements) |
 | Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | beside the launcher's directory: `Contents/Frameworks/lib<core>_<cpu>.dylib`, `Frameworks/lib<core>_<cpu>.dylib` |
 | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | the bundle's `Contents/MacOS`, else the tool directory's `bin` (not in a dmg) |
@@ -236,8 +238,8 @@ helper's path and service units. A product with a `gui` program carries its menu
 that program) and hicolor icons, and every product a `/usr/bin/<command>` link to each program put
 on `PATH`; a desktop product with the helper carries the helper's unit and a polkit rule letting an
 active local session start exactly that unit ([updates.md](updates.md)). The products and packages
-a product conflicts with (`conflicts`) are every format's conflicts, and `linux.provides` its
-provides; neither replaces anything, so a package manager never swaps one product for another (one
+a product conflicts with (`conflicts`) are every format's conflicts, `linux.provides` its
+provides, and `linux.recommends` and `linux.suggests` deb's and rpm's weak dependencies; neither replaces anything, so a package manager never swaps one product for another (one
 per crypto build: installing another profile means removing the installed one first).
 
 One package-script lifecycle, spelled for each format:

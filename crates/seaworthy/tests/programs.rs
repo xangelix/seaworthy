@@ -89,6 +89,9 @@ fn programs_resolve_in_order_with_their_roles_commands_and_features() {
             Program {
                 executable: "trove".into(),
                 launcher: Some("crates/trove/cli".into()),
+                // Its cargo binary is its executable unless named apart.
+                launcher_bin: "trove".into(),
+                aliases: vec![],
                 core: "trove_cli_core".into(),
                 role: Role::Cli,
                 // A cli program is on PATH as its executable.
@@ -101,6 +104,8 @@ fn programs_resolve_in_order_with_their_roles_commands_and_features() {
             Program {
                 executable: "TroveGui".into(),
                 launcher: Some("crates/trove/gui".into()),
+                launcher_bin: "TroveGui".into(),
+                aliases: vec![],
                 core: "trove_gui_core".into(),
                 role: Role::Gui,
                 // A gui program only when it names a command.
@@ -146,6 +151,8 @@ fn the_single_program_keys_are_one_program() {
         [Program {
             executable: "AcmeOne".into(),
             launcher: Some("crates/one".into()),
+            launcher_bin: "AcmeOne".into(),
+            aliases: vec![],
             core: "acme_one_core".into(),
             role: Role::Gui,
             linux_command: Some("acme-one".into()),
@@ -177,6 +184,8 @@ fn programs_are_validated() {
         ("executable", "executable = \"trove\""),
         ("core", "core = \"trove_core\""),
         ("launcher", "launcher = \"crates/trove\""),
+        ("launcher-bin", "launcher-bin = \"trove-launcher\""),
+        ("aliases", "aliases = [\"trove-askpass\"]"),
         ("linux.command", "linux.command = \"trove\""),
     ] {
         refused(
@@ -264,9 +273,60 @@ fn programs_are_validated() {
             "role = \"cli\"\nflavour = \"x\"",
             "unknown field `flavour`",
         ),
+        // A launcher's cargo binary: a name cargo and the plan take, one
+        // program's alone (each launcher names its own core), never the
+        // helper's.
+        (
+            "role = \"cli\"",
+            "role = \"cli\"\nlauncher-bin = \"trove launcher\"",
+            "programs[0].launcher-bin: a cargo binary's name",
+        ),
+        (
+            "role = \"cli\"",
+            "role = \"cli\"\nlauncher-bin = \"CON\"",
+            "programs[0].launcher-bin: a cargo binary's name",
+        ),
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\nlauncher-bin = \"Trove\"",
+            "programs[1].launcher-bin: \"Trove\" is another program's launcher binary too",
+        ),
+        // An alias is a file stem no other name of the product's takes:
+        // no program's executable (its own neither), no other alias.
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\naliases = [\"trove askpass\"]",
+            "programs[1].aliases: \"trove askpass\" isn't a file stem",
+        ),
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\naliases = [\"AUX\"]",
+            "programs[1].aliases: \"AUX\" isn't a file stem",
+        ),
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\naliases = [\"TROVE\"]",
+            "programs[1].aliases: \"TROVE\" is another name of the product's already",
+        ),
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\naliases = [\"trovegui\"]",
+            "programs[1].aliases: \"trovegui\" is another name of the product's already",
+        ),
+        (
+            "role = \"gui\"",
+            "role = \"gui\"\naliases = [\"askpass\", \"Askpass\"]",
+            "programs[1].aliases: \"Askpass\" is another name of the product's already",
+        ),
     ] {
         refused(&edit(from, to), mentions);
     }
+    // One alias, two programs: refused at the second.
+    refused(
+        &edit("role = \"cli\"", "role = \"cli\"\naliases = [\"askpass\"]")
+            .replace("role = \"gui\"", "role = \"gui\"\naliases = [\"ASKPASS\"]"),
+        "programs[1].aliases: \"ASKPASS\" is another name of the product's already",
+    );
     // `pkg/feature` and the full feature grammar are fine.
     parse(&edit(
         "features = [\"fips\"]",
@@ -286,6 +346,68 @@ fn programs_are_validated() {
     assert!(
         err.contains("different from every program's executable"),
         "{err}"
+    );
+    let err = Config::parse(&format!(
+        "{}{}",
+        DEFAULTS.replace(
+            "[defaults]",
+            "[defaults]\nrelease-signatures = [\"ml-dsa-87\"]"
+        ),
+        edit("updates.default = \"off\"", "helper = \"TroveUpdate\"").replace(
+            "role = \"cli\"",
+            "role = \"cli\"\nlauncher-bin = \"troveupdate\""
+        )
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("programs[0].launcher-bin: the update helper's binary too"),
+        "{err}"
+    );
+}
+
+/// A launcher whose cargo binary is named apart from its executable (a
+/// workspace whose development binary already holds that name): the plan
+/// builds that binary and ships it as the executable, in either form.
+#[test]
+fn a_launcher_binary_named_apart_ships_as_the_executable() {
+    let config = parse(&edit(
+        "role = \"gui\"",
+        "role = \"gui\"\nlauncher-bin = \"trove-gui-launcher\"",
+    ));
+    let gui = config.products["trove"].gui_program().unwrap();
+    assert_eq!(gui.launcher_bin, "trove-gui-launcher");
+    assert_eq!(gui.executable, "TroveGui");
+    let steps = plan(&config, WINDOWS, None).unwrap();
+    let launcher = steps
+        .iter()
+        .position(|step| matches!(step, Step::Build { args, .. } if args.contains(&"trove-gui-launcher".to_owned())))
+        .expect("the gui launcher's build");
+    let Step::Build { args, .. } = &steps[launcher] else {
+        unreachable!()
+    };
+    assert_eq!(&args[..2], ["--bin", "trove-gui-launcher"]);
+    assert_eq!(
+        steps[launcher + 1],
+        copy(
+            "base/x86_64-pc-windows-msvc/release/trove-gui-launcher.exe",
+            "x86_64-pc-windows-msvc/launcher/TroveGui.exe",
+        )
+    );
+    // The single-program form's key alike.
+    let one = parse(
+        "[product.one]\ndisplay-name = \"Acme One\"\ndescription = \"One.\"\nexecutable = \"acme-one\"\nlauncher-bin = \"acme-one-launcher\"\ncore = \"acme_one_core\"\nkind = \"tool\"\noutputs = [\"deb\"]\nupdates.default = \"off\"\n",
+    );
+    let steps = plan(&one, LINUX, None).unwrap();
+    assert_eq!(
+        steps[..2],
+        [
+            build("base", &[], &["--bin", "acme-one-launcher"]),
+            copy(
+                "base/x86_64-unknown-linux-gnu/release/acme-one-launcher",
+                "x86_64-unknown-linux-gnu/launcher/acme-one",
+            ),
+        ]
     );
 }
 
@@ -713,6 +835,97 @@ fn every_program_installs_beside_the_others() {
             "trove", "TroveGui", "trove", "trove", "TroveGui", "TroveGui"
         ]
     );
+}
+
+/// A program's aliases: its launcher again beside it under each name (the
+/// same bytes, where the launcher finds the same cores), never the
+/// program's launcher to a lookup, a PATH link, the menu or a shortcut.
+#[test]
+fn an_alias_installs_the_launcher_again_beside_it() {
+    let config = parse(&edit(
+        "role = \"gui\"",
+        "role = \"gui\"\naliases = [\"trove-askpass\"]",
+    ));
+    let gui = config.products["trove"].gui_program().unwrap();
+    assert_eq!(gui.aliases, ["trove-askpass"]);
+    let dir = tempfile::tempdir().unwrap();
+    let layouts = lay_out(&config, "trove", dir.path());
+    let linux = layouts.iter().find(|l| l.triple == LINUX).unwrap();
+    let alias = linux
+        .files
+        .iter()
+        .find(|f| f.role == FileRole::Alias)
+        .unwrap();
+    assert_eq!(alias.install_path, "/opt/acme/trove/trove-askpass");
+    assert_eq!(alias.program.as_deref(), Some("TroveGui"));
+    assert_eq!(alias.mode, 0o755);
+    let launcher = linux.launcher_of("TroveGui").unwrap();
+    assert_eq!(launcher.install_path, "/opt/acme/trove/TroveGui");
+    assert_eq!(alias.sha256, launcher.sha256);
+    assert_eq!(
+        std::fs::read(&alias.staged).unwrap(),
+        std::fs::read(&launcher.staged).unwrap()
+    );
+    // Beside its launcher, before the cores; never one of the launchers.
+    let order: Vec<&str> = linux
+        .files
+        .iter()
+        .map(|f| f.install_path.as_str())
+        .collect();
+    assert_eq!(
+        order[..3],
+        [
+            "/opt/acme/trove/trove",
+            "/opt/acme/trove/TroveGui",
+            "/opt/acme/trove/trove-askpass"
+        ]
+    );
+    assert_eq!(linux.launchers().count(), 2);
+    let package = seaworthy::linux::linux_package(&config, "trove", linux).unwrap();
+    assert!(
+        package.links.iter().all(|l| !l.dst.contains("askpass")),
+        "{:?}",
+        package.links
+    );
+    assert!(
+        package
+            .files
+            .iter()
+            .any(|f| f.dst == "/opt/acme/trove/trove-askpass"),
+        "the package installs it"
+    );
+    // Windows: a file of its own in the MSI, stamped and signed as the
+    // launcher is; the shortcuts start the gui program's launcher alone.
+    let windows = layouts.iter().find(|l| l.triple == WINDOWS).unwrap();
+    let alias = windows
+        .files
+        .iter()
+        .find(|f| f.role == FileRole::Alias)
+        .unwrap();
+    assert_eq!(alias.install_path, "Acme\\Trove\\trove-askpass.exe");
+    let wxs = seaworthy::wix::wxs(&config, "trove", windows, &common::release()).unwrap();
+    seaworthy::msi_check::expected_from_wxs(&wxs).unwrap();
+    // Words of the test's own in the messages, not the generated source: it is the
+    // release's, which a code scanner follows as data not to log.
+    assert!(
+        wxs.contains("\\Acme\\Trove\\trove-askpass.exe\""),
+        "the alias is a file of the install directory"
+    );
+    let gui_file = wxs
+        .lines()
+        .find(|l| l.contains("<File ") && l.contains("TroveGui.exe"))
+        .and_then(|l| l.split("Id=\"").nth(1))
+        .and_then(|l| l.split('"').next())
+        .unwrap()
+        .to_owned();
+    let shortcuts: Vec<&str> = wxs.lines().filter(|l| l.contains("<Shortcut ")).collect();
+    assert_eq!(shortcuts.len(), 2, "a shortcut each, the gui program's");
+    for shortcut in shortcuts {
+        assert!(
+            shortcut.contains(&format!("Target=\"[#{gui_file}]\"")),
+            "a shortcut starts the gui program's launcher, never the alias"
+        );
+    }
 }
 
 /// The Linux packages link each cli program onto PATH and start the gui

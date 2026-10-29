@@ -5,6 +5,7 @@
 //! | --- | --- | --- | --- |
 //! | Root | `/opt/<vendor>/<product>` (lowercase) | `%ProgramFiles%\<Vendor>\<Directory>` | `/Applications/<Display Name>.app`, and the tool directory `/usr/local/<vendor>/<product>` |
 //! | Launchers (each program's) | `<executable>` | `<executable>.exe` | `Contents/MacOS/<executable>`; `bin/<executable>` |
+//! | Aliases (each a program's launcher's copy) | `<alias>` | `<alias>.exe` | beside its launcher |
 //! | Cores (each program's) | `lib/lib<core>_<cpu>.so` | `<core>_<cpu>.dll` | `Contents/Frameworks/lib<core>_<cpu>.dylib`; `Frameworks/lib<core>_<cpu>.dylib` |
 //! | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 //! | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS/<helper>`, else `bin/<helper>` |
@@ -115,6 +116,11 @@ const WINDOWS_ACTIVE_SUFFIXES: [&str; 8] = [
 pub enum Role {
     /// The launcher.
     Launcher,
+    /// A program's launcher installed under another name (`aliases`):
+    /// its bytes, beside it, stamped and signed as it is, but never the
+    /// program's launcher to a shortcut, a service, a `PATH` link or a
+    /// bundle's `CFBundleExecutable`.
+    Alias,
     /// The core for one CPU target.
     Core {
         /// The CPU name.
@@ -519,6 +525,17 @@ pub fn layout(
                 Role::Launcher,
                 Some(executable),
             )?;
+            // Each alias: the launcher again, beside it, where it finds the
+            // same cores.
+            for alias in &program.program.aliases {
+                place(
+                    &program.launcher,
+                    root,
+                    &format!("{directory}{}", exe(alias)),
+                    Role::Alias,
+                    Some(executable),
+                )?;
+            }
         }
         for program in &platform.inputs.programs {
             let core = &program.program.core;
@@ -939,7 +956,7 @@ fn strip(tool: &Path, path: &Path) -> Result<(), DistError> {
 /// `.cpulist` and a core's `.cpureq` must still read.
 pub(crate) fn recheck_record(path: &Path, role: &Role, when: &str) -> Result<(), DistError> {
     let result = match role {
-        Role::Launcher => seaworthy_levels::read_cpu_list(path).map(|_| ()),
+        Role::Launcher | Role::Alias => seaworthy_levels::read_cpu_list(path).map(|_| ()),
         Role::Core { .. } => seaworthy_levels::read_requirement(path).map(|_| ()),
         Role::Sidecar
         | Role::Helper
