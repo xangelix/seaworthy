@@ -80,7 +80,7 @@ checks its SHA-256 against the listing; nothing unlisted is in it.
 | `adopt-msi` | Linux | `seaworthy adopt-msi`: each MSI's payload checked against the signed tree and its security-relevant tables against the `.wxs`, signed, listed | the calling job's grant, as `package` |
 | `package-macos` | macOS | `seaworthy package --platforms macos`: the dmg (a desktop app) or pkg (a service, a tool, cli programs), Developer ID-signed and notarized on a release with the Apple secrets, else ad hoc-signed (refused on a release under `[defaults.apple]`'s pinned team) | `contents: read` |
 | `verify` | Linux | every listed artifact against its listing; the packages artifact with `SHA256SUMS` | `contents: read` |
-| `publish` | Linux | on a release with `publish-toml`: `seaworthy repo` after the last published plan, then `seaworthy publish` (one at a time) | `contents: read` |
+| `publish` | Linux | on a release with `publish-toml`: `seaworthy repo` after the last published plan, with a Developer ID-signed dmg and pkg adopted into the release, then `seaworthy publish` (one at a time) | `contents: read` |
 
 Every job declares `contents: read` alone, except `package` and `adopt-msi`, which declare nothing
 and take the calling job's grant (below). Linux jobs run step-security's harden-runner in audit mode; every action is pinned by commit SHA; no checkout keeps

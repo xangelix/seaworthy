@@ -1504,6 +1504,54 @@ exit "${{STUB_EXIT:-0}}"
     assert!(leftovers().is_empty(), "{:?}", leftovers());
 }
 
+/// A release publishes the Mac's packages when a Developer ID signed them, and
+/// only then: `publish` takes them on the Mac job's own output, into the
+/// directory `seaworthy.sh repo` adopts from.
+#[test]
+fn publish_adopts_only_a_developer_id_s_mac_packages() {
+    let (_, workflow) = yaml(".github/workflows/dist.yml");
+    let jobs = workflow["jobs"].as_hash().unwrap();
+    let mac = &jobs[&Yaml::String("package-macos".to_owned())];
+    assert_eq!(
+        string(&mac["outputs"]["developer-id"]),
+        Some("${{ steps.package.outputs.developer-id }}")
+    );
+    let package = mac["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| string(&step["id"]) == Some("package"))
+        .expect("the step that packages has an id");
+    assert_eq!(
+        string(&package["run"]),
+        Some("bash .seaworthy/scripts/ci/github.sh signed package-macos")
+    );
+    let publish = &jobs[&Yaml::String("publish".to_owned())];
+    assert!(
+        publish["needs"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .any(|need| string(need) == Some("package-macos")),
+        "publish reads the Mac job's output"
+    );
+    let takes = publish["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .filter(|step| string(&step["with"]["path"]) == Some("seaworthy-work/dist-macos"))
+        .collect::<Vec<_>>();
+    assert_eq!(takes.len(), 1, "one step takes the Mac's packages");
+    assert_eq!(
+        string(&takes[0]["if"]),
+        Some("needs.package-macos.outputs.developer-id == 'true'")
+    );
+    assert_eq!(
+        string(&takes[0]["with"]["name"]),
+        Some("${{ inputs.artifact-prefix }}-dist-macos")
+    );
+}
+
 /// `signed package-macos` on a release: the Apple secrets become the keychain
 /// (apple-keychain.sh, beside the script), signing.toml's [apple] names it,
 /// the secrets leave before seaworthy.sh starts, and the keychain goes when it
@@ -1602,6 +1650,7 @@ esac"#,
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    let signed_output = dir.path().join("signed-output");
     let out = Command::new("bash")
         .current_dir(dir.path())
         .arg(scripts.join("github.sh"))
@@ -1610,6 +1659,7 @@ esac"#,
         .env("STUB_LOG", &log)
         .env("RUNNER_TEMP", &runner_temp)
         .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_OUTPUT", &signed_output)
         .env("SEAWORTHY_RELEASE", "1")
         .env("SEAWORTHY_GH_APPLE_P12", &encoded)
         .env("SEAWORTHY_GH_APPLE_P12_PASSWORD", "p12-pass")
@@ -1657,5 +1707,31 @@ esac"#,
         std::fs::read_dir(&runner_temp).unwrap().count(),
         0,
         "shredded"
+    );
+    // The publish job adopts the Mac's packages on this output alone.
+    assert_eq!(
+        std::fs::read_to_string(&signed_output).unwrap(),
+        "developer-id=true\n"
+    );
+    // Without the Apple secrets the same release is ad hoc-signed, and says nothing.
+    let ad_hoc_output = dir.path().join("ad-hoc-output");
+    std::fs::write(dir.path().join("signing.toml"), "").unwrap();
+    let out = Command::new("bash")
+        .current_dir(dir.path())
+        .arg(scripts.join("github.sh"))
+        .args(["signed", "package-macos"])
+        .env("PATH", &path)
+        .env("STUB_LOG", &log)
+        .env("RUNNER_TEMP", &runner_temp)
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_OUTPUT", &ad_hoc_output)
+        .env("SEAWORTHY_RELEASE", "1")
+        .env("SEAWORTHY_SIGNING", dir.path().join("signing.toml"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        !ad_hoc_output.exists(),
+        "an ad hoc-signed release says nothing"
     );
 }

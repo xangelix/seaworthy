@@ -505,6 +505,8 @@ signed() { # <step>
         SEAWORTHY_GH_APPLE_KEYCHAIN="$apple_keychain_path"
         SEAWORTHY_GH_APPLE_NOTARY_PROFILE="$apple_profile"
         export SEAWORTHY_MACOS_SIGN=1
+        # For the publish job: only a Developer ID's packages join the release.
+        output developer-id true
     fi
     if [ -n "${SIGNING_TOML:-}" ]; then
         [[ "$SIGNING_TOML" != *[[:cntrl:]]* ]] || fail "signing-toml holds a control character"
