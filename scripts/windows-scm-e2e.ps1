@@ -511,10 +511,29 @@ function Format-ScState {
 function Get-Starts { return @(ConvertFrom-FixtureLog (Read-Lines (Join-Path $script:StateDir 'starts.log'))) }
 function Get-Exits { return @(ConvertFrom-FixtureLog (Read-Lines (Join-Path $script:StateDir 'exits.log'))) }
 
-# The exit record(s) of the process the SCM knew as $ScmPid.
+# The exit record(s) of the process the SCM knew as $ScmPid, from $Since (Unix ms) on.
+# Windows reuses process ids within a run, so an id alone also finds any earlier
+# process that had it.
 function Get-ExitsOf {
-    param([int]$ScmPid)
-    return @(Get-Exits | Where-Object { $_.pid -eq "$ScmPid" })
+    param([int]$ScmPid, [Parameter(Mandatory = $true)][int64]$Since)
+    return @(Get-Exits | Where-Object { $_.pid -eq "$ScmPid" -and [int64]$_.unix_ms -ge $Since })
+}
+
+# The failed update requests a service log holds from $Since on. The log is named by
+# process id, so it also holds any earlier process that had the id.
+function Get-RequestFailures {
+    param([string]$Log, [Parameter(Mandatory = $true)][int64]$Since)
+    return @(Read-Lines $Log | Where-Object {
+            $_ -match $script:RequestFailedPattern -and [int64]($_ -split ' ', 2)[0] -ge $Since })
+}
+
+# Whether the process the SCM knew as $ScmPid has written status.txt from $Since on.
+function Test-HeartbeatOf {
+    param([int]$ScmPid, [Parameter(Mandatory = $true)][int64]$Since)
+    foreach ($line in (Read-Lines (Join-Path $script:StateDir 'status.txt'))) {
+        if ($line -match "^pid=$ScmPid\t.*\theartbeat_unix_ms=(\d+)" -and [int64]$Matches[1] -ge $Since) { return $true }
+    }
+    return $false
 }
 
 # The AWS-LC-FIPS module's DLLs a FIPS build imports at load time
@@ -741,6 +760,7 @@ function Watch-Restart {
     )
     $before = Get-ScState
     $since = Get-Date
+    $sinceMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     Write-Log "before: $(Format-ScState $before)"
     $startsBefore = @(Get-Starts).Count
     $failing = 0
@@ -763,15 +783,18 @@ function Watch-Restart {
                     if ($fresh.Count -ge 1) { $failing = [int]$fresh[0].pid }
                 }
                 $stopped = $s
+                $startsAtStop = @(Get-Starts).Count
                 Write-Log "observed: $(Format-ScState $s) (failed pid $failing)"
             }
-        } elseif ($s.State -eq $UntilState -and $s.Pid -ne 0 -and $s.Pid -ne $failing) {
-            $newStart = @(Get-Starts | Where-Object { $_.pid -eq "$($s.Pid)" })
+        } elseif ($s.State -eq $UntilState -and $s.Pid -ne 0) {
+            # A start record from after the stop: the new process can have any earlier
+            # process's id, even the failed one's.
+            $newStart = @(Get-Starts | Select-Object -Skip $startsAtStop | Where-Object { $_.pid -eq "$($s.Pid)" })
             if ($newStart.Count -eq 1) {
                 $elapsed = ((Get-Date) - $since).TotalSeconds
                 Write-Log ("restarted by the SCM after {0:F1}s: {1}" -f $elapsed, (Format-ScState $s))
                 foreach ($e in (Get-ScmEvents -Since $since.AddSeconds(-2))) { Write-Log "  event: $e" }
-                return [pscustomobject]@{ Stopped = $stopped; After = $s; NewStart = $newStart[0]; OldPid = $failing; Elapsed = $elapsed }
+                return [pscustomobject]@{ Stopped = $stopped; After = $s; NewStart = $newStart[0]; OldPid = $failing; SinceMs = $sinceMs; Elapsed = $elapsed }
             }
         }
         Start-Sleep -Milliseconds 100
@@ -1086,6 +1109,7 @@ function Reset-StateDir {
 # state directory with $Conf.
 function Install-Product {
     param([string]$Conf)
+    $installing = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $code = Invoke-Msiexec @('/i', $Msi)
     Assert-True ($code -eq 0) "msiexec /i exited $code (0 expected; 3010 = a reboot pending; log $($script:MsiLog))"
     Wait-Until -TimeoutSec 90 -What 'the service the MSI started to be RUNNING' -Condition {
@@ -1094,7 +1118,7 @@ function Install-Product {
     $stop = Invoke-Fixture @('stop', '--name', $ServiceName)
     Assert-True ($stop.ExitCode -eq 0) 'backend stop() of the MSI-started service'
     Wait-Until -TimeoutSec 30 -What 'the MSI-started process''s exit record' -Condition {
-        @(Get-ExitsOf $pid0).Count -ge 1 } | Out-Null
+        @(Get-ExitsOf $pid0 -Since $installing).Count -ge 1 } | Out-Null
     Reset-StateDir -Conf $Conf
 }
 
@@ -1265,14 +1289,14 @@ function Invoke-MainSuite {
         $w = Watch-Restart -Trigger { Send-Control 'fatal' } -TimeoutSec ($RestartDelayMs / 1000 + 90)
         Assert-True ($w.Stopped.Win32Exit -eq 1066 -and $w.Stopped.SpecificExit -eq 1) "Stopped with ERROR_SERVICE_SPECIFIC_ERROR / 1 (got $(Format-ScState $w.Stopped))"
         Assert-True ($w.Elapsed -ge ($RestartDelayMs / 1000 - 1)) 'the restart honored the failure-action delay'
-        $exit = @(Get-ExitsOf $w.OldPid)
+        $exit = @(Get-ExitsOf $w.OldPid -Since $w.SinceMs)
         Assert-True ($exit.Count -eq 1 -and $exit[0].code -eq '1' -and $exit[0].reason -match '^fatal service error: Injected\("fatal"\)') "the old process saw its fatal outcome (exit code 1; got $(@($exit | ForEach-Object { "code=$($_.code) reason=$($_.reason)" }) -join ' | '))"
     }
 
     Invoke-Case 'failure.panic_is_restarted' {
         $w = Watch-Restart -Trigger { Send-Control 'panic' } -TimeoutSec ($RestartDelayMs / 1000 + 90)
         Assert-True ($w.Stopped.Win32Exit -eq 1066 -and $w.Stopped.SpecificExit -eq 1) "Stopped with ERROR_SERVICE_SPECIFIC_ERROR / 1 (got $(Format-ScState $w.Stopped))"
-        $exit = @(Get-ExitsOf $w.OldPid)
+        $exit = @(Get-ExitsOf $w.OldPid -Since $w.SinceMs)
         Assert-True ($exit.Count -eq 1 -and $exit[0].reason -match 'panicked') 'the old process saw the task panic'
     }
 
@@ -1292,9 +1316,10 @@ function Invoke-MainSuite {
         Assert-True ($before.State -eq 'RUNNING') "running before the demand (got $(Format-ScState $before))"
         $startsBefore = @(Get-Starts).Count
         $log = Join-Path (Join-Path $script:StateDir 'logs') "service-$($before.Pid).log"
+        $demanded = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         Set-Required '9.9.9'
         Wait-Until -TimeoutSec 60 -What 'the service to log the failed update request' -Condition {
-            (Test-Path -LiteralPath $log) -and ((Read-SharedText $log) -match $script:RequestFailedPattern) } | Out-Null
+            @(Get-RequestFailures $log -Since $demanded).Count -ge 1 } | Out-Null
         # Ten poll periods (poll_ms=1000) after the request: the same process, still
         # RUNNING, the gate task still asking, and one request per the requester's
         # interval (60 s).
@@ -1303,10 +1328,10 @@ function Invoke-MainSuite {
         $s = Get-ScState
         Assert-True ($s.State -eq 'RUNNING' -and $s.Pid -eq $before.Pid) "the same process is still RUNNING (got $(Format-ScState $s))"
         Assert-True (@(Get-Starts).Count -eq $startsBefore) 'no new start'
-        Assert-True (@(Get-ExitsOf $before.Pid).Count -eq 0) 'the process never exited'
+        Assert-True (@(Get-ExitsOf $before.Pid -Since $demanded).Count -eq 0) 'the process never exited'
         $polls = @(Get-StubRequests '/required' -Since $since)
         Assert-True ($polls.Count -ge 5) "the gate task kept ticking after the request ($($polls.Count) gate polls in 10 s)"
-        $requests = @(Read-Lines $log | Where-Object { $_ -match $script:RequestFailedPattern })
+        $requests = @(Get-RequestFailures $log -Since $demanded)
         foreach ($line in $requests) { Write-Log "  service| $line" }
         Assert-True ($requests.Count -eq 1) "one update request per interval (got $($requests.Count))"
         Set-Required ''
@@ -1323,6 +1348,7 @@ function Invoke-MainSuite {
         Assert-True ($s.State -eq 'STOPPED' -and $s.Win32Exit -eq 0) "a clean stop reports exit 0 (got $(Format-ScState $s))"
         Set-Required '9.9.9'
         $startsBefore = @(Get-Starts).Count
+        $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         $r = Invoke-Fixture @('start', '--name', $ServiceName, '--timeout-secs', '60') -TimeoutSec 120
         Assert-True ($r.ExitCode -eq 0) 'backend start() reaches RUNNING although the connect is refused'
         $s = Get-ScState
@@ -1331,17 +1357,16 @@ function Invoke-MainSuite {
         $since = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         $log = Join-Path (Join-Path $script:StateDir 'logs') "service-$newPid.log"
         Wait-Until -TimeoutSec 60 -What 'the starting process to log the failed update request' -Condition {
-            (Test-Path -LiteralPath $log) -and ((Read-SharedText $log) -match $script:RequestFailedPattern) } | Out-Null
+            @(Get-RequestFailures $log -Since $started).Count -ge 1 } | Out-Null
         Start-Sleep -Seconds 12
         $s = Get-ScState
         Assert-True ($s.State -eq 'RUNNING' -and $s.Pid -eq $newPid) "the same process waits, RUNNING (got $(Format-ScState $s))"
         Assert-True (@(Get-Starts).Count -eq $startsBefore + 1) 'one start'
         $connects = @(Get-StubRequests '/required' -Since $since)
         Assert-True ($connects.Count -ge 2) "the connect is retried every mismatch_retry ($($connects.Count) gate requests in 12 s)"
-        $requests = @(Read-Lines $log | Where-Object { $_ -match $script:RequestFailedPattern })
+        $requests = @(Get-RequestFailures $log -Since $started)
         Assert-True ($requests.Count -eq 1) "one update request per interval (got $($requests.Count))"
-        $status = Read-SharedText (Join-Path $script:StateDir 'status.txt')
-        Assert-True ($status -notmatch "pid=$newPid\b") 'no task has run: the body waits for the connect'
+        Assert-True (-not (Test-HeartbeatOf $newPid -Since $started)) 'no task has run: the body waits for the connect'
         # The stop an MSI upgrade sends lands mid-init: a clean exit.
         $stop = Invoke-Fixture @('stop', '--name', $ServiceName)
         Assert-True ($stop.ExitCode -eq 0) 'backend stop() during the connect wait'
@@ -1350,16 +1375,17 @@ function Invoke-MainSuite {
         # The process writes its exit record after the dispatcher returns, so the
         # record can trail the SCM's STOPPED.
         Wait-Until -TimeoutSec 30 -What 'the waiting process''s exit record' -Condition {
-            @(Get-ExitsOf $newPid).Count -ge 1 } | Out-Null
-        $exit = @(Get-ExitsOf $newPid)
+            @(Get-ExitsOf $newPid -Since $started).Count -ge 1 } | Out-Null
+        $exit = @(Get-ExitsOf $newPid -Since $started)
         Assert-True ($exit.Count -eq 1 -and $exit[0].code -eq '0' -and $exit[0].reason -eq 'Stopped') 'the waiting process exited 0 (ServiceExit::Stopped)'
         # Back to normal for the cases after this one.
         Set-Required ''
+        $restarted = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         $r = Invoke-Fixture @('start', '--name', $ServiceName, '--timeout-secs', '60') -TimeoutSec 120
         Assert-True ($r.ExitCode -eq 0) 'backend start() with no demand'
         $s = Get-ScState
         Wait-Until -TimeoutSec 30 -What 'the restarted service to run its tasks' -Condition {
-            (Read-SharedText (Join-Path $script:StateDir 'status.txt')) -match "pid=$($s.Pid)\b" } | Out-Null
+            Test-HeartbeatOf $s.Pid -Since $restarted } | Out-Null
     }
 
     Invoke-Case 'stop.clean_stop_is_not_restarted' {
@@ -1536,6 +1562,46 @@ function Invoke-SelfTest {
         Assert-True ($rows.Count -eq 1 -and $rows[0].pid -eq '12' -and $rows[0].version -eq '2.0.0' -and $rows[0].exe -eq 'C:\a b\c.exe') 'fields'
         $rows = @(ConvertFrom-FixtureLog @("exit`tpid=12`tcode=1`treason=fatal service error: a=b"))
         Assert-True ($rows[0].reason -eq 'fatal service error: a=b') 'the first = splits'
+    }
+    Invoke-Case 'selftest.a_reused_process_id_finds_only_the_later_process' {
+        $script:StateDir = $script:DataRoot
+        $write = { param($Name, $Text) [System.IO.File]::WriteAllText((Join-Path $script:StateDir $Name), $Text, $script:Utf8NoBom) }
+        & $write 'exits.log' ("exit`tpid=968`tcode=abort`treason=injected abort`tunix_ms=1000`n" +
+            "exit`tpid=5268`tcode=0`treason=Stopped`tunix_ms=1500`n" +
+            "exit`tpid=968`tcode=0`treason=Stopped`tunix_ms=2000`n")
+        Assert-True (@(Get-ExitsOf 968 -Since 0).Count -eq 2) 'both processes that had the id'
+        $exit = @(Get-ExitsOf 968 -Since 1800)
+        Assert-True ($exit.Count -eq 1 -and $exit[0].code -eq '0') 'only the later one from its start on'
+        Assert-True (@(Get-ExitsOf 96 -Since 0).Count -eq 0) 'the whole id, not a prefix'
+        & $write 'status.txt' "pid=968`tversion=1.0.0`theartbeat_unix_ms=1000`n"
+        Assert-True (Test-HeartbeatOf 968 -Since 500) 'a heartbeat from the process'
+        Assert-True (-not (Test-HeartbeatOf 968 -Since 1800)) 'an earlier process''s heartbeat is not this one''s'
+        Assert-True (-not (Test-HeartbeatOf 96 -Since 0)) 'the whole id in the status, not a prefix'
+        $failure = "the server requires $ServiceName 9.9.9, but asking the update helper failed: requesting an update failed: opening service $ServiceName-update to start it: no such service"
+        & $write 'service-968.log' ("1000 ERROR seaworthy_updater::request: $failure`n2000 INFO scm_core: starting`n" +
+            "3000 ERROR seaworthy_updater::request: $failure`n")
+        $log = Join-Path $script:StateDir 'service-968.log'
+        Assert-True (@(Get-RequestFailures $log -Since 0).Count -eq 2) 'both requests in the shared log'
+        Assert-True (@(Get-RequestFailures $log -Since 1800).Count -eq 1) 'only the later process''s request'
+        Assert-True (@(Get-RequestFailures (Join-Path $script:StateDir 'no-such.log') -Since 0).Count -eq 0) 'no log yet'
+    }
+    Invoke-Case 'selftest.a_restart_can_take_an_earlier_process_id' {
+        # The restarted process has the id of the one that failed, and an older start
+        # record has it too: the SCM's states, scripted.
+        $script:StateDir = $script:DataRoot
+        $starts = Join-Path $script:StateDir 'starts.log'
+        $record = "start`tpid=968`tversion=1.0.0`tunix_ms=1`n"
+        [System.IO.File]::WriteAllText($starts, $record + $record, $script:Utf8NoBom)
+        $script:ScPolls = 0
+        function Get-ScmEvents { }
+        function Get-ScState {
+            $script:ScPolls++
+            if ($script:ScPolls -eq 2) { return [pscustomobject]@{ State = 'STOPPED'; Win32Exit = 1067; SpecificExit = 0; Pid = 0 } }
+            if ($script:ScPolls -eq 3) { [System.IO.File]::AppendAllText($starts, $record, $script:Utf8NoBom) }
+            return [pscustomobject]@{ State = 'RUNNING'; Win32Exit = 0; SpecificExit = 0; Pid = 968 }
+        }
+        $w = Watch-Restart -Trigger { } -TimeoutSec 5
+        Assert-True ($w.OldPid -eq 968 -and $w.After.Pid -eq 968 -and $w.Stopped.Win32Exit -eq 1067) 'the restart is seen'
     }
     Invoke-Case 'selftest.junit_writer' {
         $cases = @(
