@@ -150,7 +150,7 @@ impl Fixture {
         Self::with_config(nfpm, true, &config_with_repository(url))
     }
 
-    fn with_config(nfpm: &Path, openpgp: bool, text: &str) -> Self {
+    pub(crate) fn with_config(nfpm: &Path, openpgp: bool, text: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let keyring = Keyring::new();
         keyring.export(&dir.path().join("pgp.asc"));

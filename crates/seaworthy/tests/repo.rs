@@ -2468,3 +2468,202 @@ fn the_package_command_builds_the_repository_package_and_repo_publishes_it() {
         );
     }
 }
+
+/// A release's Developer ID-signed macOS packages, adopted into the listings
+/// (`seaworthy adopt-macos`, what the GitLab template's repo job runs): the
+/// pkg in the release tree under its signed manifest where the update helper
+/// looks, the dmg beside it with none, and a listing that isn't the same
+/// release's, or isn't a signed release's at all, refused.
+#[test]
+fn a_release_s_macos_packages_join_the_release_tree() {
+    if !have("gpg", &["--version"]) {
+        return;
+    }
+    // Tarballs alone off the Mac: no packaging tool but gpg, for the indexes.
+    let linux = CONFIG
+        .replacen(
+            "outputs = [\"deb\", \"rpm\", \"pacman\", \"tar\", \"zip\"]",
+            "outputs = [\"tar\"]",
+            1,
+        )
+        .replacen(
+            "outputs = [\"deb\", \"rpm\", \"pacman\"]",
+            "outputs = [\"tar\"]",
+            1,
+        )
+        .replacen("linux.depends.deb = [\"libc6 (>= 2.36)\"]\n", "", 1)
+        .replacen("linux.depends.rpm = [\"glibc >= 2.34\"]\n", "", 1)
+        .replacen("linux.depends.pacman = [\"glibc\"]\n", "", 1);
+    let fixture = Fixture::with_config(Path::new("nfpm"), false, &linux);
+    // The same products, with the outputs only the Mac packages.
+    let text = linux
+        .replacen("outputs = [\"tar\"]", "outputs = [\"tar\", \"pkg\"]", 1)
+        .replacen("outputs = [\"tar\"]", "outputs = [\"tar\", \"dmg\"]", 1)
+        .replacen(
+            "[product.agent.service.sandbox]",
+            "[product.agent.macos]\nbundle-id = \"test.acme.agent\"\n\n[product.agent.service.macos]\naccount = \"root\"\n\n[product.agent.service.sandbox]",
+            1,
+        )
+        + "\n[product.console.macos]\nbundle-id = \"test.acme.console\"\n";
+    let file = fixture.path().join("mac.toml");
+    std::fs::write(&file, text).unwrap();
+    let config = Config::load(&file).unwrap();
+
+    // What the Mac's job leaves: the pkg with its manifest, the dmg alone.
+    let macos = fixture.path().join("dist-macos");
+    let release = seaworthy::version::Release::new("2.1.0", 9).unwrap();
+    let build = seaworthy::sign::BuildId {
+        metadata: "cafe12".into(),
+    };
+    let signers: Vec<Box<dyn seaworthy::sign::ManifestSigner>> = vec![Box::new(
+        seaworthy::sign::LocalKey::from_file(
+            seaworthy_updater::SignatureAlgorithm::MlDsa87,
+            &fixture.path().join("release.key"),
+        )
+        .unwrap(),
+    )];
+    let target = seaworthy::inputs::MACOS;
+    let listing_json = |id: &str, package: &str, artifacts: Vec<serde_json::Value>| {
+        serde_json::json!({
+            "product": id, "package": package, "channel": "stable", "version": "2.1.0",
+            "build": "cafe12", "token": TOKEN, "sequence": 9, "signed": true,
+            "artifacts": artifacts,
+        })
+    };
+    let entry = |kind: &str, file: &str, bytes: &[u8]| serde_json::json!({"kind": kind, "file": file, "target": target, "sha256": sha256(bytes)});
+    let pkg_bytes = b"a signed pkg".to_vec();
+    let manifest = seaworthy::sign::manifest_for_bytes(
+        &config,
+        "agent",
+        &release,
+        &build,
+        target,
+        seaworthy_updater::ArtifactFormat::Pkg,
+        &pkg_bytes,
+    )
+    .unwrap();
+    let signed = seaworthy::sign::sign_manifest(&manifest, &signers).unwrap();
+    let write = |id: &str, listing: &serde_json::Value, files: &[(&str, &[u8])]| {
+        let base = macos.join(id);
+        std::fs::create_dir_all(base.join("packages")).unwrap();
+        for (name, bytes) in files {
+            std::fs::write(base.join(name), bytes).unwrap();
+        }
+        std::fs::write(
+            base.join("packages.json"),
+            serde_json::to_string_pretty(listing).unwrap(),
+        )
+        .unwrap();
+    };
+    let pkg_name = "packages/acme-agent-2.1.0-9-macos-arm64.pkg";
+    let manifest_name = format!("{pkg_name}.manifest");
+    let agent = listing_json(
+        "agent",
+        "acme-agent",
+        vec![
+            entry("pkg", pkg_name, &pkg_bytes),
+            entry("manifest", &manifest_name, &signed),
+        ],
+    );
+    write(
+        "agent",
+        &agent,
+        &[(pkg_name, &pkg_bytes), (&manifest_name, &signed)],
+    );
+    let dmg_bytes = b"a stapled dmg".to_vec();
+    let dmg_name = "packages/acme-console-2.1.0-9-macos-arm64.dmg";
+    let console = listing_json(
+        "console",
+        "acme-console",
+        vec![entry("dmg", dmg_name, &dmg_bytes)],
+    );
+    write("console", &console, &[(dmg_name, &dmg_bytes)]);
+
+    // Into a copy of the packages, as the repo step does.
+    let released = fixture.path().join("released");
+    copy_dir(&fixture.path().join("dist"), &released);
+    for id in ["agent", "console"] {
+        seaworthy::package::adopt_macos(&config, id, &released, &macos).unwrap();
+    }
+    let listings = fixture.listings_in(&released);
+    let out = fixture.path().join("repo");
+    let plan = fixture
+        .build_with(&config, &listings, &out, &fixture.keyring.signer())
+        .unwrap();
+    let tree = format!("releases/acme-agent/stable/{TOKEN}/{target}/acme-agent.pkg");
+    assert_eq!(std::fs::read(out.join(&tree)).unwrap(), pkg_bytes);
+    assert_eq!(
+        std::fs::read(out.join(format!("{tree}.manifest"))).unwrap(),
+        signed
+    );
+    let dmg = format!("releases/acme-console/stable/{TOKEN}/{target}/acme-console.dmg");
+    assert_eq!(std::fs::read(out.join(&dmg)).unwrap(), dmg_bytes);
+    assert!(!out.join(format!("{dmg}.manifest")).exists());
+    for path in [&tree, &dmg] {
+        assert!(
+            plan.files
+                .iter()
+                .any(|f| &f.path == path && f.class == Class::Immutable),
+            "{path} isn't planned as immutable"
+        );
+    }
+    // The other packages stay, and each product's listed once.
+    assert!(listed(&listings[0], Kind::Tar).file.ends_with(".tar.zst"));
+    assert!(listed(&listings[0], Kind::Pkg).file.ends_with(".pkg"));
+
+    // Twice: it would replace a file.
+    let err = seaworthy::package::adopt_macos(&config, "console", &released, &macos)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("would replace it"), "{err}");
+
+    // Another release's, or one no signer made: refused, the packages as
+    // they were.
+    let refused = |name: &str, edit: &dyn Fn(&mut serde_json::Value), why: &str| {
+        let to = fixture.path().join(name);
+        copy_dir(&fixture.path().join("dist"), &to);
+        let base = macos.join("console");
+        let mut changed = console.clone();
+        edit(&mut changed);
+        std::fs::write(
+            base.join("packages.json"),
+            serde_json::to_string_pretty(&changed).unwrap(),
+        )
+        .unwrap();
+        let err = seaworthy::package::adopt_macos(&config, "console", &to, &macos)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(why), "{err}");
+        assert!(
+            !to.join("console").join(dmg_name).exists(),
+            "{name}: nothing adopted"
+        );
+    };
+    refused(
+        "not-signed",
+        &|json| json["signed"] = false.into(),
+        "only a signed release's join one",
+    );
+    refused(
+        "ci-test",
+        &|json| json["ci_test"] = true.into(),
+        "only a signed release's join one",
+    );
+    refused(
+        "other-release",
+        &|json| {
+            json["sequence"] = 10.into();
+        },
+        "another release's",
+    );
+    refused(
+        "other-kind",
+        &|json| json["artifacts"][0]["kind"] = "tar".into(),
+        "no dmg or pkg listed",
+    );
+    refused(
+        "other-target",
+        &|json| json["artifacts"][0]["target"] = "x86_64-unknown-linux-gnu".into(),
+        "isn't a macOS artifact",
+    );
+}

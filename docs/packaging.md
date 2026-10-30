@@ -426,7 +426,7 @@ directory on its own, and builds:
 Both tools are macOS's own, so macOS outputs package on a Mac (`--platforms macos`). Without a
 signer the signature is ad hoc: Gatekeeper refuses a downloaded copy until a tester clears the
 quarantine (`xattr -dr com.apple.quarantine "/Applications/<name>.app"`), and the GitLab template
-keeps macOS outputs out of releases. With `signing.toml`'s `[apple]` (and `defaults.apple.team-id`
+keeps such outputs out of releases. With `signing.toml`'s `[apple]` (and `defaults.apple.team-id`
 pinned), the bundle is **Developer ID-signed** from the inside out with the hardened runtime and a
 secure timestamp, and so is every binary of the tool directory (each launcher with
 `macos.entitlements`, as the bundle's executable), every signature checked against Apple's
@@ -602,7 +602,7 @@ as `package` listed it into a new directory:
 
 | Path | Class | What |
 |---|---|---|
-| `releases/<package>/<channel>/<token>/<target>/<package>.<format>` (+ `.manifest`, pacman `.sig`, `.cdx.json` with `publish-sboms`) | immutable | each installable artifact where the update helper's URL template points |
+| `releases/<package>/<channel>/<token>/<target>/<package>.<format>` (+ `.manifest`, pacman `.sig`, `.cdx.json` with `publish-sboms`) | immutable | each installable artifact where the update helper's URL template points; a dmg too (no manifest: a download for people, which no helper fetches) |
 | `apt/pool/main/<package>/*.deb`, `apt/dists/<channel>/main/binary-amd64/by-hash/SHA256/<sha256>` | immutable | the debs, and every index under its hash |
 | `apt/dists/<channel>/main/binary-amd64/Packages{,.gz}`, `apt/dists/<channel>/{Release,Release.gpg,InRelease}` | index | `dpkg-scanpackages`' stanzas and the signed `Release` |
 | `rpm/<channel>/x86_64/Packages/*.rpm`, `repodata/<sha256>-*.xml.gz` | immutable | the rpms and `createrepo_c`'s metadata |
