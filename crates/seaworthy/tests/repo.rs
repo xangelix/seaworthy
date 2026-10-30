@@ -2474,6 +2474,7 @@ fn the_package_command_builds_the_repository_package_and_repo_publishes_it() {
 /// pkg in the release tree under its signed manifest where the update helper
 /// looks, the dmg beside it with none, and a listing that isn't the same
 /// release's, or isn't a signed release's at all, refused.
+#[cfg(unix)]
 #[test]
 fn a_release_s_macos_packages_join_the_release_tree() {
     if !have("gpg", &["--version"]) {

@@ -1578,7 +1578,12 @@ fn verify_reads_every_macos_fips_core_s_symbols() {
             (stripped.clone(), "is stripped (no local symbols)"),
         ] {
             let (_keep, artifacts) = tree();
-            let core = artifacts.join(format!("{MACOS}/cores/{cpu}/libacme_core.dylib"));
+            // By component: `verify` names it with this platform's separator.
+            let core = artifacts
+                .join(MACOS)
+                .join("cores")
+                .join(cpu)
+                .join("libacme_core.dylib");
             write(
                 &artifacts,
                 &format!("{MACOS}/cores/{cpu}/libacme_core.dylib"),

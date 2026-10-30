@@ -1851,11 +1851,12 @@ fn the_keychain_is_made_for_one_command_and_goes_with_it() {
     // No secret on any command line, and what made the keychain held neither
     // the manifest's key nor anything but the system's basics and its own.
     let calls = std::fs::read_to_string(&log).unwrap();
-    for secret in [p12.as_str(), "notary-key-text", "pw "] {
-        assert!(
-            !calls.contains(secret),
-            "{secret} on a command line: {calls}"
-        );
+    for (what, secret) in [
+        ("the PKCS#12", p12.as_str()),
+        ("the notary key", "notary-key-text"),
+        ("the PKCS#12's password", "pw "),
+    ] {
+        assert!(!calls.contains(secret), "{what} on a command line");
     }
     assert!(
         calls.contains("notarytool store-credentials seaworthy-notary --key "),
