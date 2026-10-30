@@ -63,12 +63,12 @@
 #   SEAWORTHY_GH_AZURE_ENDPOINT         signing-toml: Azure Artifact Signing
 #   SEAWORTHY_GH_AZURE_ACCOUNT            (with AZURE_TENANT_ID and
 #   SEAWORTHY_GH_AZURE_PROFILE            AZURE_CLIENT_ID; OIDC, no secret)
-#   SEAWORTHY_GH_APPLE_*                apple-keychain: the identities'
+#   SEAWORTHY_GH_APPLE_*                apple-keychain.sh: the identities'
 #                                       PKCS#12 (base64) and password, the
 #                                       App Store Connect API key (.p8,
 #                                       armored or base64), its id and issuer;
 #                                       signing-toml: the identities, keychain
-#                                       and notary profile apple-keychain set
+#                                       and notary profile it set
 #   SEAWORTHY_GH_SCRIPTS                signing-toml: where azure-sign.sh is
 #                                       (default: beside this script)
 #   SIGNING_TOML                        signed: the caller's own signing.toml,
@@ -223,7 +223,7 @@ check_plain() { # <value>...
 # signing.toml, from what the job was handed: a manifest signer by key-env,
 # an OpenPGP signer by secret-key-env, Authenticode by a PKCS#12 converted
 # to PEM files in a private directory or by azure-sign.sh (OIDC), and the
-# Developer ID apple-keychain set up. Names and paths only.
+# Developer ID apple_keychain set up. Names and paths only.
 # The calling job's grant, in a job that declares no permissions of its own
 # and so has exactly that grant: the runner sets the OIDC request variables
 # (ACTIONS_ID_TOKEN_REQUEST_*) for the whole job when it includes
@@ -417,101 +417,6 @@ signing_toml() { # <file>
     fi
 }
 
-# macOS: the Developer ID identities imported into a keychain of their own
-# in <dir> (a random password, locked after two hours: the package step's
-# longest run, notarization included; `signed` deletes it when the step
-# ends), first in the search list, and the notary service's API key stored
-# as a notarytool profile in it. Sets the identities' names, the keychain
-# and the profile for signing-toml. The PKCS#12's password reaches openssl
-# alone, through its environment: each identity is re-wrapped under a
-# throwaway password, which is what `security import` (which takes one only
-# as -P, on its command line) sees.
-apple_keychain() { # <dir>
-    [ "$(uname -s)" = Darwin ] || fail "the Developer ID keychain is made on macOS"
-    [ -n "${SEAWORTHY_GH_APPLE_P12:-}" ] || fail "no APPLE_CERTIFICATE_P12 secret"
-    for variable in SEAWORTHY_GH_APPLE_NOTARY_KEY SEAWORTHY_GH_APPLE_NOTARY_KEY_ID SEAWORTHY_GH_APPLE_NOTARY_ISSUER; do
-        [ -n "${!variable:-}" ] || fail "Developer ID signing notarizes: the APPLE_NOTARY_KEY, APPLE_NOTARY_KEY_ID and APPLE_NOTARY_ISSUER secrets are required"
-    done
-    [[ "$SEAWORTHY_GH_APPLE_NOTARY_KEY_ID" =~ ^[A-Z0-9]{6,20}$ ]] || fail "APPLE_NOTARY_KEY_ID isn't an App Store Connect key id"
-    [[ "$SEAWORTHY_GH_APPLE_NOTARY_ISSUER" =~ ^[0-9a-fA-F-]{36}$ ]] || fail "APPLE_NOTARY_ISSUER isn't an issuer id (a UUID)"
-    local temp="$1/apple"
-    umask 077
-    mkdir -p "$temp"
-    local keychain="$1/signing.keychain-db" password profile=seaworthy-notary throwaway
-    password="$(openssl rand -hex 24)"
-    throwaway="$(openssl rand -hex 24)"
-    echo "::add-mask::$password"
-    echo "::add-mask::$throwaway"
-    security create-keychain -p "$password" "$keychain"
-    security set-keychain-settings -lut 7200 "$keychain"
-    security unlock-keychain -p "$password" "$keychain"
-    base64 -d > "$temp/identity.p12" <<<"$SEAWORTHY_GH_APPLE_P12" || fail "APPLE_CERTIFICATE_P12 isn't base64"
-    local legacy=()
-    SEAWORTHY_P12_IN="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" \
-        openssl pkcs12 -in "$temp/identity.p12" -passin env:SEAWORTHY_P12_IN -noout 2>/dev/null ||
-        legacy=(-legacy)
-    SEAWORTHY_P12_IN="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" \
-        openssl pkcs12 "${legacy[@]}" -in "$temp/identity.p12" -passin env:SEAWORTHY_P12_IN \
-        -nokeys -out "$temp/certificates.pem" 2>/dev/null ||
-        fail "APPLE_CERTIFICATE_P12 doesn't open with APPLE_CERTIFICATE_PASSWORD"
-    # Each private key into a file of its own (the Application and the
-    # Installer identities share one PKCS#12).
-    SEAWORTHY_P12_IN="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}" \
-        openssl pkcs12 "${legacy[@]}" -in "$temp/identity.p12" -passin env:SEAWORTHY_P12_IN \
-        -nocerts -nodes 2>/dev/null |
-        awk -v dir="$temp" '/^-----BEGIN [A-Z ]*PRIVATE KEY-----$/ { n++; file = dir "/key-" n ".pem" }
-            file { print > file }
-            /^-----END [A-Z ]*PRIVATE KEY-----$/ { close(file); file = "" }' ||
-        fail "APPLE_CERTIFICATE_P12's keys don't open with APPLE_CERTIFICATE_PASSWORD"
-    rm -f "$temp/identity.p12"
-    local keys=("$temp"/key-*.pem) key
-    [ -f "${keys[0]}" ] || fail "APPLE_CERTIFICATE_P12 holds no private key"
-    for key in "${keys[@]}"; do
-        # The certificate matching the key leads; the others ride along.
-        SEAWORTHY_P12_OUT="$throwaway" openssl pkcs12 -export -inkey "$key" -in "$temp/certificates.pem" \
-            -passout env:SEAWORTHY_P12_OUT -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
-            -out "$key.p12" 2>/dev/null || fail "an APPLE_CERTIFICATE_P12 key has no certificate"
-        shred_files "$key"
-        security import "$key.p12" -k "$keychain" -f pkcs12 -P "$throwaway" \
-            -T /usr/bin/codesign -T /usr/bin/productbuild >/dev/null ||
-            fail "an APPLE_CERTIFICATE_P12 identity doesn't import into the keychain"
-        shred_files "$key.p12"
-    done
-    shred_files "$temp/certificates.pem"
-    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
-    # This keychain first, the user's others after it.
-    local existing=()
-    while IFS= read -r line; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line#\"}"
-        line="${line%\"}"
-        [ -n "$line" ] && existing+=("$line")
-    done < <(security list-keychains -d user)
-    security list-keychains -d user -s "$keychain" "${existing[@]}"
-    if [[ "$SEAWORTHY_GH_APPLE_NOTARY_KEY" == -----BEGIN* ]]; then
-        printf '%s\n' "$SEAWORTHY_GH_APPLE_NOTARY_KEY" > "$temp/AuthKey.p8"
-    else
-        base64 -d > "$temp/AuthKey.p8" <<<"$SEAWORTHY_GH_APPLE_NOTARY_KEY" || fail "APPLE_NOTARY_KEY is neither a .p8 key nor base64"
-    fi
-    xcrun notarytool store-credentials "$profile" --key "$temp/AuthKey.p8" \
-        --key-id "$SEAWORTHY_GH_APPLE_NOTARY_KEY_ID" --issuer "$SEAWORTHY_GH_APPLE_NOTARY_ISSUER" \
-        --keychain "$keychain" >/dev/null || fail "notarytool refused the API key (APPLE_NOTARY_KEY, _KEY_ID, _ISSUER)"
-    shred_files "$temp/AuthKey.p8"
-    local identity="${SEAWORTHY_GH_APPLE_IDENTITY:-}" installer=""
-    if [ -z "$identity" ]; then
-        identity="$(security find-identity -v -p codesigning "$keychain" |
-            sed -n 's/^ *[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Application: .*\)"$/\1/p' | head -n1)"
-        [ -n "$identity" ] || fail "APPLE_CERTIFICATE_P12 holds no Developer ID Application identity"
-    fi
-    installer="$(security find-identity -v "$keychain" |
-        sed -n 's/^ *[0-9][0-9]*) [0-9A-F]\{40\} "\(Developer ID Installer: .*\)"$/\1/p' | head -n1)"
-    SEAWORTHY_GH_APPLE_IDENTITY="$identity"
-    SEAWORTHY_GH_APPLE_INSTALLER_IDENTITY="$installer"
-    SEAWORTHY_GH_APPLE_KEYCHAIN="$keychain"
-    SEAWORTHY_GH_APPLE_NOTARY_PROFILE="$profile"
-    say "Developer ID: $identity${installer:+; installer: $installer}"
-}
-
 # Every keychain a signing step made (signed deletes its own; this is the
 # always-run step's, for a step that was killed).
 apple_cleanup() {
@@ -585,7 +490,20 @@ signed() { # <step>
     signed_dir="$(umask 077 && mktemp -d "${RUNNER_TEMP:?RUNNER_TEMP is unset}/seaworthy-signing.XXXXXXXX")"
     if [ "$step" = package-macos ]; then
         signed_keychain="$signed_dir/signing.keychain-db"
+        # shellcheck source=scripts/ci/apple-keychain.sh
+        . "$here/apple-keychain.sh"
+        SEAWORTHY_APPLE_P12="${SEAWORTHY_GH_APPLE_P12:-}"
+        SEAWORTHY_APPLE_P12_PASSWORD="${SEAWORTHY_GH_APPLE_P12_PASSWORD:-}"
+        SEAWORTHY_APPLE_NOTARY_KEY="${SEAWORTHY_GH_APPLE_NOTARY_KEY:-}"
+        SEAWORTHY_APPLE_NOTARY_KEY_ID="${SEAWORTHY_GH_APPLE_NOTARY_KEY_ID:-}"
+        SEAWORTHY_APPLE_NOTARY_ISSUER="${SEAWORTHY_GH_APPLE_NOTARY_ISSUER:-}"
+        SEAWORTHY_APPLE_IDENTITY="${SEAWORTHY_GH_APPLE_IDENTITY:-}"
         apple_keychain "$signed_dir"
+        unset SEAWORTHY_APPLE_P12 SEAWORTHY_APPLE_P12_PASSWORD SEAWORTHY_APPLE_NOTARY_KEY
+        SEAWORTHY_GH_APPLE_IDENTITY="$apple_identity"
+        SEAWORTHY_GH_APPLE_INSTALLER_IDENTITY="$apple_installer"
+        SEAWORTHY_GH_APPLE_KEYCHAIN="$apple_keychain_path"
+        SEAWORTHY_GH_APPLE_NOTARY_PROFILE="$apple_profile"
         export SEAWORTHY_MACOS_SIGN=1
     fi
     if [ -n "${SIGNING_TOML:-}" ]; then

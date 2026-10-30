@@ -1503,3 +1503,159 @@ exit "${{STUB_EXIT:-0}}"
     );
     assert!(leftovers().is_empty(), "{:?}", leftovers());
 }
+
+/// `signed package-macos` on a release: the Apple secrets become the keychain
+/// (apple-keychain.sh, beside the script), signing.toml's [apple] names it,
+/// the secrets leave before seaworthy.sh starts, and the keychain goes when it
+/// ends. `uname` says Darwin; `security` and `xcrun` are stand-ins.
+#[cfg(unix)]
+#[test]
+fn the_macos_step_gets_a_keychain_from_the_apple_secrets() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = dir.path().join("scripts");
+    let bin = dir.path().join("bin");
+    let runner_temp = dir.path().join("runner-temp");
+    for path in [&scripts, &bin, &runner_temp] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for name in ["github.sh", "apple-keychain.sh"] {
+        std::fs::copy(
+            repo_root().join("scripts/ci").join(name),
+            scripts.join(name),
+        )
+        .unwrap();
+    }
+    let record = dir.path().join("record");
+    std::fs::write(
+        scripts.join("seaworthy.sh"),
+        format!(
+            r#"#!/usr/bin/env bash
+{{
+  echo "step=$1"
+  echo "sign=${{SEAWORTHY_MACOS_SIGN:-}}"
+  echo "p12=${{SEAWORTHY_GH_APPLE_P12:-}}${{SEAWORTHY_APPLE_P12:-}}"
+  echo "password=${{SEAWORTHY_GH_APPLE_P12_PASSWORD:-}}${{SEAWORTHY_APPLE_P12_PASSWORD:-}}"
+  echo "notary=${{SEAWORTHY_GH_APPLE_NOTARY_KEY:-}}${{SEAWORTHY_APPLE_NOTARY_KEY:-}}"
+  cat "$SEAWORTHY_SIGNING"
+}} > {record}
+"#,
+            record = record.display()
+        ),
+    )
+    .unwrap();
+    let stub = |name: &str, body: &str| {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    stub("uname", "echo Darwin");
+    stub(
+        "security",
+        r#"echo "security $*" >> "$STUB_LOG"
+case "$1" in
+    list-keychains) [ "$#" -gt 3 ] || echo '    "/Users/acme/login.keychain-db"' ;;
+    create-keychain) for last; do :; done; : > "$last" ;;
+    delete-keychain) rm -f "$2" ;;
+    find-identity) printf '  1) %s "Developer ID Application: Acme Inc (ABCDE12345)"\n  2) %s "Developer ID Installer: Acme Inc (ABCDE12345)"\n' 0000000000000000000000000000000000000001 0000000000000000000000000000000000000002 ;;
+esac"#,
+    );
+    stub("xcrun", r#"echo "xcrun $*" >> "$STUB_LOG""#);
+    let key = dir.path().join("k.pem");
+    let cert = dir.path().join("c.pem");
+    let p12 = dir.path().join("identity.p12");
+    let req = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+        ])
+        .args([
+            "-subj",
+            "/CN=Developer ID Application: Acme Inc (ABCDE12345)",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .unwrap();
+    assert!(req.status.success(), "{}", said(&req));
+    let export = Command::new("openssl")
+        .args(["pkcs12", "-export", "-passout", "pass:p12-pass", "-inkey"])
+        .arg(&key)
+        .arg("-in")
+        .arg(&cert)
+        .arg("-out")
+        .arg(&p12)
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{}", said(&export));
+    let encoded = Command::new("openssl")
+        .args(["base64", "-A", "-in"])
+        .arg(&p12)
+        .output()
+        .unwrap();
+    assert!(encoded.status.success(), "{}", said(&encoded));
+    let encoded = String::from_utf8(encoded.stdout).unwrap();
+    let log = dir.path().join("calls");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .current_dir(dir.path())
+        .arg(scripts.join("github.sh"))
+        .args(["signed", "package-macos"])
+        .env("PATH", &path)
+        .env("STUB_LOG", &log)
+        .env("RUNNER_TEMP", &runner_temp)
+        .env("GITHUB_ACTIONS", "true")
+        .env("SEAWORTHY_RELEASE", "1")
+        .env("SEAWORTHY_GH_APPLE_P12", &encoded)
+        .env("SEAWORTHY_GH_APPLE_P12_PASSWORD", "p12-pass")
+        .env(
+            "SEAWORTHY_GH_APPLE_NOTARY_KEY",
+            "-----BEGIN PRIVATE KEY-----\nnotary-text\n-----END PRIVATE KEY-----",
+        )
+        .env("SEAWORTHY_GH_APPLE_NOTARY_KEY_ID", "KEY1234567")
+        .env(
+            "SEAWORTHY_GH_APPLE_NOTARY_ISSUER",
+            "0a1b2c3d-0a1b-0a1b-0a1b-0a1b2c3d4e5f",
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", said(&out));
+    let seen = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        seen.contains("step=package-macos\n") && seen.contains("sign=1\n"),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("p12=\n") && seen.contains("password=\n") && seen.contains("notary=\n"),
+        "the secrets left the environment:\n{seen}"
+    );
+    assert!(
+        seen.contains("identity = \"Developer ID Application: Acme Inc (ABCDE12345)\""),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("installer-identity = \"Developer ID Installer: Acme Inc (ABCDE12345)\""),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("notary-profile = \"seaworthy-notary\""),
+        "{seen}"
+    );
+    assert!(seen.contains("/signing.keychain-db\""), "{seen}");
+    // GitHub's log masks the two passwords.
+    assert!(said(&out).contains("::add-mask::"), "{}", said(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("security delete-keychain"), "{calls}");
+    assert!(!calls.contains("p12-pass"), "{calls}");
+    assert!(!calls.contains("notary-text"), "{calls}");
+    assert_eq!(
+        std::fs::read_dir(&runner_temp).unwrap().count(),
+        0,
+        "shredded"
+    );
+}
