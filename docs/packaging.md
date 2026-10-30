@@ -30,7 +30,8 @@ of its own (`features`, `default-features = false`; the hex is from the feature 
 two products building one core crate with different features keep apart.
 
 Linux binaries keep their symbol tables (`strip = false`): `verify` reads them, and `layout` strips
-the shipped copies. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
+the shipped copies. A macOS core of a FIPS product keeps its table for the same check; `layout`
+strips no Mach-O. `seaworthy build-plan --triple <triple>` prints the build that fills this layout:
 each program's launcher (its `launcher-bin`, copied to `launcher/<executable>`) and the helper
 once (in the target directory `base`), each program's core
 once per CPU target with its features, in its build's own target directory (`<build>` above), the
@@ -123,8 +124,10 @@ wrong:
 5. **FIPS** (the product's `fips`, else `defaults.fips`). Every Linux core passes the static-link
    checks of `scripts/verify-fips-binary.sh` over its symbol table: the pinned module present, no
    second libcrypto, no other module version. On Windows and macOS every core loads the pinned
-   module's library, and the sidecars ship it. The pinned module is `defaults.fips-module`'s
-   release, else `seaworthy-crypto`'s ([fips.md](fips.md#a-products-module-release)).
+   module's library, and the sidecars ship it. A macOS core's symbol table shows the same from the
+   other side: the module's symbols imported and none defined, no second AWS-LC, no other module
+   version ([fips.md](fips.md#macos-cores)). The pinned module is `defaults.fips-module`'s release,
+   else `seaworthy-crypto`'s ([fips.md](fips.md#a-products-module-release)).
 6. **Runtime dependencies.** Windows binaries link the C runtime statically. Linux binaries need
    only the base system's libraries plus those the product declares in `linux.needed`, and no glibc
    newer than the floor (`linux.glibc`, default 2.34): every entry of the version-needs table counts,
@@ -133,8 +136,9 @@ wrong:
    then has only a small static TLS surplus to give. macOS binaries link the system's libraries
    alone and need no macOS newer than `defaults.macos-minimum`.
 
-An import table, dynamic section or version table that doesn't parse, and a stripped Linux binary,
-are findings, never a pass: the checks would otherwise pass vacuously. `verify` also warns about a
+An import table, dynamic section or version table that doesn't parse, a stripped Linux binary and a
+stripped macOS core of a FIPS product are findings, never a pass: the checks would otherwise pass
+vacuously. `verify` also warns about a
 core no CPU would ever choose (its features include every feature of a more preferred core).
 
 `seaworthy fips-check [--module VERSION] FILE…` and `seaworthy glibc-check [--floor X.Y] FILE…`

@@ -33,12 +33,17 @@
 //!    builds one, `<prefix>crypto.dll`; older releases added a
 //!    `<prefix>rust_wrapper.dll`, which the imports would then name). On
 //!    macOS, where AWS-LC builds the module as a dylib too, every core
-//!    loads `@rpath/lib<prefix>crypto.dylib`, the sidecars
-//!    (`sidecars.macos`, shipped in `Contents/Frameworks`) ship every
-//!    module dylib the cores load, and the module's own symbols pass the
-//!    Linux checks. Any `@rpath/` library must be a sidecar, loaded with
-//!    the search path to it (`@loader_path` for a core,
-//!    `@executable_path/../Frameworks` for an executable).
+//!    loads `@rpath/lib<prefix>crypto.dylib` and its symbol table shows the
+//!    module is imported and nothing else came along
+//!    ([`fips_macos_core_findings`]): `<prefix>*` symbols imported and none
+//!    defined, no other AWS-LC (`aws-lc-sys`, which `aws-lc-rs` compiles
+//!    into a FIPS build too, must never be linked), no ring, and local
+//!    symbols present, so that a stripped core is refused as a stripped
+//!    Linux core is. The sidecars (`sidecars.macos`, shipped in
+//!    `Contents/Frameworks`) ship every module dylib the cores load, and
+//!    the module's own symbols pass the Linux checks. Any `@rpath/` library
+//!    must be a sidecar, loaded with the search path to it (`@loader_path`
+//!    for a core, `@executable_path/../Frameworks` for an executable).
 //! 6. **Runtime dependencies**: Windows binaries link the C runtime
 //!    statically: no `vcruntime*` or `msvcp*` import, delay-loaded or not.
 //!    Linux binaries need only the base system's libraries
@@ -74,7 +79,8 @@ use std::path::{Path, PathBuf};
 use object::read::elf::{Dyn, ElfFile64, FileHeader, ProgramHeader};
 use object::read::pe::{ImageNtHeaders, PeFile64};
 use object::{
-    LittleEndian as LE, Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind, SymbolSection,
+    BinaryFormat, LittleEndian as LE, Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind,
+    SymbolSection,
 };
 
 use crate::config::{Config, Product, is_windows_reserved, parse_macos_version};
@@ -739,6 +745,9 @@ impl Run {
                     );
                 }
                 module_imports.extend(loads.into_iter().filter(|name| name.starts_with(&module)));
+                for finding in fips_macos_core_findings(&bytes, &prefix) {
+                    self.finding(core, finding);
+                }
             }
         }
         // A core whose features include every feature of an earlier core
@@ -1040,60 +1049,62 @@ pub fn macho_facts(image: &[u8]) -> Result<MachoFacts, String> {
     Ok(facts)
 }
 
-/// `scripts/verify-fips-binary.sh`'s checks over an ELF image's symbol
-/// table, read as `nm` reads it: empty means pass.
-///
-/// - `nm` prints every `.symtab` entry except `STT_FILE` and
-///   `STT_SECTION` ones (rustc names its file symbols after the codegen
-///   unit, `aws_lc_fips_sys.<hash>-cgu.0`).
-/// - The script strips one leading `_` (Mach-O) and compares the rest.
-/// - Its "defined in text" means `nm` type `T`/`t`: a defined, non-weak
-///   symbol in an executable section.
-#[must_use]
-pub fn fips_symbol_findings(image: &[u8], prefix: &str) -> Vec<String> {
-    let file = match object::File::parse(image) {
-        Ok(file) => file,
-        Err(e) => return vec![format!("not an object file: {e}")],
-    };
-    let prefix = prefix.as_bytes();
-    let names: Vec<(Vec<u8>, bool)> = file
-        .symbols()
+/// One entry of an image's symbol table, as `nm` lists it.
+struct TableSymbol<'data> {
+    /// The name without one leading `_`, which Mach-O prepends to every C
+    /// name (`_aws_lc_fips_0_14_3_SHA256`): this is the one place it comes
+    /// off, as `scripts/verify-fips-binary.sh` takes it off.
+    name: &'data [u8],
+    /// `nm` type `T`/`t`: a defined, non-weak symbol in an executable
+    /// section.
+    text: bool,
+    /// Defined here, in any section or none (`nm` lists anything else as
+    /// `U`: an import).
+    defined: bool,
+    /// Defined here and visible only here. A rustc `cdylib` exports only
+    /// its own entry points, so everything a static library brought in is
+    /// local (`non-external (was a private external)`).
+    local: bool,
+}
+
+/// The entries `nm` prints, which leaves out `STT_FILE` and `STT_SECTION`
+/// ones (rustc names its file symbols after the codegen unit,
+/// `aws_lc_fips_sys.<hash>-cgu.0`) and Mach-O's debug map (its stabs name
+/// the same object files; `object` never returns them).
+fn table_symbols<'data>(file: &object::File<'data>) -> Vec<TableSymbol<'data>> {
+    file.symbols()
         .filter(|s| !matches!(s.kind(), SymbolKind::File | SymbolKind::Section))
         .filter_map(|s| {
             let raw = s.name_bytes().ok()?;
-            let name = raw.strip_prefix(b"_").unwrap_or(raw).to_vec();
+            let name = raw.strip_prefix(b"_").unwrap_or(raw);
+            if name.is_empty() {
+                return None;
+            }
             let in_code = match s.section() {
                 SymbolSection::Section(index) => file
                     .section_by_index(index)
                     .is_ok_and(|section| section.kind() == SectionKind::Text),
                 _ => false,
             };
-            let text = s.is_definition() && !s.is_weak() && in_code;
-            Some((name, text))
+            Some(TableSymbol {
+                name,
+                text: s.is_definition() && !s.is_weak() && in_code,
+                defined: !s.is_undefined(),
+                local: s.is_local(),
+            })
         })
-        .filter(|(name, _)| !name.is_empty())
-        .collect();
-    if names.is_empty() {
-        return vec!["no symbol table — build the binaries with strip = false; layout strips the shipped copies".to_owned()];
-    }
+        .collect()
+}
+
+/// Symbols of a crypto provider other than the pinned module, by name:
+/// `scripts/verify-fips-binary.sh`'s rules, which count an import as much
+/// as a definition.
+fn foreign_provider_findings(symbols: &[TableSymbol<'_>], prefix: &[u8]) -> Vec<String> {
     let shown = |name: &[u8]| String::from_utf8_lossy(name).into_owned();
-    let pinned = String::from_utf8_lossy(prefix).into_owned();
     let mut findings = Vec::new();
-    if !names.iter().any(|(n, _)| n.starts_with(prefix)) {
-        findings.push(format!(
-            "no {pinned}* symbols — the pinned AWS-LC FIPS module is not linked"
-        ));
-    }
-    let version = [prefix, b"awslc_version_string"].concat();
-    if !names.iter().any(|(n, text)| *n == version && *text) {
-        findings.push(format!(
-            "{} is not a defined text symbol (the Security Policy's static-link check)",
-            shown(&version)
-        ));
-    }
-    let non_fips: Vec<&Vec<u8>> = names
+    let non_fips: Vec<&[u8]> = symbols
         .iter()
-        .map(|(n, _)| n)
+        .map(|s| s.name)
         .filter(|n| {
             n.strip_prefix(b"aws_lc_").is_some_and(|rest| {
                 let mut parts = rest.splitn(4, |b| *b == b'_');
@@ -1113,16 +1124,131 @@ pub fn fips_symbol_findings(image: &[u8], prefix: &str) -> Vec<String> {
             shown(first)
         ));
     }
-    if let Some((ring, _)) = names.iter().find(|(n, _)| n.starts_with(b"ring_core_")) {
-        findings.push(format!("ring symbols, e.g. {}", shown(ring)));
+    if let Some(ring) = symbols.iter().find(|s| s.name.starts_with(b"ring_core_")) {
+        findings.push(format!("ring symbols, e.g. {}", shown(ring.name)));
     }
-    if let Some((other, _)) = names
+    if let Some(other) = symbols
         .iter()
-        .find(|(n, _)| n.starts_with(b"aws_lc_fips_") && !n.starts_with(prefix))
+        .find(|s| s.name.starts_with(b"aws_lc_fips_") && !s.name.starts_with(prefix))
     {
         findings.push(format!(
-            "AWS-LC FIPS symbols of a version other than {pinned}, e.g. {}",
-            shown(other)
+            "AWS-LC FIPS symbols of a version other than {}, e.g. {}",
+            shown(prefix),
+            shown(other.name)
+        ));
+    }
+    findings
+}
+
+/// `scripts/verify-fips-binary.sh`'s checks over an image's symbol table,
+/// read as `nm` reads it, for an image that carries the module itself: a
+/// Linux core, or macOS's module dylib. Empty means pass. Its "defined in
+/// text" means `nm` type `T`/`t`.
+#[must_use]
+pub fn fips_symbol_findings(image: &[u8], prefix: &str) -> Vec<String> {
+    let file = match object::File::parse(image) {
+        Ok(file) => file,
+        Err(e) => return vec![format!("not an object file: {e}")],
+    };
+    let symbols = table_symbols(&file);
+    if symbols.is_empty() {
+        return vec!["no symbol table — build the binaries with strip = false; layout strips the shipped copies".to_owned()];
+    }
+    let shown = |name: &[u8]| String::from_utf8_lossy(name).into_owned();
+    let prefix = prefix.as_bytes();
+    let pinned = shown(prefix);
+    let mut findings = Vec::new();
+    if !symbols.iter().any(|s| s.name.starts_with(prefix)) {
+        findings.push(format!(
+            "no {pinned}* symbols — the pinned AWS-LC FIPS module is not linked"
+        ));
+    }
+    let version = [prefix, b"awslc_version_string"].concat();
+    if !symbols.iter().any(|s| s.name == version && s.text) {
+        findings.push(format!(
+            "{} is not a defined text symbol (the Security Policy's static-link check)",
+            shown(&version)
+        ));
+    }
+    findings.extend(foreign_provider_findings(&symbols, prefix));
+    findings
+}
+
+/// What a linker adds to a table on its own, whatever it links (normalized
+/// as [`TableSymbol::name`]): they say nothing about what was linked in.
+const LINKER_LOCALS: [&[u8]; 2] = [b"_mh_dylib_header", b"_dyld_private"];
+
+/// Names only an AWS-LC (or BoringSSL) built without a symbol prefix has:
+/// `awslc_version_string`, `AWSLC_thread_local_clear` and the like, and
+/// `CRYPTO_library_init`, which `aws-lc-rs` calls first, so dead-stripping
+/// can't take it from a build that uses one.
+fn unprefixed_aws_lc(name: &[u8]) -> bool {
+    name.starts_with(b"awslc_") || name.starts_with(b"AWSLC_") || name == b"CRYPTO_library_init"
+}
+
+/// What a macOS FIPS core's symbol table must show: empty means pass.
+///
+/// Off Linux the module is a shared library, so a core has none of it:
+/// [`fips_symbol_findings`] holds the module's dylib to the static-link
+/// checks, and this holds a core that loads it to these:
+///
+/// - It imports `<prefix>*` symbols and defines none. A definition, local
+///   or not, in any section, is a copy of the module that no sidecar ships.
+/// - It has no symbols of another provider, by the script's rules, nor of
+///   an unprefixed AWS-LC. `aws-lc-sys` above all: `aws-lc-rs` compiles it
+///   into a FIPS build too, and nothing but this shows it stayed out of the
+///   link.
+/// - It has local symbols. A stripped Mach-O still has a symbol table, its
+///   imports and exports, because the loader needs them, and the linker
+///   hides what a static library brought in, so stripping takes exactly
+///   the symbols this check is for: without this rule a stripped core
+///   carrying `aws-lc-sys` passes. As on Linux it's refused, never a pass:
+///   build with `strip = false`, as the build plan does. `layout` doesn't
+///   strip a Mach-O.
+#[must_use]
+pub fn fips_macos_core_findings(image: &[u8], prefix: &str) -> Vec<String> {
+    let file = match object::File::parse(image) {
+        Ok(file) => file,
+        Err(e) => return vec![format!("not an object file: {e}")],
+    };
+    if file.format() != BinaryFormat::MachO {
+        return vec!["not a Mach-O file".to_owned()];
+    }
+    let stripped = "its symbol table is stripped (no local symbols): a library linked in statically shows only there, so its imports and exports can't prove the non-FIPS AWS-LC stayed out; build the cores with strip = false, as the build plan does".to_owned();
+    let symbols = table_symbols(&file);
+    if symbols.is_empty() {
+        return vec![stripped];
+    }
+    let shown = |name: &[u8]| String::from_utf8_lossy(name).into_owned();
+    let prefix = prefix.as_bytes();
+    let pinned = shown(prefix);
+    let mut findings = Vec::new();
+    if !symbols
+        .iter()
+        .any(|s| s.local && !LINKER_LOCALS.contains(&s.name))
+    {
+        findings.push(stripped);
+    }
+    let (defined, imported): (Vec<&TableSymbol<'_>>, Vec<&TableSymbol<'_>>) = symbols
+        .iter()
+        .filter(|s| s.name.starts_with(prefix))
+        .partition(|s| s.defined);
+    if let Some(first) = defined.first() {
+        findings.push(format!(
+            "defines {} {pinned}* symbols, e.g. {}: a core imports the module from its dylib, and a copy inside it is one no sidecar ships",
+            defined.len(),
+            shown(first.name)
+        ));
+    } else if imported.is_empty() {
+        findings.push(format!(
+            "no {pinned}* symbols — it imports nothing of the pinned AWS-LC FIPS module"
+        ));
+    }
+    findings.extend(foreign_provider_findings(&symbols, prefix));
+    if let Some(bare) = symbols.iter().find(|s| unprefixed_aws_lc(s.name)) {
+        findings.push(format!(
+            "unprefixed AWS-LC symbols, e.g. {}: a second libcrypto, built without a module's prefix",
+            shown(bare.name)
         ));
     }
     findings

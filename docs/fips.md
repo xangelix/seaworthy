@@ -137,6 +137,27 @@ target/release/examples/fips_selfcheck --expect-fips
 - `cargo test -p seaworthy-crypto --features fips` runs the FIPS-only tests, including the
   assertion that the linked module is AWS-LC FIPS 4.2.0.
 
+### macOS cores
+
+Off Linux AWS-LC builds the module as a shared library, so a macOS core has none of it and
+`scripts/verify-fips-binary.sh`'s static-link check doesn't apply to it (the script does apply to
+the module's dylib, and `seaworthy verify` runs its checks there). `seaworthy verify` holds every
+core of a FIPS product to its symbol table instead (`seaworthy::verify::fips_macos_core_findings`),
+one leading `_` off each Mach-O name:
+
+- it imports `aws_lc_fips_0_14_3_*` symbols and defines none, locally or not: a definition is a copy
+  of the module that no sidecar ships;
+- it has no non-FIPS `aws_lc_<version>_*` symbols, `ring_core_*` symbols or other-version FIPS
+  symbols, defined or imported, and no AWS-LC built without a prefix (`awslc_*`, `AWSLC_*`,
+  `CRYPTO_library_init`);
+- it has local symbols. A stripped Mach-O keeps its imports and exports, which the loader needs, but
+  the linker makes everything a static library brought into a Rust `cdylib` local, so stripping
+  removes exactly what this check looks for. A stripped core is a finding, never a pass, as on
+  Linux.
+
+Build the cores with `strip = false`, as the build plan does (`seaworthy build-plan`,
+`CARGO_PROFILE_RELEASE_STRIP=false` by hand). `seaworthy layout` strips no Mach-O.
+
 ## A product's module release
 
 `seaworthy-crypto` pins `aws-lc-fips-sys` 0.14.3; a product's own cores may be built with another
@@ -173,7 +194,8 @@ features, every non-FIPS feature, and `fips`): no `ring`, `openssl`, `openssl-sy
 `aws-lc-sys`, the non-FIPS AWS-LC, is still **compiled** in FIPS builds: rustls's `aws_lc_rs`
 feature, which `rustls/fips` implies, enables it unconditionally. It is never **linked**:
 `aws-lc-rs` binds `aws-lc-fips-sys` under `fips` and nothing else references `aws-lc-sys`. The
-graph check keeps it that way and the binary check proves it per release.
+graph check keeps it that way and the binary check proves it per release: over the symbol table of
+a Linux core, or of a macOS core ([macOS cores](#macos-cores)).
 
 ## Compliance notes
 

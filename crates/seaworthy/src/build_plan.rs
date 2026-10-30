@@ -68,9 +68,9 @@
 //!   and helper with `@executable_path/../Frameworks`, so each finds the
 //!   module's dylib the bundle ships there.
 //!
-//! Every build is `--release` with `strip = false` (`verify` reads Linux
-//! symbol tables; `layout` strips the shipped copies), and steps two
-//! products share are listed once (two products building one artifact
+//! Every build is `--release` with `strip = false` (`verify` reads the
+//! symbol tables of Linux binaries and of macOS FIPS cores; `layout` strips
+//! the shipped Linux copies), and steps two products share are listed once (two products building one artifact
 //! path differently are refused). A product's own flags belong in
 //! `target.<triple>.rustflags`, which joins the per-CPU flags: cargo
 //! ignores `build.rustflags` once any target flags are set, so

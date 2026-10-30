@@ -12,7 +12,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{M1, MACOS_CPUS, Macho, cpulist, record, write};
+use common::{M1, MACOS_CPUS, Macho, MachoSymbol, cpulist, record, write};
 use seaworthy::config::Config;
 use seaworthy::inputs::MACOS;
 
@@ -1088,12 +1088,7 @@ fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
         "lib{}crypto.dylib",
         seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
     );
-    let fips = DESKTOP
-        .replace("[defaults]", "[defaults]\nfips = true")
-        .replace(
-            "updates.default = \"off\"",
-            "updates.default = \"off\"\nsidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]",
-        );
+    let fips = fips_desktop();
     let config_fips = config(&fips).unwrap();
     // The rules: fips with a macOS output needs the module's sidecar, and a
     // macOS sidecar needs a macOS output.
@@ -1157,6 +1152,7 @@ fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
                     )],
                     dylibs: core_dylibs.iter().map(|d| (*d).to_owned()).collect(),
                     rpaths: rpaths.iter().map(|r| (*r).to_owned()).collect(),
+                    symbols: fips_core_symbols(),
                     ..Macho::default()
                 }
                 .build(),
@@ -1222,6 +1218,400 @@ fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
             "/Applications/Acme Viewer.app/Contents/Frameworks/{module}"
         )]
     );
+}
+
+// ---------------------------------------------------------------------------
+// A FIPS core's symbol table
+//
+// Off Linux the module is a dylib: a core imports it, and nothing but the
+// core's table shows the non-FIPS AWS-LC, which aws-lc-rs compiles into a
+// FIPS build too, stayed out of the link.
+
+const PREFIX: &str = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+
+/// [`DESKTOP`] as a FIPS product, shipping the module's dylib.
+fn fips_desktop() -> String {
+    DESKTOP
+        .replace("[defaults]", "[defaults]\nfips = true")
+        .replace(
+            "updates.default = \"off\"",
+            "updates.default = \"off\"\nsidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]",
+        )
+}
+
+/// A FIPS core's table as a rustc cdylib's reads, built the normal way
+/// (`strip = false`, the module's dylib, `aws-lc-sys` compiled but unused):
+/// the module imported, its own code local, one export, and a debug map
+/// naming the sys crates' object files.
+fn fips_core_symbols() -> Vec<MachoSymbol> {
+    vec![
+        MachoSymbol::stab("/build/deps/libaws_lc_fips_sys-0123.rlib(aws_lc_fips_sys-0123.o)"),
+        MachoSymbol::local("GCC_except_table0"),
+        MachoSymbol::local("__ZN9aws_lc_rs4init17h0123456789abcdefE"),
+        MachoSymbol::local("__ZN15aws_lc_fips_sys4init17h0123456789abcdefE"),
+        MachoSymbol::local("__dyld_private"),
+        MachoSymbol::export("_seaworthy_core_main"),
+        MachoSymbol::import(&format!("_{PREFIX}CRYPTO_library_init")),
+        MachoSymbol::import(&format!("_{PREFIX}EVP_sha256")),
+        MachoSymbol::import("_memcpy"),
+    ]
+}
+
+fn core_findings(symbols: Vec<MachoSymbol>) -> Vec<String> {
+    seaworthy::verify::fips_macos_core_findings(
+        &Macho {
+            symbols,
+            ..Macho::default()
+        }
+        .build(),
+        PREFIX,
+    )
+}
+
+#[test]
+fn a_macos_fips_core_that_only_imports_the_module_passes() {
+    assert_eq!(core_findings(fips_core_symbols()), Vec::<String>::new());
+    // Neither what the linker adds nor a debug map entry is a symbol of
+    // what's linked, whatever it names.
+    let mut table = fips_core_symbols();
+    table.push(MachoSymbol::local("__mh_dylib_header"));
+    table.push(MachoSymbol::stab("_aws_lc_0_46_0_EVP_sha256"));
+    assert_eq!(core_findings(table), Vec::<String>::new());
+}
+
+#[test]
+fn a_macos_fips_core_defining_or_importing_another_provider_is_refused() {
+    let cases: Vec<(MachoSymbol, &str)> = vec![
+        // What a statically linked aws-lc-sys leaves in a cdylib: hidden, so
+        // local; exported or imported, it's linked all the same.
+        (
+            MachoSymbol::local("_aws_lc_0_46_0_EVP_sha256"),
+            "non-FIPS AWS-LC (aws-lc-sys) symbols, e.g. aws_lc_0_46_0_EVP_sha256",
+        ),
+        (
+            MachoSymbol::export("_aws_lc_0_46_0_EVP_sha256"),
+            "non-FIPS AWS-LC",
+        ),
+        (
+            MachoSymbol::import("_aws_lc_0_46_0_EVP_sha256"),
+            "non-FIPS AWS-LC",
+        ),
+        (
+            MachoSymbol::local("_ring_core_0_17_14__x25519"),
+            "ring symbols, e.g. ring_core_0_17_14__x25519",
+        ),
+        (
+            MachoSymbol::local("_aws_lc_fips_0_13_9_SHA256"),
+            "of a version other than",
+        ),
+        (
+            MachoSymbol::import("_aws_lc_fips_0_13_9_SHA256"),
+            "of a version other than",
+        ),
+        // An AWS-LC built without a prefix.
+        (
+            MachoSymbol::local("_awslc_version_string"),
+            "unprefixed AWS-LC symbols, e.g. awslc_version_string",
+        ),
+        (
+            MachoSymbol::local("_AWSLC_thread_local_clear"),
+            "unprefixed AWS-LC",
+        ),
+        (
+            MachoSymbol::local("_CRYPTO_library_init"),
+            "unprefixed AWS-LC",
+        ),
+    ];
+    for (symbol, needle) in cases {
+        let name = symbol.name.clone();
+        let mut table = fips_core_symbols();
+        table.push(symbol);
+        let found = core_findings(table);
+        assert_eq!(found.len(), 1, "{name}: {found:?}");
+        assert!(found[0].contains(needle), "{name}: {found:?}");
+    }
+}
+
+#[test]
+fn a_macos_fips_core_defining_the_module_s_symbols_is_refused() {
+    let name = format!("_{PREFIX}SHA256");
+    let absolute = MachoSymbol {
+        name: name.clone(),
+        n_type: 0x03, // N_ABS | N_EXT
+        n_sect: 0,
+    };
+    let indirect = MachoSymbol {
+        name: name.clone(),
+        n_type: 0x0b, // N_INDR | N_EXT
+        n_sect: 0,
+    };
+    for symbol in [
+        MachoSymbol::local(&name),
+        MachoSymbol::export(&name),
+        absolute,
+        indirect,
+    ] {
+        let mut table = fips_core_symbols();
+        table.push(symbol);
+        let found = core_findings(table);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains(&format!("defines 1 {PREFIX}* symbols, e.g. {PREFIX}SHA256")),
+            "{found:?}"
+        );
+    }
+    // The module statically linked: nothing imported, everything defined.
+    let table = vec![
+        MachoSymbol::local(&format!("_{PREFIX}awslc_version_string")),
+        MachoSymbol::local(&format!("_{PREFIX}EVP_sha256")),
+        MachoSymbol::export("_seaworthy_core_main"),
+    ];
+    let found = core_findings(table);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("defines 2"), "{found:?}");
+}
+
+#[test]
+fn a_macos_fips_core_importing_nothing_of_the_module_is_refused() {
+    // It loads the dylib (the load check's), uses nothing from it.
+    let table = fips_core_symbols()
+        .into_iter()
+        .filter(|s| !s.name.contains(PREFIX))
+        .collect();
+    let found = core_findings(table);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains(&format!("no {PREFIX}* symbols")),
+        "{found:?}"
+    );
+    // Only another release's prefix is no import of the pinned one.
+    let found = core_findings(vec![
+        MachoSymbol::local("__ZN4core3fmt5write17h0123456789abcdefE"),
+        MachoSymbol::import("_aws_lc_fips_0_13_9_SHA256"),
+    ]);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found[0].contains(&format!("no {PREFIX}* symbols")),
+        "{found:?}"
+    );
+    assert!(found[1].contains("of a version other than"), "{found:?}");
+}
+
+/// A stripped Mach-O keeps a table: the imports and exports the loader
+/// needs. What a static library brought in was local and is gone, so the
+/// table alone would pass with the non-FIPS AWS-LC inside. Never a pass.
+#[test]
+fn a_stripped_macos_fips_core_is_refused_not_passed() {
+    let stripped = || {
+        vec![
+            MachoSymbol::export("_seaworthy_core_main"),
+            MachoSymbol::import(&format!("_{PREFIX}CRYPTO_library_init")),
+            MachoSymbol::import(&format!("_{PREFIX}EVP_sha256")),
+            MachoSymbol::import("_memcpy"),
+        ]
+    };
+    // `-C strip=symbols` and `strip -x`: every import and export left.
+    let found = core_findings(stripped());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("is stripped (no local symbols)"),
+        "{found:?}"
+    );
+    // No table at all: the one finding too, not its consequences.
+    let found = core_findings(Vec::new());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("is stripped (no local symbols)"),
+        "{found:?}"
+    );
+    // A debug map isn't a symbol table, and the linker's own locals say
+    // nothing about what was linked.
+    let found = core_findings(
+        [
+            stripped(),
+            vec![
+                MachoSymbol::stab("_some_function"),
+                MachoSymbol::local("__mh_dylib_header"),
+                MachoSymbol::local("__dyld_private"),
+            ],
+        ]
+        .concat(),
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("is stripped (no local symbols)"),
+        "{found:?}"
+    );
+    // What's still visible is reported beside it.
+    let found = core_findings(
+        [
+            stripped(),
+            vec![MachoSymbol::import("_aws_lc_0_46_0_EVP_sha256")],
+        ]
+        .concat(),
+    );
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[1].contains("non-FIPS AWS-LC"), "{found:?}");
+}
+
+/// One leading `_` comes off, the C name's: a C name that starts with `_`
+/// is another name.
+#[test]
+fn mach_o_names_lose_one_underscore() {
+    for other in [
+        "__aws_lc_0_46_0_EVP_sha256",
+        "__ring_core_0_17_14__x25519",
+        "__awslc_version_string",
+        "__aws_lc_fips_0_13_9_SHA256",
+        // A crate named like one, as a linker lists its mangled symbols.
+        "__ZN9aws_lc_rs3aes3new17h0123456789abcdefE",
+        "__RNvCs0123_9aws_lc_rs4init",
+        "_aws_lc_rs_helper",
+    ] {
+        let mut table = fips_core_symbols();
+        table.push(MachoSymbol::local(other));
+        assert_eq!(core_findings(table), Vec::<String>::new(), "{other}");
+    }
+    // Nor is a name the module's after a second `_`.
+    let mut table = fips_core_symbols();
+    table.push(MachoSymbol::local(&format!("__{PREFIX}SHA256")));
+    assert_eq!(core_findings(table), Vec::<String>::new());
+}
+
+#[test]
+fn only_a_mach_o_file_is_a_macos_core() {
+    let elf = common::Elf {
+        symbols: vec![(format!("{PREFIX}EVP_sha256"), true)],
+        ..common::Elf::default()
+    }
+    .build();
+    assert_eq!(
+        seaworthy::verify::fips_macos_core_findings(&elf, PREFIX),
+        ["not a Mach-O file"]
+    );
+    let found = seaworthy::verify::fips_macos_core_findings(b"not an image", PREFIX);
+    assert!(found[0].starts_with("not an object file"), "{found:?}");
+}
+
+/// `verify` holds every core of a FIPS product to it, and nothing else: the
+/// module itself still meets the static-link checks, and the same core is
+/// fine in a product that isn't FIPS.
+#[test]
+fn verify_reads_every_macos_fips_core_s_symbols() {
+    let module = format!("lib{PREFIX}crypto.dylib");
+    let module_image = |symbols: Vec<MachoSymbol>| {
+        Macho {
+            sections: vec![(
+                "__TEXT".into(),
+                "__text".into(),
+                vec![0xc0, 0x03, 0x5f, 0xd6],
+            )],
+            symbols,
+            ..Macho::default()
+        }
+        .build()
+    };
+    let good_module = || {
+        module_image(vec![
+            MachoSymbol::export(&format!("_{PREFIX}awslc_version_string")),
+            MachoSymbol::export(&format!("_{PREFIX}EVP_sha256")),
+        ])
+    };
+    let core_image = |cpu: &str, symbols: Vec<MachoSymbol>| {
+        let mut features = M1.to_vec();
+        if cpu == "apple-m4" {
+            features.extend(["bf16", "i8mm", "v8.5a", "v8.6a", "v8.7a"]);
+        }
+        Macho {
+            sections: vec![(
+                "__DATA".into(),
+                "__cpureq".into(),
+                record(MACOS, cpu, &features),
+            )],
+            dylibs: vec![
+                "/usr/lib/libSystem.B.dylib".into(),
+                format!("@rpath/{module}"),
+            ],
+            rpaths: vec!["@loader_path".into()],
+            symbols,
+            ..Macho::default()
+        }
+        .build()
+    };
+    let tree = || {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path().join("artifacts");
+        common::acme_macos_artifacts(&artifacts);
+        for cpu in MACOS_CPUS {
+            write(
+                &artifacts,
+                &format!("{MACOS}/cores/{cpu}/libacme_core.dylib"),
+                &core_image(cpu, fips_core_symbols()),
+            );
+            write(
+                &artifacts,
+                &format!("{MACOS}/cores/{cpu}/{module}"),
+                &good_module(),
+            );
+        }
+        (dir, artifacts)
+    };
+    let fips = config(&fips_desktop()).unwrap();
+    let plain = config(&fips_desktop().replace("fips = true\n", "")).unwrap();
+    let (_keep, artifacts) = tree();
+    assert_eq!(findings(&fips, &artifacts), "");
+
+    // One bad core, whichever of them, is named with what's wrong; the rest
+    // of the tree passes; and without fips the same core verifies.
+    let mut foreign = fips_core_symbols();
+    foreign.push(MachoSymbol::local("_aws_lc_0_46_0_EVP_sha256"));
+    let mut copy = fips_core_symbols();
+    copy.push(MachoSymbol::local(&format!("_{PREFIX}SHA256")));
+    let stripped: Vec<MachoSymbol> = fips_core_symbols()
+        .into_iter()
+        .filter(|s| s.n_type != MachoSymbol::local("").n_type)
+        .collect();
+    for cpu in MACOS_CPUS {
+        for (symbols, needle) in [
+            (foreign.clone(), "non-FIPS AWS-LC (aws-lc-sys) symbols"),
+            (copy.clone(), "symbols, e.g."),
+            (stripped.clone(), "is stripped (no local symbols)"),
+        ] {
+            let (_keep, artifacts) = tree();
+            let core = artifacts.join(format!("{MACOS}/cores/{cpu}/libacme_core.dylib"));
+            write(
+                &artifacts,
+                &format!("{MACOS}/cores/{cpu}/libacme_core.dylib"),
+                &core_image(cpu, symbols),
+            );
+            let found = findings(&fips, &artifacts);
+            assert!(
+                found.contains(&format!("{}: ", core.display())) && found.contains(needle),
+                "{cpu}, {needle}: {found}"
+            );
+            assert_eq!(found.matches("libacme_core.dylib:").count(), 1, "{found}");
+            assert_eq!(findings(&plain, &artifacts), "", "{cpu}, {needle}");
+        }
+    }
+
+    // The module is held to the static-link checks, not the core's.
+    let (_keep, artifacts) = tree();
+    for cpu in MACOS_CPUS {
+        write(
+            &artifacts,
+            &format!("{MACOS}/cores/{cpu}/{module}"),
+            &module_image(vec![
+                MachoSymbol::export(&format!("_{PREFIX}awslc_version_string")),
+                MachoSymbol::export("_aws_lc_0_46_0_EVP_sha256"),
+            ]),
+        );
+    }
+    let found = findings(&fips, &artifacts);
+    assert!(
+        found.contains(&module) && found.contains("non-FIPS AWS-LC"),
+        "{found}"
+    );
+    assert!(!found.contains("libacme_core.dylib:"), "{found}");
 }
 
 // ---------------------------------------------------------------------------
