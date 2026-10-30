@@ -1193,9 +1193,12 @@ fn verify_signature(
     target: &Path,
     deep: bool,
 ) -> Result<(), DistError> {
+    // The leading `=`: without it, codesign takes the text for a file's path.
     let requirement = match signer {
         MacSigner::AdHoc => None,
-        MacSigner::DeveloperId { team_id, .. } => Some(developer_id_requirement(team_id)),
+        MacSigner::DeveloperId { team_id, .. } => {
+            Some(format!("={}", developer_id_requirement(team_id)))
+        }
     };
     let mut args: Vec<&std::ffi::OsStr> = vec!["--verify".as_ref(), "--strict".as_ref()];
     if deep {

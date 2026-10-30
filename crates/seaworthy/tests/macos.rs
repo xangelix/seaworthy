@@ -493,9 +493,9 @@ fn an_alias_is_signed_as_its_program_before_the_bundle() {
             format!(
                 "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|--entitlements|{entitled}|{bundle}"
             ),
-            format!("codesign|--verify|--strict|--test-requirement|{requirement}|{core}"),
-            format!("codesign|--verify|--strict|--test-requirement|{requirement}|{alias}"),
-            format!("codesign|--verify|--strict|--deep|--test-requirement|{requirement}|{bundle}"),
+            format!("codesign|--verify|--strict|--test-requirement|={requirement}|{core}"),
+            format!("codesign|--verify|--strict|--test-requirement|={requirement}|{alias}"),
+            format!("codesign|--verify|--strict|--deep|--test-requirement|={requirement}|{bundle}"),
         ]
     );
 }
@@ -1838,8 +1838,8 @@ fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
             "codesign|--force|--sign|{IDENTITY}|--timestamp|--options|runtime|--keychain|{keychain}|--entitlements|{}|{bundle}",
             entitlements.display()
         ),
-        format!("codesign|--verify|--strict|--test-requirement|{requirement}|{core}"),
-        format!("codesign|--verify|--strict|--deep|--test-requirement|{requirement}|{bundle}"),
+        format!("codesign|--verify|--strict|--test-requirement|={requirement}|{core}"),
+        format!("codesign|--verify|--strict|--deep|--test-requirement|={requirement}|{bundle}"),
     ];
     let seen = calls(dir.path());
     assert_eq!(seen[..4], want, "{seen:#?}");
@@ -1851,7 +1851,7 @@ fn a_developer_id_signs_notarizes_and_staples_the_disk_image() {
         seen[5..],
         [
             format!("codesign|--force|--sign|{IDENTITY}|--timestamp|--keychain|{keychain}|{dmg}"),
-            format!("codesign|--verify|--strict|--test-requirement|{requirement}|{dmg}"),
+            format!("codesign|--verify|--strict|--test-requirement|={requirement}|{dmg}"),
             format!(
                 "xcrun|notarytool|submit|{dmg}|--keychain-profile|acme-notary|--keychain|{keychain}|--wait|--timeout|1800s|--output-format|json"
             ),
