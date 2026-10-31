@@ -97,6 +97,7 @@ fn every_job_is_wired_to_what_it_needs() {
             "seaworthy-build-linux",
             "seaworthy-build-windows",
             "seaworthy-macos",
+            "seaworthy-macos-sign",
             "seaworthy-msi",
             "seaworthy-msi-adopt",
             "seaworthy-package",
@@ -125,6 +126,10 @@ fn every_job_is_wired_to_what_it_needs() {
         ("seaworthy-build-windows", vec!["seaworthy-prepare"]),
         ("seaworthy-macos", vec!["seaworthy-prepare"]),
         (
+            "seaworthy-macos-sign",
+            vec!["seaworthy-prepare", "seaworthy-macos"],
+        ),
+        (
             "seaworthy-package",
             vec![
                 "seaworthy-prepare",
@@ -146,6 +151,7 @@ fn every_job_is_wired_to_what_it_needs() {
                 "seaworthy-prepare",
                 "seaworthy-package",
                 "seaworthy-msi-adopt",
+                "seaworthy-macos-sign",
             ],
         ),
         (
@@ -179,7 +185,10 @@ fn every_job_is_wired_to_what_it_needs() {
             "seaworthy/artifacts/x86_64-pc-windows-msvc/",
         ),
         ("seaworthy-package", "seaworthy/dist/"),
-        ("seaworthy-macos", "seaworthy/dist-macos/"),
+        // What the job's rule names: the packages, or the binaries when
+        // seaworthy-macos-sign packages them.
+        ("seaworthy-macos", "$SEAWORTHY_MACOS_ARTIFACTS"),
+        ("seaworthy-macos-sign", "seaworthy/dist-macos/"),
         ("seaworthy-msi", "seaworthy/msi/"),
         ("seaworthy-msi-adopt", "seaworthy/adopted/"),
         ("seaworthy-repo", "seaworthy/repo/"),
@@ -250,8 +259,8 @@ fn every_job_is_wired_to_what_it_needs() {
             "{name}"
         );
     }
-    // Nothing reaches the Mac's job: it never signs, on a release
-    // too, and no later job takes its packages.
+    // Nothing reaches the Mac's job that compiles: it never signs, on a
+    // release too, and only the job that signs takes what it leaves.
     let mac = job(&pipeline, "seaworthy-macos");
     for key in ["SEAWORTHY_SECRETS", "SEAWORTHY_DEV_SECRETS"] {
         assert!(
@@ -265,10 +274,57 @@ fn every_job_is_wired_to_what_it_needs() {
     );
     for (name, node) in &pipeline.jobs {
         assert!(
-            !list(node.get("needs")).contains(&"seaworthy-macos".to_owned()),
+            name == "seaworthy-macos-sign"
+                || !list(node.get("needs")).contains(&"seaworthy-macos".to_owned()),
             "{name} needs the Mac's job"
         );
     }
+    // The job that signs: its prefix, seaworthy's own checkout fetched
+    // afresh, nothing restored, Homebrew without the job's credentials, and
+    // nothing of the product's compiled.
+    let sign = job(&pipeline, "seaworthy-macos-sign");
+    assert!(
+        sign.get("variables")
+            .and_then(|v| v.get("SEAWORTHY_SECRETS"))
+            .is_some()
+    );
+    assert!(
+        matches!(sign.get("cache"), Some(Node::Seq(items)) if items.is_empty()),
+        "nothing restored"
+    );
+    let script = list(sign.get("script"));
+    assert!(
+        script[0].contains("rm -rf \"$SEAWORTHY_CHECKOUT\" && eval \"$SEAWORTHY_FETCH\""),
+        "{script:?}"
+    );
+    assert!(
+        script
+            .iter()
+            .any(|line| line.contains("env -i HOME=\"$HOME\" PATH=\"$PATH\"")
+                && line.contains("brew install bash")),
+        "{script:?}"
+    );
+    assert_eq!(
+        script.last().map(String::as_str),
+        Some("bash \"$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh\" package-macos")
+    );
+    for line in &script {
+        assert!(
+            !line.contains(" build ") && !line.contains("rustup") && !line.contains("cargo "),
+            "the job that signs compiles nothing of the product's: {line}"
+        );
+    }
+    // Its packages are in the release, when it ran.
+    let Some(Node::Seq(needs)) = job(&pipeline, "seaworthy-repo").get("needs") else {
+        panic!("seaworthy-repo has no needs")
+    };
+    assert!(
+        needs
+            .iter()
+            .any(|need| text(need, "job") == Some("seaworthy-macos-sign")
+                && need.get("optional").and_then(Node::boolean) == Some(true)),
+        "seaworthy-repo adopts them, an optional need"
+    );
 }
 
 #[test]
@@ -362,20 +418,56 @@ fn only_a_release_signs_and_publishes() {
         assert_eq!(text(&rules[1], "when"), Some("on_success"), "{name}");
     }
     // The Mac's job names a release's version on a release (and no more:
-    // its dmg stays out of the release), and has no dev build.
+    // without sign-if its dmg stays out of the release), and has no dev
+    // build. By default sign-if matches nothing.
+    let never = "$CI_PIPELINE_ID == \"0\"";
     let Some(Node::Seq(rules)) = job(&pipeline, "seaworthy-macos").get("rules") else {
         panic!("seaworthy-macos has no rules")
     };
-    assert_eq!(rules.len(), 2);
-    assert_eq!(text(&rules[0], "if"), Some(release));
+    assert_eq!(rules.len(), 3);
+    assert_eq!(text(&rules[0], "if"), Some(never));
+    let rule_variable = |rule: &Node, name: &str| {
+        rule.get("variables")
+            .and_then(|v| v.get(name))
+            .and_then(Node::text)
+            .map(str::to_owned)
+    };
     assert_eq!(
-        rules[0]
-            .get("variables")
-            .and_then(|v| v.get("SEAWORTHY_RELEASE"))
-            .and_then(Node::text),
+        rule_variable(&rules[0], "SEAWORTHY_MACOS_BUILD_ONLY").as_deref(),
         Some("1")
     );
-    assert_eq!(text(&rules[1], "when"), Some("on_success"));
+    assert_eq!(
+        rule_variable(&rules[0], "SEAWORTHY_MACOS_ARTIFACTS").as_deref(),
+        Some("seaworthy/artifacts/aarch64-apple-darwin/")
+    );
+    assert_eq!(text(&rules[1], "if"), Some(release));
+    assert_eq!(
+        rule_variable(&rules[1], "SEAWORTHY_RELEASE").as_deref(),
+        Some("1")
+    );
+    assert_eq!(text(&rules[2], "when"), Some("on_success"));
+    assert_eq!(
+        job(&pipeline, "seaworthy-macos")
+            .get("variables")
+            .and_then(|v| v.get("SEAWORTHY_MACOS_ARTIFACTS"))
+            .and_then(Node::text),
+        Some("seaworthy/dist-macos/"),
+        "outside a release that signs, the job's packages"
+    );
+    // The job that signs runs on sign-if alone, on a release.
+    let Some(Node::Seq(rules)) = job(&pipeline, "seaworthy-macos-sign").get("rules") else {
+        panic!("seaworthy-macos-sign has no rules")
+    };
+    assert_eq!(rules.len(), 1);
+    assert_eq!(text(&rules[0], "if"), Some(never));
+    assert_eq!(
+        rule_variable(&rules[0], "SEAWORTHY_RELEASE").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        rule_variable(&rules[0], "SEAWORTHY_MACOS_SIGN").as_deref(),
+        Some("1")
+    );
     // The release rule is an input, as a product's server deploy needs the
     // same.
     let dir = tempfile::tempdir().unwrap();
@@ -520,6 +612,7 @@ fn linux_jobs_are_untagged_and_the_product_names_its_runners_and_images() {
             "seaworthy-build-windows",
             "seaworthy-msi",
             "seaworthy-macos",
+            "seaworthy-macos-sign",
         ]
         .contains(&name.as_str())
         {
@@ -538,10 +631,16 @@ fn linux_jobs_are_untagged_and_the_product_names_its_runners_and_images() {
             "{name}"
         );
     }
-    let mac = job(&product, "seaworthy-macos");
-    assert_eq!(list(mac.get("tags")), ["macos"]);
-    assert_eq!(text(mac, "image"), Some("macos-15-rust"));
-    assert_eq!(text(mac, "resource_group"), Some("seaworthy-macos"));
+    for name in ["seaworthy-macos", "seaworthy-macos-sign"] {
+        let mac = job(&product, name);
+        assert_eq!(list(mac.get("tags")), ["macos"], "{name}");
+        assert_eq!(text(mac, "image"), Some("macos-15-rust"), "{name}");
+        assert_eq!(
+            text(mac, "resource_group"),
+            Some("seaworthy-macos"),
+            "{name}"
+        );
+    }
     for name in [
         "seaworthy-prepare",
         "seaworthy-package",
@@ -1398,6 +1497,441 @@ fn a_release_never_ships_ad_hoc_macos_outputs_under_a_pinned_apple_team() {
     let out = step(dir.path(), &["package-macos"], &env);
     assert!(
         said(&out).contains("its macOS outputs stay ad hoc-signed pipeline artifacts"),
+        "{}",
+        said(&out)
+    );
+}
+
+/// The Mac's step on a release, `uname` saying Darwin. The job that only
+/// compiles packages nothing. Unsigned, it runs under no secrets prefix, so a
+/// product's switched-off Developer ID can't fail for a store with nothing in
+/// it. Signed, the prefix's credentials become a keychain for the one
+/// seaworthy call ([`apple_stubs`]), which then needs macOS's own tools.
+#[test]
+fn a_release_s_macos_step_signs_under_its_prefix_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = apple_stubs(&bin);
+    let checkout = repo_root();
+    std::fs::create_dir_all(dir.path().join("seaworthy/artifacts/aarch64-apple-darwin")).unwrap();
+    let config = DESKTOP
+        .replace(
+            "helper = \"AcmeToolUpdate\"\n",
+            "updates.default = \"off\"\n",
+        )
+        .replace(
+            "outputs = [\"deb\", \"tar\"]",
+            "outputs = [\"deb\", \"tar\", \"dmg\"]",
+        )
+        + "\n[product.console.macos]\nbundle-id = \"test.acme.console\"\n\n[defaults.apple]\nteam-id = \"ABCDE12345\"\n";
+    std::fs::write(dir.path().join("seaworthy.toml"), &config).unwrap();
+    std::fs::write(dir.path().join("signing-macos.toml"), "").unwrap();
+    let marker = dir.path().join("prefix-ran");
+    let prefix = bin.join("prefix");
+    script_at(
+        &prefix,
+        &format!(
+            "#!/bin/bash\ntouch '{}'\nexport SEAWORTHY_APPLE_P12=$TEST_P12 SEAWORTHY_APPLE_P12_PASSWORD=pw \
+             SEAWORTHY_APPLE_NOTARY_KEY=$TEST_P8 SEAWORTHY_APPLE_NOTARY_KEY_ID=KEY1234567 \
+             SEAWORTHY_APPLE_NOTARY_ISSUER=0a1b2c3d-0a1b-0a1b-0a1b-0a1b2c3d4e5f\nexec \"$@\"\n",
+            marker.display()
+        ),
+    );
+    let (p12, p8) = apple_secrets(dir.path());
+    let path = path_with(&bin);
+    let base = [
+        ("PATH", path.as_str()),
+        ("SEAWORTHY_RELEASE", "1"),
+        ("SEAWORTHY_VERSION", "1.4.0"),
+        ("SEAWORTHY_SEQUENCE", "41"),
+        ("SEAWORTHY_COMMIT", "0a1b2c3"),
+        ("SEAWORTHY_CHECKOUT", checkout.to_str().unwrap()),
+        ("SEAWORTHY_TOOL_BIN", env!("CARGO_BIN_EXE_seaworthy")),
+        ("SEAWORTHY_SECRETS", prefix.to_str().unwrap()),
+        ("SEAWORTHY_SIGNING", "signing-macos.toml"),
+        ("SOURCE_DATE_EPOCH", "1700000000"),
+        ("TEST_P12", p12.as_str()),
+        ("TEST_P8", p8.as_str()),
+        ("TMPDIR", dir.path().to_str().unwrap()),
+    ];
+
+    // The job that compiled, when another signs: nothing here at all.
+    let mut env = base.to_vec();
+    env.push(("SEAWORTHY_MACOS_BUILD_ONLY", "1"));
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains("packaged by the job that signs them"),
+        "{}",
+        said(&out)
+    );
+    assert!(!marker.exists());
+    assert!(!dir.path().join("seaworthy/dist-macos").exists());
+
+    // Unsigned, with no pin: the outputs stay ad hoc-signed, under no prefix.
+    std::fs::write(
+        dir.path().join("seaworthy.toml"),
+        config.replace("\n[defaults.apple]\nteam-id = \"ABCDE12345\"\n", ""),
+    )
+    .unwrap();
+    let out = step(dir.path(), &["package-macos"], &base);
+    assert!(
+        said(&out).contains("its macOS outputs stay ad hoc-signed pipeline artifacts"),
+        "{}",
+        said(&out)
+    );
+    assert!(
+        !marker.exists(),
+        "no prefix without a signer: {}",
+        said(&out)
+    );
+
+    // Signed: the prefix, then the keychain, then seaworthy under it.
+    std::fs::write(dir.path().join("seaworthy.toml"), &config).unwrap();
+    let mut env = base.to_vec();
+    env.push(("SEAWORTHY_MACOS_SIGN", "1"));
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(marker.exists(), "{}", said(&out));
+    assert!(
+        said(&out).contains("a keychain made for the step"),
+        "{}",
+        said(&out)
+    );
+    assert!(
+        said(&out).contains("Developer ID: Developer ID Application: Acme Inc (ABCDE12345); installer: Developer ID Installer: Acme Inc (ABCDE12345)"),
+        "{}",
+        said(&out)
+    );
+    // seaworthy ran, under the signer, past the checks that refuse a release
+    // without one: it stops at this test's empty artifacts.
+    assert!(
+        said(&out).contains("cores/apple-m1/libacme_core.dylib"),
+        "{}",
+        said(&out)
+    );
+    assert!(
+        said(&out).contains("the signing keychain is deleted"),
+        "{}",
+        said(&out)
+    );
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("security delete-keychain"), "{calls}");
+    // A signing configuration with an [apple] of its own: the machine's
+    // keychain, none made.
+    std::fs::write(&log, "").unwrap();
+    std::fs::write(
+        dir.path().join("signing-macos.toml"),
+        "[apple]\nidentity = \"Developer ID Application: Acme Inc (ABCDE12345)\"\nnotary-profile = \"acme\"\n",
+    )
+    .unwrap();
+    let out = step(dir.path(), &["package-macos"], &env);
+    assert!(
+        said(&out).contains("Developer ID-signed and notarized ([apple] in signing-macos.toml)"),
+        "{}",
+        said(&out)
+    );
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("create-keychain"),
+        "{}",
+        said(&out)
+    );
+}
+
+/// `uname` saying Darwin, and stand-ins for `security` and `xcrun` that log
+/// their whole command line, the variables they were handed, and answer what
+/// apple-keychain.sh asks: the two Developer ID identities. Returns the log.
+fn apple_stubs(bin: &Path) -> PathBuf {
+    let log = bin.join("calls");
+    script_at(&bin.join("uname"), "#!/bin/bash\necho Darwin\n");
+    let record = format!(
+        "echo \"$(basename \"$0\") $*\" >> '{log}'\nenv >> '{log}.env'\n",
+        log = log.display()
+    );
+    script_at(
+        &bin.join("security"),
+        &format!(
+            "#!/bin/bash\n{record}case \"$1\" in\n\
+             list-keychains) [ \"$#\" -gt 3 ] || echo '    \"/Users/acme/login.keychain-db\"' ;;\n\
+             create-keychain) for last; do :; done; : > \"$last\" ;;\n\
+             delete-keychain) rm -f \"$2\" ;;\n\
+             find-identity) printf '  1) %s \"Developer ID Application: Acme Inc (ABCDE12345)\"\\n  2) %s \"Developer ID Installer: Acme Inc (ABCDE12345)\"\\n' \
+             0000000000000000000000000000000000000001 0000000000000000000000000000000000000002 ;;\nesac\nexit 0\n"
+        ),
+    );
+    script_at(
+        &bin.join("xcrun"),
+        &format!("#!/bin/bash\n{record}exit 0\n"),
+    );
+    log
+}
+
+/// A PKCS#12 (base64, password `pw`) and an API key's text, for
+/// [`apple_stubs`]'s step to take apart. The Application identity with its
+/// key, and the Installer's certificate riding along (`apple-key-2.pem`, its
+/// key, is beside them).
+fn apple_secrets(dir: &Path) -> (String, String) {
+    let key = dir.join("apple-key.pem");
+    let cert = dir.join("apple-cert.pem");
+    let second_key = dir.join("apple-key-2.pem");
+    let second_cert = dir.join("apple-cert-2.pem");
+    let p12 = dir.join("apple.p12");
+    for (key, cert, name) in [
+        (
+            &key,
+            &cert,
+            "Developer ID Application: Acme Inc (ABCDE12345)",
+        ),
+        (
+            &second_key,
+            &second_cert,
+            "Developer ID Installer: Acme Inc (ABCDE12345)",
+        ),
+    ] {
+        let req = Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+            ])
+            .args(["-subj", &format!("/CN={name}")])
+            .arg("-keyout")
+            .arg(key)
+            .arg("-out")
+            .arg(cert)
+            .output()
+            .unwrap();
+        assert!(req.status.success(), "{}", said(&req));
+    }
+    let export = Command::new("openssl")
+        .args(["pkcs12", "-export", "-passout", "pass:pw", "-inkey"])
+        .arg(&key)
+        .arg("-in")
+        .arg(&cert)
+        .arg("-certfile")
+        .arg(&second_cert)
+        .arg("-out")
+        .arg(&p12)
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{}", said(&export));
+    let encoded = Command::new("openssl")
+        .args(["base64", "-A", "-in"])
+        .arg(&p12)
+        .output()
+        .unwrap();
+    assert!(encoded.status.success(), "{}", said(&encoded));
+    (
+        String::from_utf8(encoded.stdout).unwrap(),
+        "-----BEGIN PRIVATE KEY-----\nnotary-key-text\n-----END PRIVATE KEY-----".to_owned(),
+    )
+}
+
+/// apple-keychain.sh, run: the credentials become a keychain, leave the
+/// environment and never reach a command line; nothing else the step holds
+/// reaches the tools that make the keychain; the command gets the signing
+/// configuration with [apple]; and however it ends, nothing stays.
+#[test]
+fn the_keychain_is_made_for_one_command_and_goes_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = apple_stubs(&bin);
+    let (p12, p8) = apple_secrets(dir.path());
+    // Two identities in the one PKCS#12, as Keychain Access exports them, which
+    // the openssl command line can't write: the second key joins what its
+    // `-nocerts` prints, the second certificate rode along at the export.
+    let real_openssl = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v openssl"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    script_at(
+        &bin.join("openssl"),
+        &format!(
+            "#!/bin/bash\n'{real}' \"$@\" || exit $?\ncase \" $* \" in *\" -nocerts \"*) cat '{second}' ;; esac\n",
+            real = real_openssl.trim(),
+            second = dir.path().join("apple-key-2.pem").display()
+        ),
+    );
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join("temp")).unwrap();
+    std::fs::write(
+        work.join("signing-macos.toml"),
+        "[[manifest]]\nalgorithm = \"ml-dsa-87\"\nkey-env = \"ACME_MANIFEST_KEY\"\n",
+    )
+    .unwrap();
+    // The command: what it holds, and the signing configuration it's given.
+    let record = dir.path().join("record");
+    let command = bin.join("command");
+    script_at(
+        &command,
+        &format!(
+            "#!/bin/bash\n{{ env; echo \"args=$*\"; cat \"$2\"; }} > '{}'\nexit \"${{COMMAND_EXIT:-0}}\"\n",
+            record.display()
+        ),
+    );
+    let run = |extra: &[(&str, &str)]| {
+        let mut wrapper = Command::new("bash");
+        wrapper
+            .current_dir(&work)
+            .arg(repo_root().join("scripts/ci/apple-keychain.sh"))
+            .args(["signing-macos.toml", "--"])
+            .arg(&command)
+            .env("PATH", path_with(&bin))
+            .env("TMPDIR", work.join("temp"))
+            .env_remove("GITHUB_ACTIONS")
+            .env("ACME_MANIFEST_KEY", "manifest-secret")
+            .env("SEAWORTHY_APPLE_P12", &p12)
+            .env("SEAWORTHY_APPLE_P12_PASSWORD", "pw")
+            .env("SEAWORTHY_APPLE_NOTARY_KEY", &p8)
+            .env("SEAWORTHY_APPLE_NOTARY_KEY_ID", "KEY1234567")
+            .env(
+                "SEAWORTHY_APPLE_NOTARY_ISSUER",
+                "0a1b2c3d-0a1b-0a1b-0a1b-0a1b2c3d4e5f",
+            );
+        for (name, value) in extra {
+            wrapper.env(name, value);
+        }
+        wrapper.output().unwrap()
+    };
+    let left = || {
+        let mut names: Vec<String> = std::fs::read_dir(work.join("temp"))
+            .unwrap()
+            .chain(std::fs::read_dir(&work).unwrap())
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "temp" && name != "signing-macos.toml")
+            .collect();
+        names.sort();
+        names
+    };
+
+    let out = run(&[]);
+    assert!(out.status.success(), "{}", said(&out));
+    let seen = std::fs::read_to_string(&record).unwrap();
+    // The credentials left, the manifest key stayed for the command.
+    assert!(!seen.contains("SEAWORTHY_APPLE_"), "{seen}");
+    assert!(!seen.contains("notary-key-text"), "{seen}");
+    assert!(seen.contains("ACME_MANIFEST_KEY=manifest-secret"), "{seen}");
+    // The configuration: the original's, and [apple] with what the keychain
+    // holds.
+    assert!(seen.contains("key-env = \"ACME_MANIFEST_KEY\""), "{seen}");
+    assert!(
+        seen.contains("identity = \"Developer ID Application: Acme Inc (ABCDE12345)\""),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("installer-identity = \"Developer ID Installer: Acme Inc (ABCDE12345)\""),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("notary-profile = \"seaworthy-notary\""),
+        "{seen}"
+    );
+    assert!(seen.contains("/signing.keychain-db\""), "{seen}");
+    // It parses as seaworthy reads it, beside the original.
+    let signing = seen
+        .lines()
+        .find_map(|l| l.strip_prefix("args=--signing "))
+        .unwrap();
+    assert!(signing.starts_with("./.seaworthy-signing."), "{signing}");
+    let toml = seen
+        .split_once(&format!("args=--signing {signing}\n"))
+        .unwrap()
+        .1;
+    let parsed = dir.path().join("parsed.toml");
+    std::fs::write(&parsed, toml).unwrap();
+    let (file, base) = seaworthy::sign::SigningConfig::load(&parsed).unwrap();
+    let id = file.apple.as_ref().unwrap().developer_id(&base).unwrap();
+    assert_eq!(id.notary_profile, "seaworthy-notary");
+    assert!(id.keychain.is_some());
+    // No secret on any command line, and what made the keychain held neither
+    // the manifest's key nor anything but the system's basics and its own.
+    let calls = std::fs::read_to_string(&log).unwrap();
+    for (what, secret) in [
+        ("the PKCS#12", p12.as_str()),
+        ("the notary key", "notary-key-text"),
+        ("the PKCS#12's password", "pw "),
+    ] {
+        assert!(!calls.contains(secret), "{what} on a command line");
+    }
+    assert!(
+        calls.contains("notarytool store-credentials seaworthy-notary --key "),
+        "{calls}"
+    );
+    assert!(calls.contains("--key-id KEY1234567"), "{calls}");
+    // A Mac with Homebrew's OpenSSL goes to it by path (apple_openssl), past the stand-in
+    // above: there the second key never joins, and the one the PKCS#12 holds is imported.
+    let by_path = [
+        "/opt/homebrew/opt/openssl@3/bin/openssl",
+        "/usr/local/opt/openssl@3/bin/openssl",
+    ]
+    .iter()
+    .any(|openssl| Path::new(openssl).exists());
+    assert_eq!(
+        calls.matches("security import ").count(),
+        if by_path { 1 } else { 2 },
+        "each key's identity on its own: {calls}"
+    );
+    assert!(calls.contains("security delete-keychain"), "{calls}");
+    let tool_env = std::fs::read_to_string(format!("{}.env", log.display())).unwrap();
+    assert!(
+        !tool_env.contains("manifest-secret"),
+        "the manifest's key reached what makes the keychain"
+    );
+    assert_eq!(left(), Vec::<String>::new(), "nothing stays");
+
+    // A failing command: its exit status, the same cleanup.
+    let out = run(&[("COMMAND_EXIT", "7")]);
+    assert_eq!(out.status.code(), Some(7), "{}", said(&out));
+    assert_eq!(left(), Vec::<String>::new());
+
+    // A refused credential: said by name, the command never runs, nothing
+    // stays.
+    std::fs::remove_file(&record).unwrap();
+    for (name, value, why) in [
+        ("SEAWORTHY_APPLE_P12", "", "no Developer ID PKCS#12"),
+        (
+            "SEAWORTHY_APPLE_P12",
+            "bm90IGEgcDEy",
+            "doesn't open with its password",
+        ),
+        (
+            "SEAWORTHY_APPLE_P12_PASSWORD",
+            "wrong",
+            "doesn't open with its password",
+        ),
+        (
+            "SEAWORTHY_APPLE_NOTARY_KEY",
+            "",
+            "the App Store Connect API key is required",
+        ),
+        (
+            "SEAWORTHY_APPLE_NOTARY_KEY_ID",
+            "lower",
+            "isn't an App Store Connect key id",
+        ),
+        (
+            "SEAWORTHY_APPLE_NOTARY_ISSUER",
+            "nope",
+            "isn't an issuer id",
+        ),
+    ] {
+        let out = run(&[(name, value)]);
+        assert!(!out.status.success(), "{name}={value}");
+        assert!(said(&out).contains(why), "{name}={value}: {}", said(&out));
+        assert!(!record.exists(), "{name}={value}");
+        assert_eq!(left(), Vec::<String>::new(), "{name}={value}");
+    }
+    // A configuration with an [apple] of its own isn't this script's.
+    std::fs::write(work.join("signing-macos.toml"), "[apple]\n").unwrap();
+    let out = run(&[]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("already has an [apple]"),
         "{}",
         said(&out)
     );

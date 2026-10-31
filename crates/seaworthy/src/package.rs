@@ -1116,6 +1116,158 @@ pub fn adopt_msi(
     Ok(new)
 }
 
+/// Adopts a release's macOS packages, which the Mac's `package --platforms
+/// macos --signing` listed under `macos` (a directory of `<product>/`), into
+/// the release's listing under `out`, so `repo` publishes them with the rest.
+/// Nothing is signed here: each listed file is read as `repo` trusts it, then
+/// copied beside the others, and the listing says the same release.
+/// A product packaged on the Mac alone has no listing yet, and takes the
+/// Mac's. Returns the adopted artifacts.
+///
+/// # Errors
+/// [`DistError::Config`] for an unknown product or one without macOS outputs;
+/// [`DistError::Layout`] for a listing that isn't this product's, isn't the
+/// other's release, lists anything but macOS artifacts and their manifests
+/// and SBOMs (or none), or would replace a file; [`DistError::Sign`] for a
+/// macOS listing a release can't publish (unsigned, a dev build's, the CI test
+/// keys').
+pub fn adopt_macos(
+    config: &Config,
+    id: &str,
+    out: &Path,
+    macos: &Path,
+) -> Result<Vec<Artifact>, DistError> {
+    let product = config
+        .products
+        .get(id)
+        .ok_or_else(|| DistError::Config(format!("no product {id:?} in seaworthy.toml")))?;
+    if !product.outputs.iter().any(|o| o.is_macos()) {
+        return Err(DistError::Config(format!(
+            "product {id} has no macOS output to adopt"
+        )));
+    }
+    let from = macos.join(id);
+    let mac = crate::repo::read_listing(&from)?;
+    if mac.product != id {
+        return Err(DistError::Layout(format!(
+            "{}: the listing is product {:?}'s, not {id:?}'s",
+            from.display(),
+            mac.product
+        )));
+    }
+    // What repo refuses anyway, said where it can be fixed: only a signed
+    // release's macOS packages join a release.
+    if !mac.signed || mac.authenticode_only || mac.ci_test {
+        return Err(DistError::Sign(format!(
+            "{}: the macOS packages weren't packaged for a release (package --platforms macos --signing, with the Developer ID): only a signed release's join one",
+            from.display()
+        )));
+    }
+    if !mac
+        .artifacts
+        .iter()
+        .any(|a| matches!(a.kind, Kind::Dmg | Kind::Pkg))
+    {
+        return Err(DistError::Layout(format!(
+            "{}: no dmg or pkg listed",
+            from.display()
+        )));
+    }
+    for artifact in &mac.artifacts {
+        let companion = matches!(artifact.kind, Kind::Manifest | Kind::Sbom);
+        if !(companion || matches!(artifact.kind, Kind::Dmg | Kind::Pkg))
+            || artifact.target != MACOS
+        {
+            return Err(DistError::Layout(format!(
+                "{}: {} isn't a macOS artifact, its manifest or its SBOM",
+                from.display(),
+                artifact.file
+            )));
+        }
+    }
+    let base = out.join(id);
+    let listing = if base.join("packages.json").exists() {
+        let listing = crate::repo::read_listing(&base)?;
+        let same = listing.product == mac.product
+            && listing.package == mac.package
+            && listing.channel == mac.channel
+            && listing.version == mac.version
+            && listing.build == mac.build
+            && listing.token == mac.token
+            && listing.sequence == mac.sequence
+            && listing.signed == mac.signed
+            && listing.authenticode_only == mac.authenticode_only
+            && listing.ci_test == mac.ci_test;
+        if !same {
+            return Err(DistError::Layout(format!(
+                "{}: the macOS packages are {} {} (sequence {}), but the listing is {} {} (sequence {}): another release's",
+                from.display(),
+                mac.package,
+                mac.token,
+                mac.sequence,
+                listing.package,
+                listing.token,
+                listing.sequence
+            )));
+        }
+        Some(listing)
+    } else {
+        None
+    };
+    let mut new = Vec::new();
+    for artifact in &mac.artifacts {
+        let target = base.join(&artifact.file);
+        if target.exists() {
+            return Err(DistError::Layout(format!(
+                "{} exists: the macOS packages would replace it",
+                target.display()
+            )));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| DistError::io(parent, e))?;
+        }
+        write(&target, &artifact.read(&mac)?)?;
+        new.push(Artifact {
+            kind: artifact.kind,
+            path: target,
+            sha256: artifact.sha256.clone(),
+        });
+    }
+    let mut all: Vec<Artifact> = listing
+        .iter()
+        .flat_map(|l| &l.artifacts)
+        .map(|a| Artifact {
+            kind: a.kind,
+            path: base.join(&a.file),
+            sha256: a.sha256.clone(),
+        })
+        .collect();
+    all.extend(new.iter().cloned());
+    final_check(&all)?;
+    let options = Options {
+        release: Release::new(&mac.version, mac.sequence)?,
+        mtime: 0,
+        nfpm: PathBuf::new(),
+        wix: None,
+        build: crate::sign::BuildId {
+            metadata: mac.build.clone(),
+        },
+    };
+    write_listing(
+        config,
+        id,
+        &options,
+        &all,
+        &base,
+        SignedAs {
+            signed: mac.signed,
+            authenticode_only: false,
+            ci_test: false,
+        },
+    )?;
+    Ok(new)
+}
+
 /// The MSI's security-relevant tables against the `.wxs` the listing
 /// names ([`crate::msi_check`]): read with `msiinfo tables` and `msiinfo
 /// export -s` (which never writes a table's streams to disk), in a scratch

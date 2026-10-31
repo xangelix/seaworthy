@@ -780,7 +780,7 @@ fn a_developer_id_signs_every_binary_of_the_tool_directory() {
     );
     for (call, file) in [(&calls[2], &core), (&calls[3], &launcher)] {
         assert!(
-            call.starts_with("codesign|--verify|--strict|--test-requirement|")
+            call.starts_with("codesign|--verify|--strict|--test-requirement|=anchor apple generic")
                 && call.contains("certificate leaf[subject.OU] = \"ABCDE12345\"")
                 && call.ends_with(file.as_str()),
             "{call}"

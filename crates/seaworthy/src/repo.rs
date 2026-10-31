@@ -44,11 +44,13 @@
 //!   beside it, where pacman fetches it (pacman 6.1's `repo-add` stopped
 //!   embedding signatures in the database).
 //! - **Releases**: each installable artifact (deb, rpm, pacman, tar, zip,
-//!   msi) under the name the update helper's URL template builds
+//!   msi, pkg) under the name the update helper's URL template builds
 //!   (`{product}/{channel}/{version}/{target}/{product}.{format}`),
 //!   with its signed manifest and, for pacman, its signature; its SBOM
 //!   too with `defaults.publish-sboms` (no client fetches one, so by
-//!   default it stays with `package`'s output).
+//!   default it stays with `package`'s output). A dmg sits there too, under
+//!   the same scheme and with no manifest: people download it, no update
+//!   helper does.
 //! - **The key**: `keys/<repo>.asc`, every OpenPGP key `seaworthy.toml` pins
 //!   (`defaults.openpgp-keys`), which the repository definitions name.
 //! - **The repository package** (with `[defaults.repository]`,
@@ -945,13 +947,14 @@ fn check_immutables(previous: &Plan, plan: &Plan) -> Result<(), DistError> {
     )))
 }
 
-/// Where installable `artifact` is published (`None`: it isn't): a
+/// Where a downloadable `artifact` is published (`None`: it isn't): a
 /// product's in the release tree, the repository package's in `setup/`
-/// under its stable name.
+/// under its stable name. The tag is its manifest format's, or `dmg`
+/// ([`Kind::sbom_format`]).
 fn release_path(out: &Path, listing: &Listing, artifact: &ListedArtifact) -> Option<PathBuf> {
-    let format = artifact.kind.artifact_format()?;
+    let tag = artifact.kind.sbom_format()?;
     if is_repository_package(listing) {
-        return Some(setup_path(out, listing, format.tag()));
+        return Some(setup_path(out, listing, tag));
     }
     Some(
         out.join("releases")
@@ -959,7 +962,7 @@ fn release_path(out: &Path, listing: &Listing, artifact: &ListedArtifact) -> Opt
             .join(&listing.channel)
             .join(&listing.token)
             .join(&artifact.target)
-            .join(format!("{}.{}", listing.package, format.tag())),
+            .join(format!("{}.{tag}", listing.package)),
     )
 }
 

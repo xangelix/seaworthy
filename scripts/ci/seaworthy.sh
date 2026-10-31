@@ -23,13 +23,16 @@
 #                                   package --platforms macos (the dmg or
 #                                   pkg: ad hoc-signed, or on a release with
 #                                   SEAWORTHY_MACOS_SIGN=1 Developer
-#                                   ID-signed and notarized), into
-#                                   dist-macos/
+#                                   ID-signed and notarized, its keychain
+#                                   from signing.toml's [apple] or
+#                                   apple-keychain.sh), into dist-macos/
 #   seaworthy.sh adopt-msi         seaworthy adopt-msi for each MSI the
 #                                   Windows MSI job built (signed on a
 #                                   release or a dev build), into adopted/
 #   seaworthy.sh repo              seaworthy repo after the published plan
-#                                   (from adopted/ when the MSI jobs ran)
+#                                   (from adopted/ when the MSI jobs ran,
+#                                   with dist-macos/ adopted when the Mac
+#                                   signing job ran)
 #   seaworthy.sh publish           seaworthy publish
 #   seaworthy.sh tools <step> [<env file>]
 #                                  the third-party tools <step> (package,
@@ -59,6 +62,8 @@
 #   dist-macos/           the macOS packages' listings and files (package-macos)
 #   msi/<product>/        the MSIs WiX built on Windows (seaworthy-msi.ps1)
 #   adopted/              dist/ with every MSI adopted (adopt-msi)
+#   released/             what repo publishes when the Mac signing job ran:
+#                         adopted/ or dist/, with dist-macos/ adopted
 #   repo/                 the repositories and the publish plan (repo)
 #   target/               the build's cargo target directories (cached, not passed on)
 #
@@ -151,9 +156,16 @@
 #                             binary carrying the test-key marker
 #   SEAWORTHY_MACOS_SIGN      1: on a release, package-macos signs with
 #                             SEAWORTHY_SIGNING (its [apple] Developer ID,
-#                             then notarization), and its listing is the
-#                             release's; else the macOS outputs stay ad
-#                             hoc-signed, outside the release
+#                             or without one a keychain apple-keychain.sh
+#                             makes from SEAWORTHY_APPLE_*, which the secrets
+#                             prefix hands over; then notarization), and its
+#                             listing is the release's (repo adopts it); else
+#                             the macOS outputs stay ad hoc-signed, outside
+#                             the release
+#   SEAWORTHY_MACOS_BUILD_ONLY
+#                             1: package-macos does nothing (the job that
+#                             compiled a release's binaries, when another
+#                             signs them)
 #   SEAWORTHY_BUILD_COMMAND   prepare: a command (run with bash in the
 #                             checkout) printing the release's build
 #                             metadata — the build part of the product's
@@ -275,6 +287,7 @@ hold_credentials() {
             SEAWORTHY_RELEASE_MANIFEST_KEY | SEAWORTHY_OPENPGP_SECRET_KEY | SEAWORTHY_S3_* | \
                 SEAWORTHY_GH_AUTHENTICODE_PFX | SEAWORTHY_GH_AUTHENTICODE_PASSWORD | \
                 SEAWORTHY_GH_APPLE_P12 | SEAWORTHY_GH_APPLE_P12_PASSWORD | SEAWORTHY_GH_APPLE_NOTARY_KEY | \
+                SEAWORTHY_APPLE_P12 | SEAWORTHY_APPLE_P12_PASSWORD | SEAWORTHY_APPLE_NOTARY_KEY | \
                 SEAWORTHY_*_KEY | ACTIONS_ID_TOKEN_REQUEST_* | ACTIONS_RUNTIME_TOKEN | \
                 AZURE_* | AWS_* | GOOGLE_* | CI_JOB_TOKEN | CI_JOB_JWT* | GITHUB_TOKEN | GH_TOKEN)
                 hold=1 ;;
@@ -1148,11 +1161,19 @@ package() {
 # On the Mac (codesign and hdiutil are macOS's own): seaworthy built from
 # the seaworthy checkout, each product's macOS outputs packaged from the build
 # step's artifacts and their listings and files copied into dist-macos/ for
-# the pipeline's artifacts. Ad hoc-signed and outside the release, unless a
-# release sets SEAWORTHY_MACOS_SIGN=1: then signing.toml's [apple] Developer
-# ID signs them and the notary service notarizes them (under the secrets
-# prefix, when one is set).
+# the pipeline's artifacts. Ad hoc-signed and outside the release, under no
+# secrets prefix, unless a release sets SEAWORTHY_MACOS_SIGN=1: then the
+# Developer ID signs them and the notary service notarizes them, under the
+# secrets prefix. The Developer ID is signing.toml's [apple] (a keychain the
+# machine holds), or without one a keychain made for this one call from the
+# prefix's credentials (apple-keychain.sh). With SEAWORTHY_MACOS_BUILD_ONLY=1
+# (the job that compiled the release's binaries, when a job of its own signs
+# them: seaworthy-macos.yml) there's nothing to do here.
 package_macos() {
+    if [ "${SEAWORTHY_MACOS_BUILD_ONLY:-0}" = 1 ]; then
+        say "the macOS outputs are packaged by the job that signs them, which compiles nothing"
+        return 0
+    fi
     [ "$(uname -s)" = Darwin ] || fail "package-macos runs on the Mac (macOS's codesign and hdiutil)"
     local checkout="${SEAWORTHY_CHECKOUT:-.seaworthy}"
     check_checkout "$checkout"
@@ -1171,13 +1192,21 @@ package_macos() {
     local release_version release_sequence release_build
     packaging_release
     check_no_test_key_marker "$work/artifacts/$macos"
-    local signing=()
+    local signing=() keychain=()
     if release && [ "${SEAWORTHY_MACOS_SIGN:-0}" = 1 ]; then
         local file="${SEAWORTHY_SIGNING:-signing.toml}"
-        need_file "$file" "signing.toml (its [apple] Developer ID signs a release's macOS outputs)"
-        signing=(--signing "$file")
-        say "a release: the macOS outputs are Developer ID-signed and notarized ([apple] in $file)"
+        need_file "$file" "signing.toml (the Developer ID's signing configuration)"
+        if grep -q '^[[:space:]]*\[apple\]' "$file"; then
+            signing=(--signing "$file")
+            say "a release: the macOS outputs are Developer ID-signed and notarized ([apple] in $file)"
+        else
+            [ -f "$scripts/apple-keychain.sh" ] || fail "no apple-keychain.sh beside this script"
+            keychain=(bash "$scripts/apple-keychain.sh" "$file" --)
+            say "a release: the macOS outputs are Developer ID-signed and notarized (a keychain made for the step; $file)"
+        fi
     elif release; then
+        # Nothing here signs, so it runs under no secrets prefix.
+        SEAWORTHY_SECRETS=""
         # A pinned team means the macOS outputs ship Developer ID-signed:
         # a release whose Apple secrets didn't reach this step must not
         # ship them ad hoc-signed.
@@ -1201,7 +1230,7 @@ package_macos() {
             say "product $product has no macOS outputs"
             continue
         fi
-        with_secrets "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$scratch/dist" \
+        with_secrets "${keychain[@]}" "$tool" package --config "$config" --artifacts "$work/artifacts" --out "$scratch/dist" \
             --release "$release_version" --sequence "$release_sequence" --build "$release_build" \
             --platforms macos ${product:+--product "$product"} "${signing[@]}"
     done
@@ -1354,6 +1383,20 @@ repo() {
         0:*) fail "$url/publish-plan.json answered HTTP $status" ;;
         *) fail "fetching $url/publish-plan.json failed (curl exit $code)" ;;
     esac
+    # The Mac signing job's packages (seaworthy-macos.yml's
+    # seaworthy-macos-sign): a release's Developer ID-signed dmg and pkg,
+    # adopted into a copy of the packages, each checked to be this release's.
+    if [ -d "$work/dist-macos" ]; then
+        local released="$work/released" listing product
+        rm -rf "$released"
+        cp -a "$packages_dir" "$released"
+        for listing in "$work/dist-macos"/*/packages.json; do
+            [ -f "$listing" ] || continue
+            product="$(basename "$(dirname "$listing")")"
+            "$tool" adopt-macos --config "$config" --out "$released" --macos "$work/dist-macos" --product "$product"
+        done
+        packages_dir="$released"
+    fi
     rm -rf "$work/repo"
     with_secrets "$tool" repo --config "$config" --packages "$packages_dir" --out "$work/repo" \
         --signing "$signing_file" "${previous[@]}"

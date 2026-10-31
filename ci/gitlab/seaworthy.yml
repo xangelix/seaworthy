@@ -23,8 +23,8 @@
 #       inputs:
 #         windows-image: <an MSVC build image>
 #         windows-tags: [<your Windows runner's tags>]
-#     # with macOS outputs (dmg, pkg; a pipeline artifact, never released
-#     # until Developer ID signing):
+#     # with macOS outputs (dmg, pkg; a pipeline artifact, in the release
+#     # only with Developer ID signing, its sign-if input):
 #     - project: <group>/seaworthy
 #       ref: <the same revision>
 #       file: ci/gitlab/seaworthy-macos.yml
@@ -54,7 +54,9 @@
 #   seaworthy-repo         deploy    seaworthy repo, after the plan published
 #                                    at public-url: release only; with
 #                                    seaworthy-windows.yml's MSI jobs, from
-#                                    their adopted copy of the packages
+#                                    their adopted copy of the packages; with
+#                                    seaworthy-macos.yml's signing job, its
+#                                    dmg and pkg adopted too
 #   seaworthy-publish      deploy    seaworthy publish: release only, one at
 #                                    a time (resource_group seaworthy-publish)
 #
@@ -192,7 +194,7 @@ spec:
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "d09b9e152b6cf19d"
+    SEAWORTHY_TEMPLATE: "0fb92c4ba330e3da"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
@@ -339,6 +341,10 @@ seaworthy-repo:
     # seaworthy-windows.yml's: the packages with every MSI adopted
     # (seaworthy/adopted/, which the script prefers).
     - job: seaworthy-msi-adopt
+      optional: true
+    # seaworthy-macos.yml's, on a release that signs: the Developer ID-signed
+    # dmg and pkg (seaworthy/dist-macos/, which the script adopts).
+    - job: seaworthy-macos-sign
       optional: true
   rules:
     - if: >-

@@ -341,13 +341,21 @@ function Read-Marker {
     return ([System.IO.File]::ReadAllText($marker)).Trim()
 }
 
+# Whether the process was created after $Time. Its id can't show it's a new process:
+# Windows can give a new process an earlier one's id.
+function Test-CreatedAfter([int]$ProcessId, [datetime]$Time) {
+    $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    return $process -and $process.CreationDate -gt $Time
+}
+
 # The service's core's start-up line for this process (scm_core's starts.log: tab-separated
-# key=value fields, among them the process's own image as exe=), or $null.
+# key=value fields, among them the process's own image as exe=), or $null. The last one:
+# an earlier process can have had the id.
 function Get-StartLine([int]$ProcessId) {
     if (-not (Test-Path -LiteralPath $StartsLog -PathType Leaf)) { return $null }
     $found = @(Select-String -LiteralPath $StartsLog -Pattern "^start`tpid=$ProcessId`t")
     if ($found.Count -eq 0) { return $null }
-    return [string]$found[0].Line
+    return [string]$found[-1].Line
 }
 
 function Get-LineField([string]$Line, [string]$Field) {
@@ -773,7 +781,7 @@ try {
                     Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($Staging, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
         }
         Wait-Until 120 "$Service runs again, under a new process" {
-            $s = Get-Svc $Service; $s -and $s.State -eq 'Running' -and $s.ProcessId -ne $script:FirstPid
+            $s = Get-Svc $Service; $s -and $s.State -eq 'Running' -and (Test-CreatedAfter $s.ProcessId $script:AskedAt)
         }
         # @(): a function's one-element array returns as its element, which has no Count
         # under StrictMode (Windows PowerShell 5.1).
@@ -787,7 +795,7 @@ try {
         $entries = @(Get-Entries)
         Assert-True ($entries.Count -eq 1) "one Programs and Features entry named ${DisplayName}: the upgrade replaced the previous build (found $($entries.Count))"
         $s = Get-Svc $Service
-        Assert-True ($s.State -eq 'Running' -and $s.ProcessId -ne $script:FirstPid) "$Service runs in a new process (pid $script:FirstPid, then $($s.ProcessId))"
+        Assert-True ($s.State -eq 'Running') "$Service runs (pid $script:FirstPid, then $($s.ProcessId))"
         $newPid = [int]$s.ProcessId
         $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$newPid"
         Assert-True ($process -and $process.Name -eq 'scm.exe') "process $newPid is the launcher (it is '$(if ($process) { $process.Name })')"

@@ -7,15 +7,39 @@
 # Mac too, built from the seaworthy checkout (seaworthy-fetch, as the
 # prepare job's).
 #
-# The dmg is a pipeline artifact, never part of a release: seaworthy.yml's
-# package job packages every platform but macOS, so a release's listing,
-# repositories and update tree never hold it, and this job is never signed
-# and gets no secrets, on a release too. A downloaded copy opens once its
-# quarantine is cleared (`xattr -dr com.apple.quarantine "<App>.app"`);
-# Developer ID signing and notarization bring it into releases later.
+# Without sign-if, the dmg is a pipeline artifact, never part of a release:
+# seaworthy.yml's package job packages every platform but macOS, so a
+# release's listing, repositories and update tree never hold it, and this
+# job is never signed and gets no secrets, on a release too. A downloaded
+# copy opens once its quarantine is cleared (`xattr -dr
+# com.apple.quarantine "<App>.app"`).
 #
-#   seaworthy-macos  build  the macOS build plan, natively; seaworthy
-#                           package --platforms macos (ad hoc-signed)
+# With sign-if (the rules expression for the releases that carry a Developer
+# ID), that release's job compiles alone and hands its binaries to a second
+# job, which Developer ID-signs, notarizes and staples, and whose packages
+# seaworthy-repo adopts into the release: the listing, the update tree (the
+# pkg under its manifest, the dmg beside it) and the plan. The two are apart
+# as every signing job is apart from a build: a job that signs runs no product
+# code, on a Mac too, given a runner that starts each job on a new VM.
+#
+#   seaworthy-macos       build    the macOS build plan, natively; seaworthy
+#                                  package --platforms macos (ad hoc-signed),
+#                                  unless sign-if matches
+#   seaworthy-macos-sign  package  sign-if alone: seaworthy package --platforms
+#                                  macos with the Developer ID, under
+#                                  package-secrets, which hands over the
+#                                  release's manifest key and SEAWORTHY_APPLE_*
+#                                  (the PKCS#12 and its password, the notary
+#                                  API key, its id and issuer), which
+#                                  seaworthy's apple-keychain.sh turns into a
+#                                  keychain for that one call. signing-toml
+#                                  names the manifest signers; give the Mac a
+#                                  file of its own, as no OpenPGP key or
+#                                  Authenticode signer belongs on it
+#
+# seaworthy.toml's [defaults.apple] pins the team every signature must carry:
+# pin it with sign-if on, and only then (a release with a pin and no signer
+# fails rather than ship ad hoc-signed outputs).
 #
 # The job writes cargo's target directories and the bundle under $HOME
 # (on a VM, its own disk: copies on a shared mount of the build directory
@@ -47,8 +71,20 @@ spec:
       description: More cargo arguments for every build, such as --features fips.
       default: ""
     release-if:
-      description: The rules expression for a release (as seaworthy.yml's), so the job names the release's version; its dmg still stays out of the release.
+      description: The rules expression for a release (as seaworthy.yml's), so the job names the release's version; without sign-if its dmg still stays out of the release.
       default: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)(\.(0|[1-9][0-9]*))?)?$/
+    sign-if:
+      description: The rules expression for the releases whose macOS outputs a Developer ID signs and that carry them; it must match releases alone (release-if's, and more). The default matches nothing.
+      default: $CI_PIPELINE_ID == "0"
+    package-stage:
+      description: The stage of the job that signs (seaworthy.yml's package-stage).
+      default: build
+    signing-toml:
+      description: The signing configuration the job that signs reads, for its manifest signers. With an [apple] of its own, a keychain the Mac already holds signs, and package-secrets need not hand over SEAWORTHY_APPLE_*.
+      default: signing.toml
+    package-secrets:
+      description: On a sign-if release, a command prefix (space-separated words, no quoting) the signing job's seaworthy call runs under, giving it SEAWORTHY_APPLE_P12, SEAWORTHY_APPLE_P12_PASSWORD, SEAWORTHY_APPLE_NOTARY_KEY, SEAWORTHY_APPLE_NOTARY_KEY_ID and SEAWORTHY_APPLE_NOTARY_ISSUER, and any manifest signer's key.
+      default: ""
     artifact-access:
       description: Who can download the jobs' artifacts through GitLab's UI or API (artifacts:access) - all (anyone, without signing in on a public project), developer, maintainer (GitLab 18.4 or later) or none. The jobs after them get them either way. A release's are its signed packages; pass the same value to every seaworthy template.
       options:
@@ -67,12 +103,21 @@ seaworthy-macos:
   needs:
     - seaworthy-prepare
   rules:
+    # A release that signs: this job compiles, seaworthy-macos-sign packages
+    # (the binaries its artifacts carry, instead of the packages).
+    - if: >-
+        $[[ inputs.sign-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+        SEAWORTHY_MACOS_BUILD_ONLY: "1"
+        SEAWORTHY_MACOS_ARTIFACTS: seaworthy/artifacts/aarch64-apple-darwin/
     - if: >-
         $[[ inputs.release-if ]]
       variables:
         SEAWORTHY_RELEASE: "1"
     - when: on_success
   variables:
+    SEAWORTHY_MACOS_ARTIFACTS: seaworthy/dist-macos/
     SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
     SEAWORTHY_FETCH:
       value: >-
@@ -101,6 +146,62 @@ seaworthy-macos:
     # The checkout's script, which builds seaworthy here (the prepare job's
     # is a Linux binary).
     - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" build aarch64-apple-darwin
+    - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" package-macos
+  artifacts:
+    paths:
+      - $SEAWORTHY_MACOS_ARTIFACTS
+    expire_in: 4 weeks
+    access: $[[ inputs.artifact-access ]]
+
+seaworthy-macos-sign:
+  extends: .seaworthy
+  stage: $[[ inputs.package-stage ]]
+  image: $[[ inputs.macos-image ]]
+  tags: $[[ inputs.macos-tags ]]
+  resource_group: $[[ inputs.macos-resource-group ]]
+  needs:
+    - seaworthy-prepare
+    - seaworthy-macos
+  rules:
+    - if: >-
+        $[[ inputs.sign-if ]]
+      variables:
+        SEAWORTHY_RELEASE: "1"
+        SEAWORTHY_MACOS_SIGN: "1"
+  # Two notarizations, at Apple's pace; the keychain locks at two hours.
+  timeout: 2h
+  # Nothing restored into a job that signs, whatever the product's default.
+  cache: []
+  variables:
+    SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
+    SEAWORTHY_FETCH:
+      value: >-
+        $[[ inputs.seaworthy-fetch ]]
+      expand: false
+    SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
+    SEAWORTHY_SECRETS:
+      value: >-
+        $[[ inputs.package-secrets ]]
+      expand: false
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+    HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  script:
+    # seaworthy's own checkout, fetched afresh. The VM is new and the rest of
+    # the project is data; the prefix's id token reaches git here as it does
+    # in the other signing jobs.
+    - |
+      case "$SEAWORTHY_CHECKOUT" in "" | / | . | .. | ../* | */.. | */../*) echo "seaworthy-dir must name a directory of its own"; exit 1 ;; esac
+      if [ -n "$SEAWORTHY_FETCH" ]; then rm -rf "$SEAWORTHY_CHECKOUT" && eval "$SEAWORTHY_FETCH"; fi
+    - export SEAWORTHY_TOOL_TARGET="$HOME/seaworthy/tool-target" SEAWORTHY_MACOS_SCRATCH="$HOME/seaworthy/macos"
+    # Homebrew runs with the system's basics alone: nothing else the job
+    # holds (an id token) reaches a formula.
+    - |
+      brew list bash >/dev/null 2>&1 || env -i HOME="$HOME" PATH="$PATH" HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install bash
+    - export PATH="$(brew --prefix)/bin:$PATH"
+    - sw_vers && uname -m && bash --version | head -1
+    # Takes the job's credentials out of its environment as it starts, builds
+    # seaworthy from the checkout in a new directory, and hands them back to
+    # the one seaworthy call (under package-secrets).
     - bash "$SEAWORTHY_CHECKOUT/scripts/ci/seaworthy.sh" package-macos
   artifacts:
     paths:

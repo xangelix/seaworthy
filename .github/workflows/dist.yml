@@ -856,6 +856,8 @@ jobs:
     runs-on: ${{ inputs.macos-runner }}
     timeout-minutes: 120
     environment: ${{ inputs.release && inputs.environment || '' }}
+    outputs:
+      developer-id: ${{ steps.package.outputs.developer-id }}
     permissions:
       contents: read
     env:
@@ -908,6 +910,7 @@ jobs:
       # are then signed, notarized and released. Without them, ad hoc-signed
       # (refused on a release when seaworthy.toml pins [defaults.apple]).
       - name: Package (seaworthy.sh package-macos)
+        id: package
         env:
           SEAWORTHY_TOOL_BIN: ${{ steps.seaworthy.outputs.bin }}
           SEAWORTHY_CI_SIGNING: ${{ inputs.ci-signing-toml }}
@@ -1014,7 +1017,7 @@ jobs:
       run:
         shell: bash .seaworthy/scripts/ci/logged.sh {0}
     name: Publish (seaworthy repo, seaworthy publish)
-    needs: [verify, adopt-msi, package]
+    needs: [verify, adopt-msi, package, package-macos]
     if: ${{ !cancelled() && needs.verify.result == 'success' && inputs.release && inputs.publish-toml != '' }}
     runs-on: ${{ inputs.linux-runner }}
     timeout-minutes: 60
@@ -1059,6 +1062,14 @@ jobs:
           name: ${{ inputs.artifact-prefix }}-dist
           path: seaworthy-work/dist
       # Before any secret is in a step's environment.
+      # The Mac's packages join the release when a Developer ID signed them
+      # (seaworthy.sh repo adopts them); an ad hoc-signed dmg or pkg stays in
+      # the packages artifact.
+      - if: needs.package-macos.outputs.developer-id == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-prefix }}-dist-macos
+          path: seaworthy-work/dist-macos
       - name: The repository tools
         run: |
           set -euo pipefail

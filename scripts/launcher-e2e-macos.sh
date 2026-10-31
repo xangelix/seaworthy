@@ -37,10 +37,14 @@
 #     /usr/local/bin/acme-demo to the launcher, which runs from there;
 #   - a FIPS product: the cores built with the AWS-LC FIPS module
 #     (seaworthy-crypto's `fips` feature), which AWS-LC builds as a dylib
-#     off Linux, linked with @loader_path; the CLI verifies the module,
-#     ships it once in the bundle's Contents/Frameworks (sidecars.macos)
-#     and signs it with the bundle; the app, run from its mounted dmg,
-#     finds the module and passes its power-on self-tests (fips=ok).
+#     off Linux, linked with @loader_path and unstripped, as the build plan
+#     builds them; the CLI verifies the module and each core's symbol table,
+#     ships the module once in the bundle's Contents/Frameworks
+#     (sidecars.macos) and signs it with the bundle; nm agrees the core
+#     imports the module and defines no AWS-LC; the app, run from its
+#     mounted dmg, finds the module and passes its power-on self-tests
+#     (fips=ok); the CLI refuses that core stripped, and relinked with a
+#     definition of the non-FIPS AWS-LC's.
 #
 #   scripts/launcher-e2e-macos.sh
 #
@@ -380,9 +384,11 @@ else
     echo "launcher-e2e-macos: info  sudo needs a password here (scripts/macos-pkg-install.sh can't run)"
 fi
 
-# A FIPS product: the module's dylib beside the cores in the bundle.
+# A FIPS product: the module's dylib beside the cores in the bundle. Not
+# stripped, as the build plan builds a core: verify reads its local symbols.
+fips_flags() { echo "-C target-cpu=$1 -C link-arg=-Wl,-rpath,@loader_path"; }
 for cpu in "${CPUS[@]}"; do
-    build "$OUT/fips-core-$cpu" "-C target-cpu=$cpu -C link-arg=-Wl,-rpath,@loader_path" demo_core --features fips
+    CARGO_PROFILE_RELEASE_STRIP=false build "$OUT/fips-core-$cpu" "$(fips_flags "$cpu")" demo_core --features fips
 done
 FIPSPROJECT="$OUT/fips-project"
 rm -rf "${FIPSPROJECT:?}"
@@ -420,6 +426,21 @@ bundle-id = "com.example.acme.demo"
 TOML
 "$SEAWORTHY" package --config "$FIPSPROJECT/seaworthy.toml" --artifacts "$FIPSPROJECT/artifacts" \
     --out "$FIPSPROJECT/out" --release 0.1.0 --sequence 7 >/dev/null || fail "seaworthy package (FIPS) failed"
+# package verified it; the platform's own nm reads the core the same way:
+# the module's symbols imported, no AWS-LC or ring defined, though the build
+# compiled a second AWS-LC when rustls's feature asks for one.
+FIPSCORE="$FIPSPROJECT/artifacts/$TARGET/cores/apple-m1/libdemo_core.dylib"
+imported="$(nm -u "$FIPSCORE")" || fail "nm -u failed on the FIPS core"
+defined="$(nm -U "$FIPSCORE")" || fail "nm -U failed on the FIPS core"
+case "$imported" in *_aws_lc_fips_*) ;; *) fail "the FIPS core imports nothing of the module: $imported" ;; esac
+if printf '%s\n' "$defined" | grep -E ' _(aws_lc_|awslc_|ring_core_)'; then
+    fail "the FIPS core defines those AWS-LC or ring symbols"
+fi
+if compgen -G "$OUT/fips-core-apple-m1/$TARGET/release/deps/libaws_lc_sys-*.rlib" >/dev/null; then
+    echo "launcher-e2e-macos: info  aws-lc-sys was compiled into the FIPS build, and isn't linked"
+else
+    echo "launcher-e2e-macos: info  aws-lc-sys wasn't compiled into the FIPS build"
+fi
 FIPSDMG="$FIPSPROJECT/out/demo/packages/acme-demo-0.1.0-7-macos-arm64.dmg"
 [ -f "$FIPSDMG" ] || fail "no $FIPSDMG"
 mkdir -p "$MOUNT"
@@ -435,5 +456,29 @@ case "$out" in *"core=apple-m1"*"fips=ok"*) ;; *) fail "the FIPS app ran without
 detach "$MOUNT" || fail "hdiutil detach (FIPS) failed"
 trap - EXIT
 ok "a FIPS product ships the module's dylib in the bundle; the app runs it from the dmg (fips=ok)"
+
+# The real core, refused for what verify's symbol check is for. Stripped, it
+# still lists its imports, so only the missing local symbols can refuse it.
+REFUSED="$OUT/fips-refused"
+rm -rf "${REFUSED:?}"
+cp -R "$FIPSPROJECT/artifacts" "$REFUSED"
+REFUSEDCORE="$REFUSED/$TARGET/cores/apple-m1/libdemo_core.dylib"
+strip -x "$REFUSEDCORE" 2>/dev/null || fail "strip -x failed on the FIPS core"
+imported="$(nm -u "$REFUSEDCORE")" || fail "nm -u failed on the stripped FIPS core"
+case "$imported" in *_aws_lc_fips_*) ;; *) fail "the stripped FIPS core lost its imports: $imported" ;; esac
+run 1 "is stripped (no local symbols)" "$SEAWORTHY" verify --config "$FIPSPROJECT/seaworthy.toml" --artifacts "$REFUSED"
+# Relinked with a definition of the non-FIPS module's: one object more, and
+# cargo rebuilds only the core (the flags after -- reach no dependency). It
+# overwrites the build's core, which nothing below needs.
+printf '__attribute__((used)) int aws_lc_0_0_0_EVP_sha256(void) { return 0; }\n' >"$OUT/fips-foreign.c"
+MACOSX_DEPLOYMENT_TARGET=11.0 cc -arch arm64 -c "$OUT/fips-foreign.c" -o "$OUT/fips-foreign.o" ||
+    fail "cc failed on the foreign object"
+CARGO_PROFILE_RELEASE_STRIP=false MACOSX_DEPLOYMENT_TARGET=11.0 RUSTFLAGS="$(fips_flags apple-m1)" CARGO_TARGET_DIR="$OUT/fips-core-apple-m1" \
+    cargo rustc --quiet --release --locked --manifest-path "$FIXTURE/Cargo.toml" --target "$TARGET" \
+    -p demo_core --lib --features fips -- -C "link-arg=$OUT/fips-foreign.o" || fail "the relink with the foreign object failed"
+cp "$OUT/fips-core-apple-m1/$TARGET/release/libdemo_core.dylib" "$REFUSEDCORE"
+run 1 "non-FIPS AWS-LC (aws-lc-sys) symbols, e.g. aws_lc_0_0_0_EVP_sha256" \
+    "$SEAWORTHY" verify --config "$FIPSPROJECT/seaworthy.toml" --artifacts "$REFUSED"
+ok "verify refuses the real FIPS core stripped, and with a non-FIPS AWS-LC symbol linked in"
 
 echo "launcher-e2e-macos: all checks passed"

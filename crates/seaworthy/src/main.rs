@@ -107,6 +107,13 @@
 //! `SEAWORTHY_S3_SECRET_ACCESS_KEY` (and optionally
 //! `SEAWORTHY_S3_SESSION_TOKEN`).
 //!
+//! `adopt-macos` joins a release's macOS packages, listed under `--macos`
+//! (`<product>/packages.json`, from `package --platforms macos --signing` on
+//! the Mac), to the listing under `--out` that `repo` publishes: each file
+//! read as `repo` trusts it and copied beside the others, the two listings
+//! required to name one release, and only a signed release's accepted. It
+//! signs nothing.
+//!
 //! `build-plan` prints what the CI templates' build job runs for one target
 //! triple (`seaworthy::build_plan`): per product whose outputs need it, the
 //! launcher and helper once and the core once per CPU target, each step a
@@ -172,6 +179,7 @@ const USAGE: &str = "usage:
                     [--signing signing.toml] [--authenticode-only] [--ci-test-signing FILE]
   seaworthy adopt-msi [--config seaworthy.toml] --out DIR --product ID --msi FILE [--signing signing.toml] [--authenticode-only]
                       [--ci-test-signing FILE]
+  seaworthy adopt-macos [--config seaworthy.toml] --out DIR --macos DIR --product ID
   seaworthy repo [--config seaworthy.toml] --packages DIR --out DIR --signing signing.toml
                  [--previous publish-plan.json] [--date EPOCH] [--allow-older]
   seaworthy publish --repo DIR --target publish.toml [--dry-run] [--no-prune]
@@ -208,6 +216,7 @@ struct Args {
     build: Option<String>,
     packages: Option<PathBuf>,
     msi: Option<PathBuf>,
+    macos: Option<PathBuf>,
     previous: Option<PathBuf>,
     date: Option<String>,
     repo: Option<PathBuf>,
@@ -267,6 +276,7 @@ fn accepted(command: &str) -> &'static [&'static str] {
             "--authenticode-only",
             "--ci-test-signing",
         ],
+        "adopt-macos" => &["--config", "--out", "--macos", "--product"],
         "repo" => &[
             "--config",
             "--packages",
@@ -326,6 +336,7 @@ fn parse(command: &str, args: &[String]) -> Result<Args, Usage> {
             "--build" => parsed.build = Some(value()?),
             "--packages" => parsed.packages = Some(value()?.into()),
             "--msi" => parsed.msi = Some(value()?.into()),
+            "--macos" => parsed.macos = Some(value()?.into()),
             "--previous" => parsed.previous = Some(value()?.into()),
             "--repo" => parsed.repo = Some(value()?.into()),
             "--target" => parsed.target = Some(value()?.into()),
@@ -971,6 +982,22 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
             };
             let mtime = source_date_epoch()?;
             for artifact in package::adopt_msi(&config, &id, &out, &msi, mtime, &signing, &tools)? {
+                println!(
+                    "{id} {:?}: {} (sha256 {})",
+                    artifact.kind,
+                    artifact.path.display(),
+                    artifact.sha256
+                );
+            }
+        }
+        "adopt-macos" => {
+            // A release's Developer ID-signed macOS packages, packaged on
+            // the Mac, into the listing repo publishes.
+            let out = required(&args.out, command, "--out")?;
+            let id = required(&args.product, command, "--product")?;
+            let macos = required(&args.macos, command, "--macos")?;
+            let config = Config::load(&config_path())?;
+            for artifact in package::adopt_macos(&config, &id, &out, &macos)? {
                 println!(
                     "{id} {:?}: {} (sha256 {})",
                     artifact.kind,

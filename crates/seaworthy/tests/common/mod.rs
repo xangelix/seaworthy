@@ -1,7 +1,7 @@
 //! Test support: minimal ELF, PE and Mach-O images, written by hand,
 //! carrying exactly what `seaworthy verify` reads. These are record
 //! sections, a symbol table and `DT_NEEDED` (ELF), record sections and an
-//! import table (PE), and record sections, `LC_LOAD_DYLIB`s and
+//! import table (PE), and record sections, `LC_LOAD_DYLIB`s, `LC_SYMTAB` and
 //! `LC_BUILD_VERSION` (Mach-O). Hand-written on purpose, like `seaworthy_levels`' test builders:
 //! `object`'s writer would join the workspace's resolved dependency graph,
 //! and every crate's SBOM, for test code alone.
@@ -607,6 +607,60 @@ pub(crate) struct Macho {
     pub(crate) build_version: Option<(u32, (u32, u32, u32))>,
     /// `LC_RPATH` search paths.
     pub(crate) rpaths: Vec<String>,
+    /// `LC_SYMTAB` entries; an empty list writes no `LC_SYMTAB` at all.
+    pub(crate) symbols: Vec<MachoSymbol>,
+}
+
+/// One `LC_SYMTAB` entry of a Mach-O test image (`nlist_64`). The name is
+/// the raw one, with Mach-O's leading `_` on a C name.
+#[derive(Clone)]
+pub(crate) struct MachoSymbol {
+    pub(crate) name: String,
+    pub(crate) n_type: u8,
+    /// 1-based, over the image's sections in the order `Macho::build` lays
+    /// them out; 0 is no section.
+    pub(crate) n_sect: u8,
+}
+
+impl MachoSymbol {
+    /// An import (`nm`: `U`): `N_UNDF | N_EXT`.
+    pub(crate) fn import(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            n_type: 0x01,
+            n_sect: 0,
+        }
+    }
+
+    /// An exported definition in the first section (`nm`: `T` or `D`):
+    /// `N_SECT | N_EXT`.
+    pub(crate) fn export(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            n_type: 0x0f,
+            n_sect: 1,
+        }
+    }
+
+    /// A definition in the first section that the linker made local (`nm`:
+    /// `t` or `d`): `N_SECT | N_PEXT`, what a hidden symbol, and so all of a
+    /// static library in a rustc cdylib, becomes in a linked image.
+    pub(crate) fn local(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            n_type: 0x1e,
+            n_sect: 1,
+        }
+    }
+
+    /// A debug map entry (`N_FUN`), which `nm` doesn't print.
+    pub(crate) fn stab(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            n_type: 0x24,
+            n_sect: 1,
+        }
+    }
 }
 
 /// `CPU_TYPE_ARM64`.
@@ -621,6 +675,7 @@ impl Default for Macho {
             dylibs: vec!["/usr/lib/libSystem.B.dylib".into()],
             build_version: Some((1, (11, 0, 0))),
             rpaths: Vec::new(),
+            symbols: Vec::new(),
         }
     }
 }
@@ -667,6 +722,10 @@ impl Macho {
             commands += 1;
             size += rpath_size(rpath);
         }
+        if !self.symbols.is_empty() {
+            commands += 1;
+            size += 24;
+        }
         let header_size = 32 + size;
         let mut out = Vec::new();
         put32(&mut out, 0xfeed_facf);
@@ -704,8 +763,14 @@ impl Macho {
                 put64(&mut out, n64(offset));
                 put64(&mut out, n64(bytes.len()));
                 put32(&mut out, n32(offset));
-                for _ in 0..7 {
-                    put32(&mut out, 0);
+                for _ in 0..3 {
+                    put32(&mut out, 0); // align, reloff, nreloc
+                }
+                // flags: `__text` holds code (S_ATTR_PURE_INSTRUCTIONS |
+                // S_ATTR_SOME_INSTRUCTIONS).
+                put32(&mut out, if section == "__text" { 0x8000_0400 } else { 0 });
+                for _ in 0..3 {
+                    put32(&mut out, 0); // reserved
                 }
                 data.extend_from_slice(bytes);
             }
@@ -750,8 +815,32 @@ impl Macho {
             path.resize(total - 12, 0);
             out.extend_from_slice(&path);
         }
+        // The symbol table and its strings after the sections.
+        let mut linkedit = Vec::new();
+        if !self.symbols.is_empty() {
+            let mut strings = Strtab::new();
+            for symbol in &self.symbols {
+                put32(&mut linkedit, strings.add(&symbol.name));
+                linkedit.push(symbol.n_type);
+                linkedit.push(symbol.n_sect);
+                linkedit.extend_from_slice(&0_u16.to_le_bytes());
+                put64(
+                    &mut linkedit,
+                    if symbol.n_type == 0x01 { 0 } else { 0x1000 },
+                );
+            }
+            let symoff = header_size + data.len();
+            put32(&mut out, 0x2); // LC_SYMTAB
+            put32(&mut out, 24);
+            put32(&mut out, n32(symoff));
+            put32(&mut out, n32(self.symbols.len()));
+            put32(&mut out, n32(symoff + linkedit.len()));
+            put32(&mut out, n32(strings.0.len()));
+            linkedit.extend_from_slice(&strings.0);
+        }
         assert_eq!(out.len(), header_size);
         out.extend_from_slice(&data);
+        out.extend_from_slice(&linkedit);
         out
     }
 }

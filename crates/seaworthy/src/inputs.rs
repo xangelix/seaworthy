@@ -19,9 +19,9 @@
 //! The triples: [`LINUX`], [`WINDOWS`] and, for macOS outputs, [`MACOS`]
 //! (Apple Silicon, with `defaults.macos-targets`' CPUs).
 //!
-//! Linux binaries must keep their symbol tables (build with
-//! `strip = false`): `verify` reads them for the FIPS checks, and `layout`
-//! strips the shipped copies.
+//! Linux binaries, and a FIPS product's macOS cores, must keep their symbol
+//! tables (build with `strip = false`): `verify` reads them for the FIPS
+//! checks, and `layout` strips the shipped Linux copies.
 
 use std::path::{Path, PathBuf};
 

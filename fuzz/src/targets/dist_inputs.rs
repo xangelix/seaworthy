@@ -3,8 +3,9 @@
 //! artifacts.
 //!
 //! Input: `[mode][bytes]`. Mode 0: `Version::parse` over the bytes as text;
-//! mode 1: `Config::parse`; mode 2: `fips_symbol_findings`, `elf_needed` and
-//! `pe_imports` over the bytes as a binary image.
+//! mode 1: `Config::parse`; mode 2: `fips_symbol_findings`,
+//! `fips_macos_core_findings`, `elf_needed` and `pe_imports` over the bytes
+//! as a binary image.
 //! Invariants: nothing panics; an accepted version displays back to text
 //! that parses identically, orders consistently with itself, and spells
 //! every package format (or is refused by MSI's limits with a typed error).
@@ -12,7 +13,7 @@
 use std::cmp::Ordering;
 
 use seaworthy::config::Config;
-use seaworthy::verify::{elf_needed, fips_symbol_findings, pe_imports};
+use seaworthy::verify::{elf_needed, fips_macos_core_findings, fips_symbol_findings, pe_imports};
 use seaworthy::version::{Release, Version};
 
 pub fn run(data: &[u8]) {
@@ -48,6 +49,7 @@ pub fn run(data: &[u8]) {
         }
         _ => {
             let _ = fips_symbol_findings(bytes, "aws_lc_fips_0_14_3_");
+            let _ = fips_macos_core_findings(bytes, "aws_lc_fips_0_14_3_");
             let _ = elf_needed(bytes);
             let _ = pe_imports(bytes);
         }

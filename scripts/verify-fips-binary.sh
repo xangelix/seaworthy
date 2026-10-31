@@ -22,8 +22,11 @@
 # `aws_lc_fips_0_14_3_` (seaworthy_crypto::module::FIPS_SYMBOL_PREFIX; bump
 # the two together). Standalone on purpose — bash, nm (binutils or llvm-nm;
 # set NM to override), grep, awk — so applications run it over their own
-# release binary. Windows FIPS builds link the module as a DLL pair and are
-# out of this script's scope.
+# release binary. Windows and macOS FIPS builds link the module as a shared
+# library, so a Windows or macOS core has none of it to find and is out of
+# this script's scope: `seaworthy verify` checks those (on macOS over the
+# core's symbol table, docs/fips.md). On macOS this script applies to the
+# module's dylib itself.
 #
 # Usage (from the repository root, or anywhere):
 #   scripts/verify-fips-binary.sh [--prefix aws_lc_fips_0_14_3_] BINARY

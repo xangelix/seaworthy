@@ -9,7 +9,7 @@ script. The templates live in [`ci/gitlab/`](../ci/gitlab/):
 |---|---|
 | `seaworthy.yml` | prepare, the Linux build, package, repo, publish, and the release-ordering lint |
 | `seaworthy-windows.yml` | the Windows build and, for `msi` outputs, the MSI built with WiX and adopted; for products with `msi` or `zip` outputs |
-| `seaworthy-macos.yml` | the macOS build and its ad hoc-signed dmg (or, for a service, a tool or cli programs, unsigned pkg) on a Mac runner, for products with `dmg` or `pkg` outputs: a pipeline artifact, never part of a release |
+| `seaworthy-macos.yml` | the macOS build and its ad hoc-signed dmg (or, for a service, a tool or cli programs, unsigned pkg) on a Mac runner, for products with `dmg` or `pkg` outputs: a pipeline artifact, never part of a release unless a Developer ID signs them ([below](#developer-id)) |
 
 They need GitLab 17.0 or later (`include` with `inputs`, array inputs). The packaging itself is
 described in [packaging.md](packaging.md), the files the jobs read in
@@ -137,8 +137,9 @@ secrets role never sees a branch pipeline. What a release's signing jobs trust i
 | `seaworthy-package` | `package-stage` | every pipeline | `seaworthy package --platforms linux,windows`: signed on a release (the version from the tag or `version-file`, the sequence `CI_PIPELINE_IID`, the build metadata prepare recorded in `release.env`); on a dev build, its Windows binaries Authenticode-signed alone; unsigned otherwise (the `version-file`'s version, or `0.0.0-alpha`). On a release or a dev build it runs from seaworthy's own checkout, fetched afresh, and builds the tool itself |
 | `seaworthy-msi` | `package-stage` | when included | WiX v5.0.2 on the Windows runner (installed from its pinned, hash-checked MSI unless the image has it): each product's `.wxs` built against the package job's signed tree, then `wix msi validate` (every ICE error fails the job). Unsigned |
 | `seaworthy-msi-adopt` | `package-stage` | when included | `seaworthy adopt-msi` per MSI, on Linux with `tools-image`: its payload must be exactly the signed tree, and its security-relevant tables exactly what the `.wxs` declares; then signed with the package job's signers on a release, or `[authenticode]` alone on a dev build, all listed in `seaworthy/adopted/`. On a release or a dev build it runs from seaworthy's own checkout, as the package job does |
-| `seaworthy-macos` | `build-stage` | when included | on the Mac runner, one at a time in `macos-resource-group`: fetches the checkout as prepare does, carries out the aarch64-apple-darwin build plan, builds `seaworthy` there and runs `seaworthy package --platforms macos`. Its packages land in `seaworthy/dist-macos/`, a pipeline artifact no later job takes: never signed and given no secrets, on a release too |
-| `seaworthy-repo` | `publish-stage` | release | from `seaworthy/adopted/` when the MSI jobs ran, else the package job's packages: `seaworthy repo` with `--previous` = the plan at `public-url` (a 404 is the first publication; any other failure stops the job), from seaworthy's own checkout |
+| `seaworthy-macos` | `build-stage` | when included | on the Mac runner, one at a time in `macos-resource-group`: fetches the checkout as prepare does, carries out the aarch64-apple-darwin build plan, builds `seaworthy` there and runs `seaworthy package --platforms macos`. Its packages land in `seaworthy/dist-macos/`, a pipeline artifact: never signed and given no secrets, on a release too. On a `sign-if` release it stops after the build, and its artifacts are the binaries |
+| `seaworthy-macos-sign` | `package-stage` | `sign-if` release | on the Mac runner, from the build job's binaries: seaworthy's own checkout fetched afresh, `seaworthy package --platforms macos` with the Developer ID under `package-secrets`, into `seaworthy/dist-macos/`, which `seaworthy-repo` adopts ([Developer ID](#developer-id)) |
+| `seaworthy-repo` | `publish-stage` | release | from `seaworthy/adopted/` when the MSI jobs ran, else the package job's packages, with the Mac signing job's dmg and pkg adopted when it ran (`seaworthy adopt-macos`): `seaworthy repo` with `--previous` = the plan at `public-url` (a 404 is the first publication; any other failure stops the job), from seaworthy's own checkout |
 | `seaworthy-publish` | `publish-stage` | release, one at a time | `seaworthy publish` to the bucket in `publish.toml`, credentials from `publish-secrets`, from seaworthy's own checkout. With `SEAWORTHY_PUBLISH_DRY_RUN=1` (a pipeline variable) it checks the files, the store and the public URL and uploads and deletes nothing; the product's deploy jobs run on the release rule regardless, so a dry run on a pipeline that deploys must skip them itself |
 
 **The release's name reaches the build.** The prepare job records the release's version and build
@@ -184,9 +185,9 @@ can read it.
 
 ## What a release trusts
 
-The jobs that sign on a release (`seaworthy-package`, `seaworthy-msi-adopt`, `seaworthy-repo`,
-`seaworthy-publish`; the package and adopt jobs on a dev build too) run no product code and trust
-nothing earlier jobs left them but data:
+The jobs that sign on a release (`seaworthy-package`, `seaworthy-msi-adopt`, `seaworthy-macos-sign`,
+`seaworthy-repo`, `seaworthy-publish`; the package and adopt jobs on a dev build too) run no product
+code and trust nothing earlier jobs left them but data:
 
 - **seaworthy and its scripts are their own.** Each runs `seaworthy-fetch` afresh (removing any
   `seaworthy-dir` already there), checks the checkout is the included template's revision, runs that
@@ -248,7 +249,9 @@ nothing earlier jobs left them but data:
 | `macos-image` | **required** | the Mac runner's image: Xcode's command line tools (`codesign`, `hdiutil` and `pkgbuild` come with macOS), rustup, CMake and Go for a FIPS core, and Homebrew (the job installs Homebrew's bash: `seaworthy.sh` needs bash 4.4, and macOS ships 3.2) |
 | `macos-tags` | **required** | the Mac runner's tags |
 | `macos-resource-group` | `seaworthy-macos` | the job's resource group: a Mac host runs few VMs at once, so share it with any other Mac job of the project |
-| `seaworthy-dir`, `seaworthy-fetch`, `manifest`, `cargo-args`, `release-if`, `build-stage` | as `seaworthy.yml`'s | the Mac job builds `seaworthy` from the checkout too, so it fetches it the same way; on a release it names the release's version (its packages still stay out of the release) |
+| `seaworthy-dir`, `seaworthy-fetch`, `manifest`, `cargo-args`, `release-if`, `build-stage`, `package-stage` | as `seaworthy.yml`'s | the Mac job builds `seaworthy` from the checkout too, so it fetches it the same way; on a release it names the release's version (without `sign-if` its packages still stay out of the release) |
+| `sign-if` | never | the rules expression for the releases a Developer ID signs ([below](#developer-id)); it must match releases alone |
+| `signing-toml`, `package-secrets` | `signing.toml`, (none) | what `seaworthy-macos-sign` signs with: its signing configuration, and the command prefix giving its `seaworthy` call the credentials |
 | `artifact-access` | as `seaworthy.yml`'s | pass the same value |
 
 **A compiler cache** is the product's own: set `RUSTC_WRAPPER` (and whatever credentials the cache
@@ -300,6 +303,72 @@ seaworthy ci-order --ci .gitlab-ci.yml --include .seaworthy/ci/gitlab/seaworthy.
 A template passed with `--include` stands for an include whose inputs the lint can't see: its
 inputs take their defaults, and those without one (the images and runner tags, which never decide an
 order) read as empty.
+
+## Developer ID
+
+On GitHub the reusable workflow takes the Apple secrets. On GitLab the same path is the Mac template's
+`sign-if` input, which says which releases carry a Developer ID:
+
+```yaml
+- remote: https://raw.githubusercontent.com/xangelix/seaworthy/<commit>/ci/gitlab/seaworthy-macos.yml
+  inputs:
+    macos-image: <your Mac runner's image>
+    macos-tags: [<your Mac runner's tags>]
+    seaworthy-fetch: <as above>
+    package-stage: package
+    sign-if: $CI_COMMIT_TAG
+    signing-toml: signing-macos.toml
+    package-secrets: ci/with-secrets.sh developer-id --
+```
+
+and `seaworthy.toml` pins the team every signature must carry:
+
+```toml
+[defaults.apple]
+team-id = "ABCDE12345"
+```
+
+On such a release `seaworthy-macos` compiles and stops. `seaworthy-macos-sign`, a job of its own,
+takes its binaries, Developer ID-signs from the inside out with the hardened runtime and a secure
+timestamp, checks each signature against the pinned team, notarizes (`xcrun notarytool submit
+--wait`), staples, and asks Gatekeeper's assessment. The two are apart for the reason every signing
+job is apart from a build: nothing that runs in a build (a build script, a dependency's) shares a
+machine with the credentials. That takes a Mac runner that gives each job a new machine, as a VM
+executor does; a shell executor on one Mac gives the separation up. Add any `id_tokens` the prefix
+needs to `seaworthy-macos-sign` alone, and never to `seaworthy-macos`.
+
+`package-secrets` hands over, in the environment:
+
+| Variable | What |
+|---|---|
+| `SEAWORTHY_APPLE_P12` | the Developer ID Application identity and, for a pkg, the Developer ID Installer identity, with their private keys: one PKCS#12, base64 |
+| `SEAWORTHY_APPLE_P12_PASSWORD` | its password |
+| `SEAWORTHY_APPLE_NOTARY_KEY` | an App Store Connect API key, the `.p8` file's text or that in base64 |
+| `SEAWORTHY_APPLE_NOTARY_KEY_ID`, `SEAWORTHY_APPLE_NOTARY_ISSUER` | its key id and issuer id |
+| the manifest signers' `key-env` | as for `seaworthy-package`: a pkg carries a release manifest |
+
+`scripts/ci/apple-keychain.sh`, from seaworthy's own checkout, turns the first five into a keychain of
+their own for the one `seaworthy` call, with a random password, locked after two hours, deleted when
+the call ends however it ends, and with the API key stored in it as a `notarytool` profile. Nothing but
+the system's basics and those credentials is in the environment of what makes the keychain, and they
+leave the environment before `seaworthy` starts. The PKCS#12's password reaches openssl alone, and
+`security import` sees a throwaway password over a re-wrapped copy. The `[apple]` section is written
+for that run: give `seaworthy-macos-sign` a signing configuration of its own (`signing-toml`) that
+names only the manifest signers, as no OpenPGP key or Authenticode credential belongs on a Mac. A
+configuration with an `[apple]` of its own signs with a keychain the machine already holds instead, and
+this script stays out of the way.
+
+The release: `seaworthy-repo` takes the job's `seaworthy/dist-macos/` and adopts each listing into a
+copy of the packages (`seaworthy adopt-macos`): the two listings must name one release, and only a
+signed one is accepted. Then a pkg is in the release tree under its signed manifest, where the macOS
+update helper looks (`releases/<package>/<channel>/<token>/aarch64-apple-darwin/<package>.pkg`), and a
+dmg beside it under the same scheme, with no manifest, as no helper fetches one. It's a download for
+people: link to it from your own site. The repositories (APT, DNF, pacman) don't change.
+
+A `[defaults.apple]` pin with `sign-if` off fails a release (`seaworthy-macos` would ship its outputs
+ad hoc-signed under a team that says they aren't), so pin it and turn `sign-if` on together. A
+`[apple]` in the `signing.toml` the Linux and Windows package jobs read must have the pin too: keep it
+out of that file, as above.
 
 ## Windows signing
 
@@ -369,5 +438,6 @@ image and in the product's own `.cargo/config.toml`.
 - The Mac needs macOS 11 or later on Apple Silicon, Xcode's command line tools, rustup, CMake and Go
   for a FIPS core, and Homebrew. The job writes cargo's target directories and the bundle under
   `$HOME` (on a VM, its own disk: copies on a shared mount of the build directory can come back
-  incomplete).
+  incomplete). `seaworthy-macos-sign` reads `SEAWORTHY_APPLE_*`'s PKCS#12 with OpenSSL 3 when Homebrew's
+  is there, else `openssl` on `PATH`, and reaches Apple's notary and timestamp services.
 - Linux jobs carry no tags: any Linux runner takes them.
