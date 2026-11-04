@@ -1,12 +1,13 @@
 //! The FIPS release-binary probe.
 //!
 //! Build this example in release with the `fips` feature and its symbols
-//! kept, run `scripts/verify-fips-binary.sh` over it (the
-//! `aws_lc_fips_0_14_3_*` symbols present, zero non-FIPS `aws_lc_0_*` /
-//! `ring_core_*`), then run it with `--expect-fips`: the boot self-check (a
-//! module-DRBG draw + the pinned-module assertion), then `is_fips()`, then
-//! the build provenance, printed, so the log is the evidence of which
-//! module and toolchain the release build used.
+//! kept, run `scripts/verify-fips-binary.sh` over it (one allowlisted
+//! module's `aws_lc_fips_<release>_*` symbols present, zero non-FIPS
+//! `aws_lc_0_*` / `ring_core_*`), then run it with `--expect-fips`: the boot
+//! self-check (a module-DRBG draw + the allowlisted-module assertion), then
+//! `is_fips()`, then the build provenance, printed, so the log is the
+//! evidence of which module, which crates and which toolchain the release
+//! build used.
 //!
 //! ```text
 //! CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p seaworthy-crypto \
@@ -30,6 +31,11 @@ fn main() -> ExitCode {
     };
     let fips = seaworthy_crypto::is_fips();
     println!("module:        {}", check.module.describe());
+    println!("module crates: {}", check.module.identity());
+    println!(
+        "allowlist:     {}",
+        seaworthy_crypto::module::describe_allowlist()
+    );
     println!("fips mode:     {}", check.module.fips_mode);
     println!("module branch: {:?}", check.module.fips_branch);
     println!("cpu jitter:    {}", check.module.cpu_jitter_entropy);

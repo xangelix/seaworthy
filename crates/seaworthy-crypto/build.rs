@@ -7,11 +7,20 @@
 //!    knob only by name and stamps it into the provenance. Cargo hands every
 //!    build script in one invocation the same environment, so what this
 //!    script sees is what `aws-lc-fips-sys`'s build script sees.
-//! 2. **Build provenance.** Stamp the toolchain that built this binary into
+//! 2. **The FIPS allowlist.** Turn `fips-allowlist.txt` into
+//!    `module::FIPS_MODULES` and `module::AWS_LC_RS_RELEASES` (generated
+//!    code: the file is the one source of truth), read the `aws-lc-rs` and
+//!    `aws-lc-fips-sys` releases this build resolved from Cargo's `DEP_*`
+//!    metadata, and under `fips` refuse (`cargo::error`) a module that is
+//!    not on the list, or an `aws-lc-rs` that binds another one: see
+//!    `build/allowlist.rs`. The manifest accepts a range of both crates; the
+//!    list decides which of them a FIPS build may link.
+//! 3. **Build provenance.** Stamp the toolchain that built this binary into
 //!    `SEAWORTHY_BUILD_*` compile-time variables
 //!    (`seaworthy_crypto::module::build_provenance()`, for boot evidence and
-//!    logs): rustc always; under `fips` also the C compiler, CMake, Go and
-//!    Perl that build the module, the module-relevant environment,
+//!    logs): rustc and the linked `aws-lc-rs` release always; under `fips`
+//!    also the `aws-lc-fips-sys` release, the C compiler, CMake, Go and Perl
+//!    that build the module, the module-relevant environment,
 //!    `-C target-cpu`, and any acknowledged knobs.
 //!
 //! The provenance is recorded when this script runs — on the first build
@@ -21,6 +30,8 @@
 //! module stay consistent; `cargo clean -p seaworthy-crypto -p
 //! aws-lc-fips-sys` rebuilds both.
 
+#[path = "build/allowlist.rs"]
+mod allowlist;
 #[path = "build/knobs.rs"]
 mod knobs;
 
@@ -96,9 +107,49 @@ fn stamp(name: &str, value: &str) {
     );
 }
 
+/// Read `fips-allowlist.txt`, write `module::FIPS_MODULES` and
+/// `module::AWS_LC_RS_RELEASES` into `OUT_DIR`, and hold the build graph to
+/// the list. `None` (after a `cargo::error`) refuses the build.
+fn allowlist_verdict(vars: &[(String, String)], fips: bool) -> Option<allowlist::Verdict> {
+    let refuse = |why: String| {
+        println!("cargo::error=seaworthy-crypto (FIPS allowlist): {why}");
+        None
+    };
+    let manifest_dir = env("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let path = std::path::Path::new(&manifest_dir).join(allowlist::FILE);
+    let list = match std::fs::read_to_string(&path) {
+        Ok(text) => match allowlist::parse(&text) {
+            Ok(list) => list,
+            Err(why) => return refuse(format!("{}: {why}", path.display())),
+        },
+        Err(why) => return refuse(format!("reading {}: {why}", path.display())),
+    };
+    let out = std::path::Path::new(&env("OUT_DIR").unwrap_or_default()).join("fips_allowlist.rs");
+    if let Err(why) = std::fs::write(&out, list.rust()) {
+        return refuse(format!("writing {}: {why}", out.display()));
+    }
+    let graph = allowlist::graph(vars);
+    for name in &graph.names {
+        println!("cargo::rerun-if-env-changed={name}");
+    }
+    let verdict = allowlist::evaluate(&list, &graph, fips);
+    for warning in &verdict.warnings {
+        println!("cargo::warning=seaworthy-crypto: {warning}");
+    }
+    if !verdict.errors.is_empty() {
+        for error in &verdict.errors {
+            println!("cargo::error=seaworthy-crypto/fips (FIPS allowlist): {error}");
+        }
+        return None;
+    }
+    Some(verdict)
+}
+
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=build/allowlist.rs");
     println!("cargo::rerun-if-changed=build/knobs.rs");
+    println!("cargo::rerun-if-changed={}", allowlist::FILE);
     let target = env("TARGET").unwrap_or_default();
     let host = env("HOST").unwrap_or_default();
     for name in knobs::watched_names(&target) {
@@ -124,7 +175,14 @@ fn main() {
         return;
     }
 
-    // 2. The provenance.
+    // 2. The allowlist, and the releases this build links.
+    let Some(linked) = allowlist_verdict(&vars, fips) else {
+        return;
+    };
+
+    // 3. The provenance.
+    stamp("AWS_LC_RS", &linked.aws_lc_rs);
+    stamp("FIPS_SYS", &linked.fips_sys);
     let rustc = env("RUSTC").unwrap_or_else(|| "rustc".to_string());
     stamp("RUSTC", &tool_version(&rustc, &["-V"]));
     stamp("TARGET", &target);

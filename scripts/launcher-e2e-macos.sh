@@ -394,8 +394,13 @@ FIPSPROJECT="$OUT/fips-project"
 rm -rf "${FIPSPROJECT:?}"
 mkdir -p "$FIPSPROJECT/artifacts/$TARGET/launcher"
 cp "$DEMO" "$FIPSPROJECT/artifacts/$TARGET/launcher/demo"
-MODULE="$(find "$OUT/fips-core-${CPUS[0]}/$TARGET/release/build" -type f -name 'libaws_lc_fips_*_crypto.dylib' | head -1)"
-[ -n "$MODULE" ] || fail "the FIPS build left no libaws_lc_fips_*_crypto.dylib"
+# The module the cores link, by name: a reused build directory can hold an
+# older release's dylib beside it (a cached target/ from before a module bump).
+LINKED="$(otool -L "$OUT/fips-core-${CPUS[0]}/$TARGET/release/libdemo_core.dylib" |
+    awk '/libaws_lc_fips_[0-9_]*crypto\.dylib/ { n = $1; sub(/.*\//, "", n); print n; exit }')"
+[ -n "$LINKED" ] || fail "the FIPS core links no libaws_lc_fips_*_crypto.dylib"
+MODULE="$(find "$OUT/fips-core-${CPUS[0]}/$TARGET/release/build" -type f -name "$LINKED" | head -1)"
+[ -n "$MODULE" ] || fail "the FIPS build left no $LINKED, the module the cores link"
 for cpu in "${CPUS[@]}"; do
     mkdir -p "$FIPSPROJECT/artifacts/$TARGET/cores/$cpu"
     cp "$OUT/fips-core-$cpu/$TARGET/release/libdemo_core.dylib" "$FIPSPROJECT/artifacts/$TARGET/cores/$cpu/"

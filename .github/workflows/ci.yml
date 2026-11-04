@@ -523,7 +523,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: cargo test --all-features
         run: cargo test --workspace --all-features --locked
-      - name: A FIPS release binary links only the pinned module
+      - name: A FIPS release binary links one allowlisted module, and nothing else
         env:
           # The symbol check needs a symbol table (docs/fips.md).
           CARGO_PROFILE_RELEASE_STRIP: "false"

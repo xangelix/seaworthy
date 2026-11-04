@@ -1084,10 +1084,7 @@ fn off_a_mac_package_refuses_a_pkg_by_name() {
 /// path, and the module's own symbols meet the Linux checks.
 #[test]
 fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
-    let module = format!(
-        "lib{}crypto.dylib",
-        seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
-    );
+    let module = format!("lib{PREFIX}crypto.dylib");
     let fips = fips_desktop();
     let config_fips = config(&fips).unwrap();
     // The rules: fips with a macOS output needs the module's sidecar, and a
@@ -1227,7 +1224,18 @@ fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
 // core's table shows the non-FIPS AWS-LC, which aws-lc-rs compiles into a
 // FIPS build too, stayed out of the link.
 
-const PREFIX: &str = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+/// The default module's symbol prefix (`defaults.fips-module` unset: the
+/// newest release on the FIPS allowlist), held to it by
+/// `the_test_prefix_is_the_default_module_s`.
+const PREFIX: &str = "aws_lc_fips_0_14_4_";
+
+#[test]
+fn the_test_prefix_is_the_default_module_s() {
+    assert_eq!(
+        PREFIX,
+        seaworthy::config::default_fips_module().symbol_prefix()
+    );
+}
 
 /// [`DESKTOP`] as a FIPS product, shipping the module's dylib.
 fn fips_desktop() -> String {
@@ -2137,7 +2145,11 @@ fn the_uninstaller_stops_the_daemons_before_removing_anything() {
             ("/usr/sbin/pkgutil", "pkgutil"),
             ("/bin/sleep", "sleep"),
         ] {
-            text = text.replace(tool, &stubs.join(name).display().to_string());
+            // Through `sh`, never executed: a stub written moments ago can't be
+            // executed while a process forked meanwhile by another test (the
+            // container suites spawn many) still holds it open (ETXTBSY), and
+            // the call would fail without reaching the stub.
+            text = text.replace(tool, &format!("/bin/sh {}", stubs.join(name).display()));
         }
         let path = dir.path().join("uninstall");
         std::fs::write(&path, &text).unwrap();
@@ -2155,11 +2167,16 @@ fn the_uninstaller_stops_the_daemons_before_removing_anything() {
     };
 
     // Both unload: the helper, then the service, then the removals.
-    let (code, calls, _) = run(&|_| {});
-    assert_eq!(code, Some(0), "{calls}");
-    let helper = calls.find("bootout AcmeAgent-update").unwrap();
-    let service = calls.find("bootout AcmeAgent\n").unwrap();
-    let removed = calls.find("rm ").unwrap();
+    let (code, calls, stderr) = run(&|_| {});
+    assert_eq!(code, Some(0), "{calls}\n{stderr}");
+    let find = |what: &str| {
+        calls
+            .find(what)
+            .unwrap_or_else(|| panic!("no {what:?} in the calls:\n{calls}\nstderr:\n{stderr}"))
+    };
+    let helper = find("bootout AcmeAgent-update");
+    let service = find("bootout AcmeAgent\n");
+    let removed = find("rm ");
     assert!(helper < service && service < removed, "{calls}");
 
     // A service that won't unload: exit 1, nothing removed.

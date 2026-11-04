@@ -24,7 +24,11 @@ plus `ct_eq` (constant-time compare), `is_fips()`, `tls_provider()` and
 
 **No primitives are implemented here.** Everything delegates to AWS-LC. With the `fips`
 feature that is the AWS-LC FIPS 4.2.0 module (CMVP: in process, Comment Resolution; its
-validated predecessor is AWS-LC 3, certificate #5314), pinned with `=` and asserted at runtime.
+validated predecessor is AWS-LC 3, certificate #5314). The manifest accepts a range of
+`aws-lc-fips-sys` (`>=0.14.2, <0.15`) and `aws-lc-rs` (`>=1.18.2, <2`), so libraries in one
+graph need not move together; the FIPS allowlist, `fips-allowlist.txt` (`aws-lc-fips-sys`
+0.14.2, 0.14.3 and 0.14.4, each building AWS-LC FIPS 4.2.0), decides which releases a FIPS
+build may link. Pin the releases in your application's `Cargo.lock`.
 
 ## The rules
 
@@ -35,8 +39,11 @@ validated predecessor is AWS-LC 3, certificate #5314), pinned with `=` and asser
 2. **FIPS is one switch, and it never degrades silently.** The `fips` feature lives here only
    (applications set it, libraries never). The build script refuses a `fips` build whose
    environment would link a pre-installed AWS-LC or alter the module build; `is_fips()`
-   answers `true` only when the backend AND the TLS provider report FIPS; the module version
-   is asserted at runtime (`module::ensure_expected_module`).
+   answers `true` only when the backend AND the TLS provider report FIPS. A module that is not
+   on the FIPS allowlist is refused at build time (the build script reads the releases the
+   graph resolved), at startup (`module::ensure_expected_module`, which the self-check runs),
+   in CI (`scripts/check-fips-lock.sh` over the lockfiles) and on release binaries
+   (`scripts/verify-fips-binary.sh`).
 3. **Keys are validated at intake.** `ed25519::validate_public_key` refuses the small-order
    and non-canonical points, under which anyone can forge a signature without a secret.
    FIPS 204 defines no ML-DSA public-key validation at all, and many ML-DSA-87 keys verify a
@@ -64,7 +71,7 @@ configuration on the canonical provider:
 use seaworthy_crypto::{digest, fips_policy, mldsa, rand};
 
 // The boot self-check: the first DRBG draw (and, under `fips`, the
-// pinned-module assertion) happens here, before any work.
+// allowlisted-module assertion) happens here, before any work.
 seaworthy_crypto::module::startup_self_check()?;
 
 // A release key: the 32-byte seed is the root secret.

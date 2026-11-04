@@ -156,11 +156,11 @@
 //! from a separate FIPS builder, for example).
 //!
 //! `fips-check` runs `scripts/verify-fips-binary.sh`'s checks over each ELF
-//! file's symbol table, as `nm` reads it, for the pinned module
-//! (`seaworthy_crypto::module::FIPS_SYMBOL_PREFIX`), or the `aws-lc-fips-sys`
-//! release `--module` names (one `defaults.fips-module` accepts). It's what
-//! `verify` applies to every Linux core of a FIPS product, one binary at a
-//! time.
+//! file's symbol table, as `nm` reads it, for the `aws-lc-fips-sys` release
+//! `--module` names (one on the FIPS allowlist, as `defaults.fips-module`
+//! accepts), by default the newest allowlisted release
+//! (`seaworthy::config::default_fips_module`). It's what `verify` applies to
+//! every Linux core of a FIPS product, one binary at a time.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -1347,7 +1347,7 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
 /// `fips-check [--module VERSION] FILE…`: every file must pass; prints
 /// each verdict.
 fn fips_check(args: &[String]) -> ExitCode {
-    let mut module = seaworthy::config::pinned_fips_module();
+    let mut module = seaworthy::config::default_fips_module();
     let mut files = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -1360,7 +1360,7 @@ fn fips_check(args: &[String]) -> ExitCode {
                         .map(|m| m.sys)
                         .collect();
                     eprintln!(
-                        "fips-check: --module needs an aws-lc-fips-sys release seaworthy knows ({})\n{USAGE}",
+                        "fips-check: --module needs an aws-lc-fips-sys release on the FIPS allowlist ({})\n{USAGE}",
                         known.join(", ")
                     );
                     return ExitCode::from(2);

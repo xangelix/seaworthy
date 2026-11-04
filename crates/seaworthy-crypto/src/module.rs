@@ -1,17 +1,32 @@
-//! The linked AWS-LC module: its identity and the pinned expectation, the
-//! boot self-check, and the build provenance stamped into this binary.
+//! The linked AWS-LC module: its identity, the FIPS allowlist it must be on,
+//! the boot self-check, and the build provenance stamped into this binary.
 //!
-//! **The module.** Under the `fips` feature this crate links the AWS-LC
-//! FIPS 4.2.0 module, built from source by `aws-lc-fips-sys` 0.14.3 behind
-//! `aws-lc-rs` 1.18.2, both pinned with `=` in the workspace manifest (the
-//! lockfile alone is one `cargo update` away from a module that binds a
-//! different FIPS release). CMVP status: [`CMVP_STATUS`]. [`linked`] reads
-//! what is actually linked, at runtime; [`ensure_expected_module`] refuses
-//! anything but the pinned build; the `fips`-only
-//! `the_linked_module_is_the_pinned_aws_lc_fips_4_2_0` test and
-//! `scripts/verify-fips-binary.sh` (an `nm` check of a release binary: the
-//! `aws_lc_fips_0_14_3_*` symbols present, zero non-FIPS `aws_lc_0_*` /
-//! `ring_core_*`) are the gates.
+//! **The module.** Under the `fips` feature this crate links an AWS-LC FIPS
+//! module, built from source by `aws-lc-fips-sys` behind `aws-lc-rs`. The
+//! manifest accepts a range of both crates (`aws-lc-fips-sys >=0.14.2,
+//! <0.15`, `aws-lc-rs >=1.18.2, <2`), so libraries in one graph need not
+//! move together; the application's lockfile picks the releases, and the
+//! **allowlist** ([`FIPS_MODULES`], [`AWS_LC_RS_RELEASES`], generated from
+//! `fips-allowlist.txt`) decides which of them a FIPS build may link. Every
+//! listed module is AWS-LC FIPS 4.2.0; CMVP status: [`CMVP_STATUS`].
+//!
+//! Anything not on the list is refused, at each point:
+//!
+//! - **build time:** the build script reads the releases the build graph
+//!   resolved (Cargo's `DEP_*` metadata of both crates) and fails a `fips`
+//!   build whose `aws-lc-fips-sys` is not listed, or whose `aws-lc-rs`
+//!   binds another release ([`LINKED_FIPS_SYS`], [`LINKED_AWS_LC_RS`]);
+//! - **startup and self-test:** [`ensure_expected_module`] (run by
+//!   [`startup_self_check`]) holds what is linked, read at runtime
+//!   ([`linked`]: the module's version, FIPS mode, its branch), to the
+//!   allowlist entry of the release the build linked;
+//! - **CI:** `scripts/check-fips-lock.sh` holds every lockfile to the list,
+//!   and the `fips`-only `the_linked_module_is_an_allowlisted_aws_lc_fips_module`
+//!   test runs the startup check;
+//! - **release binaries:** `scripts/verify-fips-binary.sh` (an `nm` check:
+//!   one module's `aws_lc_fips_<release>_*` symbols, that release on the
+//!   list, zero non-FIPS `aws_lc_<version>_*` / `ring_core_*`) and
+//!   `seaworthy verify` (the module the product declares).
 //!
 //! **What [`crate::is_fips`] attests, and what it does not.** `is_fips()`
 //! attests MODULE LINKAGE AND TLS FILTERING: the AWS-LC FIPS module is the
@@ -29,54 +44,129 @@
 //! Hyper-V guests, and 0 in about 15,000 on bare metal). Call
 //! [`startup_self_check`] first thing in `main`: it draws from the module
 //! DRBG so that abort happens at boot, before the process takes traffic,
-//! never mid-request; and under `fips` it asserts the pinned module. The
-//! entropy caveat: whether the 4.x module's Security Policy claims an ESV
-//! certificate for that source, and therefore whether the SP 800-90B "no
-//! assurance of the minimum strength of generated keys" caveat that the 3.x
-//! policy carries applies, is to be confirmed from the 4.x Security Policy
-//! when its certificate issues; record it in your security documentation,
-//! do not assume it.
+//! never mid-request; and under `fips` it asserts an allowlisted module.
+//! The entropy caveat: whether the 4.x module's Security Policy claims an
+//! ESV certificate for that source, and therefore whether the SP 800-90B
+//! "no assurance of the minimum strength of generated keys" caveat that the
+//! 3.x policy carries applies, is to be confirmed from the 4.x Security
+//! Policy when its certificate issues; record it in your security
+//! documentation, do not assume it.
 
 use crate::CryptoError;
 
-/// The AWS-LC FIPS module release this crate pins (what
-/// `aws_lc_rs::awslc_version()` returns under `fips`).
-pub const EXPECTED_FIPS_MODULE_VERSION: &str = "4.2.0";
-/// The FIPS module branch (`aws_lc_rs::fips_version()`).
-pub const EXPECTED_FIPS_MODULE_BRANCH: u32 = 4;
-/// The `aws-lc-fips-sys` release that builds it (pinned `=` in the
-/// workspace manifest).
-pub const EXPECTED_FIPS_SYS_VERSION: &str = "0.14.3";
-/// The `aws-lc-rs` release that binds it (pinned `=` in the workspace
-/// manifest).
-pub const EXPECTED_AWS_LC_RS_VERSION: &str = "1.18.2";
-/// The symbol prefix the pinned sys crate gives every module symbol: what
-/// `scripts/verify-fips-binary.sh` requires in a release binary.
-pub const FIPS_SYMBOL_PREFIX: &str = "aws_lc_fips_0_14_3_";
+/// An AWS-LC FIPS module a FIPS build may link: the `aws-lc-fips-sys`
+/// release that builds it, the module version it reports
+/// (`aws_lc_rs::awslc_version()`), and its branch
+/// (`aws_lc_rs::fips_version()`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FipsModule {
+    /// The `aws-lc-fips-sys` release (`0.14.4`): it prefixes every module
+    /// symbol (`aws_lc_fips_0_14_4_`) and names the module's libraries off
+    /// Linux (`aws_lc_fips_0_14_4_crypto.dll`).
+    pub sys: &'static str,
+    /// The AWS-LC FIPS module release it builds (`4.2.0`).
+    pub module: &'static str,
+    /// The module's branch (`4`).
+    pub branch: u32,
+}
+
+impl FipsModule {
+    /// The prefix the sys crate gives every module symbol, and the module's
+    /// libraries' names: `aws_lc_fips_<major>_<minor>_<patch>_`.
+    #[must_use]
+    pub fn symbol_prefix(&self) -> String {
+        format!("aws_lc_fips_{}_", self.sys.replace('.', "_"))
+    }
+}
+
+/// An `aws-lc-rs` release on the allowlist, and the `aws-lc-fips-sys`
+/// series it binds (`0.14`: it asks for `^0.14.x`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AwsLcRsRelease {
+    /// The release (`1.19.0`).
+    pub version: &'static str,
+    /// The `aws-lc-fips-sys` series it binds (`0.14`).
+    pub binds: &'static str,
+}
+
+include!(concat!(env!("OUT_DIR"), "/fips_allowlist.rs"));
+
+/// The allowlist file itself (`fips-allowlist.txt`), from which the build
+/// script generated [`FIPS_MODULES`] and [`AWS_LC_RS_RELEASES`]: what a
+/// product's lockfile check compares with its other FIPS crates' lists.
+pub const ALLOWLIST: &str = include_str!("../fips-allowlist.txt");
+
+/// The allowlisted module `aws-lc-fips-sys` release `sys` builds, if any.
+#[must_use]
+pub fn fips_module(sys: &str) -> Option<FipsModule> {
+    FIPS_MODULES.iter().copied().find(|m| m.sys == sys)
+}
+
+/// The allowlisted `aws-lc-rs` release `version`, if any.
+#[must_use]
+pub fn aws_lc_rs_release(version: &str) -> Option<AwsLcRsRelease> {
+    AWS_LC_RS_RELEASES
+        .iter()
+        .copied()
+        .find(|r| r.version == version)
+}
+
+/// `0.14.2 (AWS-LC FIPS 4.2.0), …`: the allowlisted modules, for messages.
+#[must_use]
+pub fn describe_allowlist() -> String {
+    FIPS_MODULES
+        .iter()
+        .map(|m| format!("{} (AWS-LC FIPS {})", m.sys, m.module))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The `aws-lc-rs` release this build binds, as the build graph resolved
+/// it (read by the build script from Cargo's metadata; empty if the graph
+/// did not say, which a `fips` build refuses).
+pub const LINKED_AWS_LC_RS: &str = env!("SEAWORTHY_BUILD_AWS_LC_RS");
+
+const LINKED_FIPS_SYS_STAMP: &str = env!("SEAWORTHY_BUILD_FIPS_SYS");
+
+/// The `aws-lc-fips-sys` release a `fips` build links (the build script
+/// refuses one that is not on the allowlist); `None` without `fips`.
+pub const LINKED_FIPS_SYS: Option<&str> = if LINKED_FIPS_SYS_STAMP.is_empty() {
+    None
+} else {
+    Some(LINKED_FIPS_SYS_STAMP)
+};
+
 /// The module's CMVP status, the one wording docs and evidence use (the
 /// design assumes 4.2.0 will be validated; say "validated" only once the
-/// certificate issues and names 4.2.0).
+/// certificate issues and names 4.2.0). It covers every allowlisted module:
+/// a test holds each listed module version to it.
 pub const CMVP_STATUS: &str = "AWS-LC FIPS 4.2.0 module (CMVP: in process, Comment Resolution; its \
                                validated predecessor is AWS-LC 3, certificate #5314)";
 /// How many bytes [`startup_self_check`] draws from the module DRBG.
 pub const SELF_CHECK_RNG_BYTES: usize = 32;
 
-/// What this process actually links, read at runtime.
+/// What this process actually links.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkedModule {
-    /// The AWS-LC version string's version token (`"4.2.0"` under `fips`).
+    /// The AWS-LC version string's version token (`"4.2.0"` under `fips`),
+    /// read at runtime.
     pub version: String,
     /// Whether this build enables `seaworthy-crypto/fips`.
     pub fips_build: bool,
     /// Whether the backend reports FIPS mode (`FIPS_mode()`; its power-on
-    /// self-tests and integrity check ran before `main`).
+    /// self-tests and integrity check ran before `main`), read at runtime.
     pub fips_mode: bool,
     /// The FIPS module branch the backend was built from (`None` for a
-    /// non-FIPS backend).
+    /// non-FIPS backend), read at runtime.
     pub fips_branch: Option<u32>,
     /// Whether the module seeds from CPU-jitter entropy (the 4.x module
     /// always does: the first-draw health test in the module docs).
     pub cpu_jitter_entropy: bool,
+    /// The `aws-lc-fips-sys` release the build linked
+    /// ([`LINKED_FIPS_SYS`]; `None` without `fips`).
+    pub fips_sys: Option<String>,
+    /// The `aws-lc-rs` release the build binds ([`LINKED_AWS_LC_RS`]).
+    pub aws_lc_rs: String,
 }
 
 impl LinkedModule {
@@ -89,9 +179,24 @@ impl LinkedModule {
             format!("AWS-LC {} (non-FIPS)", self.version)
         }
     }
+
+    /// [`describe`](Self::describe) with the crates that built it:
+    /// `"AWS-LC FIPS 4.2.0 (aws-lc-fips-sys 0.14.4, aws-lc-rs 1.19.0)"`.
+    #[must_use]
+    pub fn identity(&self) -> String {
+        match &self.fips_sys {
+            Some(sys) => format!(
+                "{} (aws-lc-fips-sys {sys}, aws-lc-rs {})",
+                self.describe(),
+                self.aws_lc_rs
+            ),
+            None => format!("{} (aws-lc-rs {})", self.describe(), self.aws_lc_rs),
+        }
+    }
 }
 
-/// Read the linked module (runtime queries of the backend).
+/// Read the linked module: the module's own answers at runtime, and the
+/// releases the build linked.
 #[must_use]
 pub fn linked() -> LinkedModule {
     LinkedModule {
@@ -100,10 +205,12 @@ pub fn linked() -> LinkedModule {
         fips_mode: aws_lc_rs::try_fips_mode().is_ok(),
         fips_branch: aws_lc_rs::fips_version(),
         cpu_jitter_entropy: aws_lc_rs::try_fips_cpu_jitter_entropy().is_ok(),
+        fips_sys: LINKED_FIPS_SYS.map(str::to_string),
+        aws_lc_rs: LINKED_AWS_LC_RS.to_string(),
     }
 }
 
-/// The FIPS module branch the pinned sys crate was BUILT from (its
+/// The FIPS module branch the linked sys crate was BUILT from (its
 /// build-time constant; `None` without `fips`), compared against the
 /// runtime [`LinkedModule::fips_branch`] by the `fips` tests.
 #[must_use]
@@ -118,40 +225,56 @@ pub fn compiled_branch() -> Option<u32> {
     }
 }
 
-/// The pinned-module assertion over a [`LinkedModule`], both arms testable
-/// in every profile: with `expect_fips`, only AWS-LC FIPS
-/// [`EXPECTED_FIPS_MODULE_VERSION`] in FIPS mode on branch
-/// [`EXPECTED_FIPS_MODULE_BRANCH`] passes; without it there is no module
-/// to pin (a non-FIPS backend's version is not a compliance fact).
+/// The allowlist assertion over a [`LinkedModule`], both arms testable in
+/// every profile: with `expect_fips`, only a module whose `aws-lc-fips-sys`
+/// release is on the allowlist passes, in FIPS mode, reporting the module
+/// version and branch the allowlist names for that release; without it
+/// there is no module to check (a non-FIPS backend's version is not a
+/// compliance fact).
 ///
 /// # Errors
-/// A message naming what was linked and what was expected.
+/// A message naming what was linked and what the allowlist accepts.
 pub fn check(module: &LinkedModule, expect_fips: bool) -> Result<(), String> {
     if !expect_fips {
         return Ok(());
     }
-    let ok = module.fips_mode
-        && module.version == EXPECTED_FIPS_MODULE_VERSION
-        && module.fips_branch == Some(EXPECTED_FIPS_MODULE_BRANCH);
+    let allowed = module.fips_sys.as_deref().and_then(fips_module);
+    let ok = allowed.is_some_and(|allowed| {
+        module.fips_mode
+            && module.version == allowed.module
+            && module.fips_branch == Some(allowed.branch)
+    });
     if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "linked module is {} (FIPS mode {}, branch {:?}); this build pins AWS-LC FIPS \
-             {EXPECTED_FIPS_MODULE_VERSION} (branch {EXPECTED_FIPS_MODULE_BRANCH}, \
-             aws-lc-fips-sys {EXPECTED_FIPS_SYS_VERSION})",
-            module.describe(),
-            module.fips_mode,
-            module.fips_branch,
-        ))
+        return Ok(());
     }
+    let built = module.fips_sys.as_deref().map_or_else(
+        || "no aws-lc-fips-sys".to_string(),
+        |sys| format!("aws-lc-fips-sys {sys}"),
+    );
+    let expected = allowed.map_or_else(
+        || "it is not on the FIPS allowlist".to_string(),
+        |allowed| {
+            format!(
+                "the allowlist expects AWS-LC FIPS {} on branch {} in FIPS mode",
+                allowed.module, allowed.branch
+            )
+        },
+    );
+    Err(format!(
+        "linked module is {} (FIPS mode {}, branch {:?}, built by {built}): {expected}; the \
+         FIPS allowlist accepts {}",
+        module.describe(),
+        module.fips_mode,
+        module.fips_branch,
+        describe_allowlist(),
+    ))
 }
 
-/// Under `fips`, refuse anything but the pinned module; without it, report
-/// what is linked.
+/// Under `fips`, refuse anything but an allowlisted module; without it,
+/// report what is linked.
 ///
 /// # Errors
-/// [`CryptoError::Config`] naming the linked and the expected module.
+/// [`CryptoError::Config`] naming the linked module and the allowlist.
 pub fn ensure_expected_module() -> Result<LinkedModule, CryptoError> {
     let module = linked();
     check(&module, cfg!(feature = "fips")).map_err(CryptoError::Config)?;
@@ -161,7 +284,7 @@ pub fn ensure_expected_module() -> Result<LinkedModule, CryptoError> {
 /// What [`startup_self_check`] established.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelfCheck {
-    /// The module the process links (asserted under `fips`).
+    /// The module the process links (held to the allowlist under `fips`).
     pub module: LinkedModule,
     /// How many bytes were drawn from the module DRBG
     /// ([`SELF_CHECK_RNG_BYTES`]).
@@ -171,11 +294,11 @@ pub struct SelfCheck {
 /// The boot self-check: call it first thing in `main`. Draw
 /// [`SELF_CHECK_RNG_BYTES`] from the module DRBG (so the CPU-jitter
 /// first-draw health test, and its `abort()` on failure, runs at boot), and
-/// under `fips` assert the pinned module ([`ensure_expected_module`]).
+/// under `fips` assert an allowlisted module ([`ensure_expected_module`]).
 ///
 /// # Errors
 /// [`CryptoError::Rng`] when the DRBG fails; [`CryptoError::Config`] when a
-/// FIPS build links an unexpected module.
+/// FIPS build links a module the allowlist does not accept.
 pub fn startup_self_check() -> Result<SelfCheck, CryptoError> {
     let mut draw = zeroize::Zeroizing::new([0u8; SELF_CHECK_RNG_BYTES]);
     crate::rand::fill(draw.as_mut_slice())?;
@@ -200,6 +323,11 @@ pub struct BuildProvenance {
     pub opt_level: &'static str,
     /// Whether `seaworthy-crypto/fips` was on.
     pub fips_feature: bool,
+    /// The `aws-lc-rs` release the build bound ([`LINKED_AWS_LC_RS`]).
+    pub aws_lc_rs: &'static str,
+    /// The `aws-lc-fips-sys` release that built the module
+    /// ([`LINKED_FIPS_SYS`]), or `n/a (non-FIPS build…)`.
+    pub aws_lc_fips_sys: &'static str,
     /// The C compiler that built the module (`<cc>: <version line>`), or
     /// `n/a (non-FIPS build…)`.
     pub c_compiler: &'static str,
@@ -226,6 +354,11 @@ pub const BUILD: BuildProvenance = BuildProvenance {
     profile: env!("SEAWORTHY_BUILD_PROFILE"),
     opt_level: env!("SEAWORTHY_BUILD_OPT_LEVEL"),
     fips_feature: cfg!(feature = "fips"),
+    aws_lc_rs: LINKED_AWS_LC_RS,
+    aws_lc_fips_sys: match LINKED_FIPS_SYS {
+        Some(sys) => sys,
+        None => "n/a (non-FIPS build: no module is compiled)",
+    },
     c_compiler: env!("SEAWORTHY_BUILD_CC"),
     cmake: env!("SEAWORTHY_BUILD_CMAKE"),
     go: env!("SEAWORTHY_BUILD_GO"),
@@ -252,6 +385,8 @@ impl BuildProvenance {
             ("profile", self.profile),
             ("opt_level", self.opt_level),
             ("fips_feature", if self.fips_feature { "1" } else { "0" }),
+            ("aws_lc_rs", self.aws_lc_rs),
+            ("aws_lc_fips_sys", self.aws_lc_fips_sys),
             ("c_compiler", self.c_compiler),
             ("cmake", self.cmake),
             ("go", self.go),

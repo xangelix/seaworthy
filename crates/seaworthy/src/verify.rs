@@ -1052,7 +1052,7 @@ pub fn macho_facts(image: &[u8]) -> Result<MachoFacts, String> {
 /// One entry of an image's symbol table, as `nm` lists it.
 struct TableSymbol<'data> {
     /// The name without one leading `_`, which Mach-O prepends to every C
-    /// name (`_aws_lc_fips_0_14_3_SHA256`): this is the one place it comes
+    /// name (`_aws_lc_fips_0_14_4_SHA256`): this is the one place it comes
     /// off, as `scripts/verify-fips-binary.sh` takes it off.
     name: &'data [u8],
     /// `nm` type `T`/`t`: a defined, non-weak symbol in an executable

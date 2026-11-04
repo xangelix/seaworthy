@@ -7,9 +7,58 @@ a FIPS release binary.
 
 `seaworthy-crypto/fips` links the **AWS-LC FIPS 4.2.0** module (CMVP: in process, Comment
 Resolution; its validated predecessor is AWS-LC 3, certificate #5314), built from source by
-`aws-lc-fips-sys` 0.14.3 behind `aws-lc-rs` 1.18.2. Both are pinned with `=` in the workspace
-manifest, and the linked module is asserted at runtime (`seaworthy_crypto::module`). Say
-"validated" only once a certificate names 4.2.0.
+`aws-lc-fips-sys` behind `aws-lc-rs`. Say "validated" only once a certificate names 4.2.0.
+
+### The module allowlist
+
+`seaworthy-crypto` declares a **range** of both crates (`aws-lc-fips-sys >=0.14.2, <0.15`,
+`aws-lc-rs >=1.18.2, <2`), not exact pins: an exact pin in a library forces every library in a
+graph (seaworthy-crypto, carpc_crypto, an application's own) to move in lockstep. The
+application's `Cargo.lock` picks the releases, and the **FIPS allowlist**,
+`crates/seaworthy-crypto/fips-allowlist.txt`, decides which of them a FIPS build may link:
+
+| `aws-lc-fips-sys` | AWS-LC FIPS module | Branch | Status |
+|---|---|---|---|
+| `0.14.2` | 4.2.0 | 4 | CMVP: in process, Comment Resolution |
+| `0.14.3` | 4.2.0 | 4 | CMVP: in process, Comment Resolution |
+| `0.14.4` | 4.2.0 | 4 | CMVP: in process, Comment Resolution |
+
+and `aws-lc-rs` 1.18.2 and 1.19.0, both of which bind the 0.14 series. 0.14.4 builds AWS-LC
+commit `b67630c7…`, the head of AWS's `fips-2025-09-12-lts` branch on 2026-10-23: the `v4.2.0`
+tag plus seven backports to libssl, X.509, the error tables and the build. `crypto/fipsmodule`
+and `third_party/jitterentropy` are byte for byte those of 0.14.2 and 0.14.3, and the three
+releases read the same build-environment knobs.
+
+The file is the one source of truth in this repository. A module that is not on it is refused at
+every point:
+
+- **build time:** `seaworthy-crypto`'s build script reads the releases the graph resolved (Cargo's
+  `DEP_*` metadata; both crates name their release in their `links` key) and fails a `fips` build
+  whose `aws-lc-fips-sys` is not listed, or whose `aws-lc-rs` binds another release (a future
+  `aws-lc-rs` that moves to another sys series would bring a second module into the graph). The
+  same script turns the file into `seaworthy_crypto::module::FIPS_MODULES`;
+- **startup:** `seaworthy_crypto::module::startup_self_check()` holds the module the process
+  links, read at runtime (its version, FIPS mode, its branch), to the allowlist entry of the
+  release the build linked, and reports both (`LinkedModule::identity`: `AWS-LC FIPS 4.2.0
+  (aws-lc-fips-sys 0.14.4, aws-lc-rs 1.19.0)`; the build provenance records them too);
+- **CI:** `scripts/check-fips-lock.sh` holds every lockfile to the list (one release of each
+  crate, both listed); the `fips` tests run the startup check;
+- **release binaries:** `scripts/verify-fips-binary.sh` requires exactly one module's symbols, of
+  a listed release, and `seaworthy verify` the module the product declares.
+
+**Applications pin exactly, in their own lockfile.** Commit `Cargo.lock`, name the module in
+`seaworthy.toml` (`[defaults] fips-module`, below), and have CI check that the locked
+`aws-lc-fips-sys` and `aws-lc-rs` are on the allowlist and that `aws-lc-fips-sys` is the declared
+module (carpc's `scripts/check-fips-lock.sh` does this for a carpc application). A `cargo
+update` that moves the module then fails CI until the declaration moves with it, a reviewed edit.
+
+The same file, byte for byte, is kept in carpc (`crates/carpc_crypto/fips-allowlist.txt`) and
+tg_spade (`crates/spade-aws-lc-fips/fips-allowlist.txt`); this repository's is the reference.
+Their lockfile checks compare their copy with the one in the seaworthy commit they build with, so
+a list that drifts fails their CI. A release joins (here first) once it has been built and
+checked: a FIPS build with it reports the module version and branch in FIPS mode,
+`scripts/verify-fips-binary.sh` accepts its symbols, the knobs it reads are reviewed
+(`build/knobs.rs`), and the module's status is in the table above.
 
 The feature also enables `rustls/fips`. Feature unification carries it to every rustls AWS-LC
 provider in the graph, so TLS offers only FIPS-approved cipher suites and key-exchange groups
@@ -78,7 +127,7 @@ AWS_LC_FIPS_SYS_USE_SYSTEM = "0"
 
 `AWS_LC_FIPS_SYS_USE_SYSTEM=0` is **required**: without it `aws-lc-fips-sys` auto-detects a
 pre-installed AWS-LC (`OPENSSL_DIR`, `OPENSSL_LIB_DIR`, pkg-config) and links that instead of
-building the pinned module.
+building the allowlisted module.
 
 The AWS-LC Security Policy's build procedure admits "no additions, deletions, or alterations".
 Under `fips`, `seaworthy-crypto`'s build script therefore refuses, with a build error naming the
@@ -127,15 +176,18 @@ target/release/examples/fips_selfcheck --expect-fips
   then strip the shipped copy. `seaworthy layout` strips that way and checks that stripping
   changed nothing the loader maps, the module's code and data included; the Windows version stamp
   and signing are checked the same way
-  ([packaging.md](packaging.md#what-changes-after-the-build)). It requires the `aws_lc_fips_0_14_3_*` symbols with
+  ([packaging.md](packaging.md#what-changes-after-the-build)). It finds the one module the binary
+  links and requires its release to be on the allowlist (`--allowlist FILE`, by default this
+  repository's), or to be the release `--module 0.14.4` (or `--prefix aws_lc_fips_0_14_4_`)
+  names; it reports the release it found. It requires that release's symbols with
   `awslc_version_string` defined in text (the Security Policy's static-link check), and zero
-  non-FIPS `aws_lc_<version>_*`, `ring_core_*` or other-version FIPS symbols. `--self-test`
+  non-FIPS `aws_lc_<version>_*`, `ring_core_*` or other-release FIPS symbols. `--self-test`
   runs the script's own tests.
 - `fips_selfcheck --expect-fips` runs the boot self-check (a module-DRBG draw and the
-  pinned-module assertion), `is_fips()`, and prints the module, its CMVP status and the build
-  provenance; it fails unless the process runs FIPS.
+  allowlisted-module assertion), `is_fips()`, and prints the module, the crates that built it,
+  the allowlist, its CMVP status and the build provenance; it fails unless the process runs FIPS.
 - `cargo test -p seaworthy-crypto --features fips` runs the FIPS-only tests, including the
-  assertion that the linked module is AWS-LC FIPS 4.2.0.
+  assertion that the linked module is an allowlisted AWS-LC FIPS 4.2.0 build.
 
 ### macOS cores
 
@@ -145,7 +197,8 @@ the module's dylib, and `seaworthy verify` runs its checks there). `seaworthy ve
 core of a FIPS product to its symbol table instead (`seaworthy::verify::fips_macos_core_findings`),
 one leading `_` off each Mach-O name:
 
-- it imports `aws_lc_fips_0_14_3_*` symbols and defines none, locally or not: a definition is a copy
+- it imports the declared module's `aws_lc_fips_<release>_*` symbols and defines none, locally or
+  not: a definition is a copy
   of the module that no sidecar ships;
 - it has no non-FIPS `aws_lc_<version>_*` symbols, `ring_core_*` symbols or other-version FIPS
   symbols, defined or imported, and no AWS-LC built without a prefix (`awslc_*`, `AWSLC_*`,
@@ -160,23 +213,20 @@ Build the cores with `strip = false`, as the build plan does (`seaworthy build-p
 
 ## A product's module release
 
-`seaworthy-crypto` pins `aws-lc-fips-sys` 0.14.3; a product's own cores may be built with another
-release of the same module. `seaworthy.toml`'s `[defaults] fips-module` names the release its FIPS
-products' cores carry, and `verify` (and `seaworthy fips-check --module`) then require that
-release's symbol prefix (`aws_lc_fips_<major>_<minor>_<patch>_`) and module libraries
-(`aws_lc_fips_<…>_crypto.dll`, `libaws_lc_fips_<…>_crypto.dylib`) instead of the pin's. Only a
-release known to build a validated, or in-process, AWS-LC FIPS module is accepted:
+A product's cores are built with the `aws-lc-fips-sys` release its own `Cargo.lock` pins, one on
+the allowlist. `seaworthy.toml`'s `[defaults] fips-module` names it, and `verify` (and `seaworthy
+fips-check --module`) then require that release's symbol prefix
+(`aws_lc_fips_<major>_<minor>_<patch>_`) and module libraries (`aws_lc_fips_<…>_crypto.dll`,
+`libaws_lc_fips_<…>_crypto.dylib`). `fips-module` accepts exactly the allowlist
+(`seaworthy::config::FIPS_MODULES` is `seaworthy_crypto::module::FIPS_MODULES`); unset, it is the
+newest release on it (`0.14.4`). Name it: the product's lockfile check compares its locked
+`aws-lc-fips-sys` with it, and a default that moves with seaworthy would move the product's
+module with it.
 
-| `fips-module` | AWS-LC FIPS module | Status |
-|---|---|---|
-| `0.14.2` | 4.2.0 | CMVP: in process, Comment Resolution |
-| `0.14.3` (the pin, the default) | 4.2.0 | CMVP: in process, Comment Resolution |
-
-Another release joins the table (`FIPS_MODULES` in `crates/seaworthy/src/config.rs`) once the
-module release it builds and its symbol prefix are confirmed: build a core with it, check it with
-`scripts/verify-fips-binary.sh --prefix aws_lc_fips_<…>_`, add a row and a test in
-`crates/seaworthy/tests/fips_builds.rs`, and its status here. Nothing else changes: the checks
-derive every name from the release.
+Another release joins the allowlist once the module release it builds and its symbol prefix are
+confirmed: build a core with it, check it with `scripts/verify-fips-binary.sh --module <release>`,
+add it to `fips-allowlist.txt` (and carpc's and tg_spade's copies), and its status to the table
+above. Nothing else changes: the checks derive every name from the release.
 
 Call `seaworthy_crypto::module::startup_self_check()` first thing in `main` of a FIPS
 application: the module's CPU-jitter entropy source runs its startup health tests on the first

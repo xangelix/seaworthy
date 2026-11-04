@@ -47,32 +47,41 @@ fn even_rustls_default_provider_is_restricted_under_the_feature() {
     assert!(provider.fips());
 }
 
-/// The module this binary LINKS is the pinned AWS-LC FIPS 4.2.0 build: the
-/// runtime version string (`awslc_version()`), FIPS mode, and the module
-/// branch the sys crate was built from. A `cargo update`
-/// that moved the module, or a system AWS-LC picked up at build time,
-/// fails here.
+/// The module this binary LINKS is an allowlisted AWS-LC FIPS module: the
+/// release the build linked is on the allowlist, and the module reports, at
+/// runtime, the version and branch the allowlist names for it (the version
+/// string, `awslc_version()`; FIPS mode; the module branch, which the sys
+/// crate's build-time constant agrees with). A `cargo update` to an unlisted
+/// module (refused at build time), or a system AWS-LC picked up at build
+/// time, fails here.
 #[test]
-fn the_linked_module_is_the_pinned_aws_lc_fips_4_2_0() {
+fn the_linked_module_is_an_allowlisted_aws_lc_fips_module() {
     let linked = seaworthy_crypto::module::linked();
-    assert_eq!(
-        linked.version,
-        seaworthy_crypto::module::EXPECTED_FIPS_MODULE_VERSION
-    );
+    let sys = linked
+        .fips_sys
+        .clone()
+        .expect("a fips build records its release");
+    let allowed = seaworthy_crypto::module::fips_module(&sys).expect("an allowlisted release");
+    assert_eq!(linked.version, allowed.module);
     assert_eq!(linked.version, aws_lc_rs::awslc_version());
     assert!(linked.fips_build && linked.fips_mode, "{linked:?}");
-    assert_eq!(
-        linked.fips_branch,
-        Some(seaworthy_crypto::module::EXPECTED_FIPS_MODULE_BRANCH)
-    );
+    assert_eq!(linked.fips_branch, Some(allowed.branch));
     assert_eq!(
         seaworthy_crypto::module::compiled_branch(),
-        Some(seaworthy_crypto::module::EXPECTED_FIPS_MODULE_BRANCH),
+        Some(allowed.branch),
         "the sys crate's build-time branch agrees with the runtime"
     );
-    let ensured = seaworthy_crypto::module::ensure_expected_module().expect("the pinned module");
+    let ensured =
+        seaworthy_crypto::module::ensure_expected_module().expect("an allowlisted module");
     assert_eq!(ensured, linked);
     assert_eq!(linked.describe(), "AWS-LC FIPS 4.2.0");
+    assert_eq!(
+        linked.identity(),
+        format!(
+            "AWS-LC FIPS 4.2.0 (aws-lc-fips-sys {sys}, aws-lc-rs {})",
+            seaworthy_crypto::module::LINKED_AWS_LC_RS
+        )
+    );
 }
 
 /// A FIPS build records the C toolchain that built the module.
@@ -86,6 +95,11 @@ fn a_fips_build_records_the_module_toolchain() {
         build.c_compiler
     );
     assert!(!build.cmake.contains("non-FIPS"), "{}", build.cmake);
+    assert_eq!(
+        Some(build.aws_lc_fips_sys),
+        seaworthy_crypto::module::LINKED_FIPS_SYS,
+        "the module's release is recorded"
+    );
     assert!(
         build
             .module_build_env
