@@ -2145,7 +2145,11 @@ fn the_uninstaller_stops_the_daemons_before_removing_anything() {
             ("/usr/sbin/pkgutil", "pkgutil"),
             ("/bin/sleep", "sleep"),
         ] {
-            text = text.replace(tool, &stubs.join(name).display().to_string());
+            // Through `sh`, never executed: a stub written moments ago can't be
+            // executed while a process forked meanwhile by another test (the
+            // container suites spawn many) still holds it open (ETXTBSY), and
+            // the call would fail without reaching the stub.
+            text = text.replace(tool, &format!("/bin/sh {}", stubs.join(name).display()));
         }
         let path = dir.path().join("uninstall");
         std::fs::write(&path, &text).unwrap();
@@ -2163,11 +2167,16 @@ fn the_uninstaller_stops_the_daemons_before_removing_anything() {
     };
 
     // Both unload: the helper, then the service, then the removals.
-    let (code, calls, _) = run(&|_| {});
-    assert_eq!(code, Some(0), "{calls}");
-    let helper = calls.find("bootout AcmeAgent-update").unwrap();
-    let service = calls.find("bootout AcmeAgent\n").unwrap();
-    let removed = calls.find("rm ").unwrap();
+    let (code, calls, stderr) = run(&|_| {});
+    assert_eq!(code, Some(0), "{calls}\n{stderr}");
+    let find = |what: &str| {
+        calls
+            .find(what)
+            .unwrap_or_else(|| panic!("no {what:?} in the calls:\n{calls}\nstderr:\n{stderr}"))
+    };
+    let helper = find("bootout AcmeAgent-update");
+    let service = find("bootout AcmeAgent\n");
+    let removed = find("rm ");
     assert!(helper < service && service < removed, "{calls}");
 
     // A service that won't unload: exit 1, nothing removed.
