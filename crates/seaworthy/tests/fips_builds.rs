@@ -205,7 +205,7 @@ fn the_known_modules_include_the_pinned_one() {
     let older = fips_module("0.14.2").unwrap();
     assert_eq!(older.module, "4.2.0");
     assert_eq!(older.symbol_prefix(), "aws_lc_fips_0_14_2_");
-    for unknown in ["0.13.0", "0.14.4", "0.14", "latest", ""] {
+    for unknown in ["0.13.0", "0.14.5", "0.14", "latest", ""] {
         assert!(fips_module(unknown).is_none(), "{unknown}");
     }
 }
@@ -222,7 +222,7 @@ fn the_fips_module_is_a_known_release_of_a_fips_build() {
         pinned.fips_symbol_prefix(),
         seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
     );
-    for unknown in ["0.13.0", "0.14.4", "4.2.0"] {
+    for unknown in ["0.13.0", "0.14.5", "4.2.0"] {
         let err = Config::parse(&profiles(false, &format!("fips-module = \"{unknown}\"")))
             .unwrap_err()
             .to_string();
@@ -230,7 +230,8 @@ fn the_fips_module_is_a_known_release_of_a_fips_build() {
             err.contains(&format!(
                 "defaults.fips-module \"{unknown}\" isn't an aws-lc-fips-sys release"
             )) && err.contains("0.14.2 builds AWS-LC FIPS 4.2.0")
-                && err.contains("0.14.3 builds AWS-LC FIPS 4.2.0"),
+                && err.contains("0.14.3 builds AWS-LC FIPS 4.2.0")
+                && err.contains("0.14.4 builds AWS-LC FIPS 4.2.0"),
             "{err}"
         );
     }
@@ -249,22 +250,22 @@ fn verify_follows_the_chosen_module() {
     let dir = tempfile::tempdir().unwrap();
     artifacts(&older, dir.path(), "aws_lc_fips_0_14_2_");
     assert_eq!(findings(&older, "fips", dir.path()), Vec::<String>::new());
-    // The same binaries against the default (the pinned 0.14.3).
+    // The same binaries against the default (the pinned 0.14.4).
     let pinned = Config::parse(&profiles(false, "")).unwrap();
     let found = findings(&pinned, "fips", dir.path());
     for needle in [
-        "no aws_lc_fips_0_14_3_* symbols",
-        "AWS-LC FIPS symbols of a version other than aws_lc_fips_0_14_3_",
-        "does not import aws_lc_fips_0_14_3_crypto.dll",
+        "no aws_lc_fips_0_14_4_* symbols",
+        "AWS-LC FIPS symbols of a version other than aws_lc_fips_0_14_4_",
+        "does not import aws_lc_fips_0_14_4_crypto.dll",
     ] {
         assert!(
             found.iter().any(|f| f.contains(needle)),
             "{needle}: {found:#?}"
         );
     }
-    // And 0.14.3's binaries against fips-module = "0.14.2".
+    // And 0.14.4's binaries against fips-module = "0.14.2".
     let dir = tempfile::tempdir().unwrap();
-    artifacts(&pinned, dir.path(), "aws_lc_fips_0_14_3_");
+    artifacts(&pinned, dir.path(), "aws_lc_fips_0_14_4_");
     assert_eq!(findings(&pinned, "fips", dir.path()), Vec::<String>::new());
     let found = findings(&older, "fips", dir.path());
     assert!(
@@ -311,5 +312,5 @@ fn fips_check_takes_the_module_release() {
     assert_eq!(pinned.status.code(), Some(1));
     let unknown = run(&["--module", "0.13.0"]);
     assert_eq!(unknown.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&unknown.stderr).contains("0.14.2, 0.14.3"));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("0.14.2, 0.14.3, 0.14.4"));
 }

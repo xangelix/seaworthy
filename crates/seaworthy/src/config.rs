@@ -186,9 +186,9 @@ pub struct Defaults {
 /// AWS-LC FIPS module release it builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FipsModule {
-    /// The `aws-lc-fips-sys` crate release (`0.14.3`): it prefixes every
-    /// module symbol (`aws_lc_fips_0_14_3_`) and names the module's
-    /// libraries off Linux (`aws_lc_fips_0_14_3_crypto.dll`).
+    /// The `aws-lc-fips-sys` crate release (`0.14.4`): it prefixes every
+    /// module symbol (`aws_lc_fips_0_14_4_`) and names the module's
+    /// libraries off Linux (`aws_lc_fips_0_14_4_crypto.dll`).
     pub sys: &'static str,
     /// The AWS-LC FIPS module release it builds (`4.2.0`).
     pub module: &'static str,
@@ -210,13 +210,17 @@ impl FipsModule {
 /// checks. Another release joins only when its module release and symbol
 /// prefix are confirmed the same way: add it here, with a test in
 /// `tests/fips_builds.rs`, and the module's status to `docs/fips.md`.
-pub const FIPS_MODULES: [FipsModule; 2] = [
+pub const FIPS_MODULES: [FipsModule; 3] = [
     FipsModule {
         sys: "0.14.2",
         module: "4.2.0",
     },
     FipsModule {
         sys: "0.14.3",
+        module: "4.2.0",
+    },
+    FipsModule {
+        sys: "0.14.4",
         module: "4.2.0",
     },
 ];
@@ -2452,7 +2456,7 @@ impl Config {
             .unwrap_or_else(pinned_fips_module)
     }
 
-    /// The module's symbol prefix (`aws_lc_fips_0_14_3_`), which the FIPS
+    /// The module's symbol prefix (`aws_lc_fips_0_14_4_`), which the FIPS
     /// checks require of every FIPS core and its module's libraries.
     #[must_use]
     pub fn fips_symbol_prefix(&self) -> String {

@@ -7,9 +7,12 @@ a FIPS release binary.
 
 `seaworthy-crypto/fips` links the **AWS-LC FIPS 4.2.0** module (CMVP: in process, Comment
 Resolution; its validated predecessor is AWS-LC 3, certificate #5314), built from source by
-`aws-lc-fips-sys` 0.14.3 behind `aws-lc-rs` 1.18.2. Both are pinned with `=` in the workspace
+`aws-lc-fips-sys` 0.14.4 behind `aws-lc-rs` 1.19.0. Both are pinned with `=` in the workspace
 manifest, and the linked module is asserted at runtime (`seaworthy_crypto::module`). Say
-"validated" only once a certificate names 4.2.0.
+"validated" only once a certificate names 4.2.0. 0.14.4 builds AWS-LC commit `b67630c7…`, the
+head of AWS's `fips-2025-09-12-lts` branch on 2026-10-23: the `v4.2.0` tag plus seven backports
+to libssl, X.509, the error tables and the build. `crypto/fipsmodule` and
+`third_party/jitterentropy` are byte for byte those of 0.14.2 and 0.14.3.
 
 The feature also enables `rustls/fips`. Feature unification carries it to every rustls AWS-LC
 provider in the graph, so TLS offers only FIPS-approved cipher suites and key-exchange groups
@@ -127,7 +130,7 @@ target/release/examples/fips_selfcheck --expect-fips
   then strip the shipped copy. `seaworthy layout` strips that way and checks that stripping
   changed nothing the loader maps, the module's code and data included; the Windows version stamp
   and signing are checked the same way
-  ([packaging.md](packaging.md#what-changes-after-the-build)). It requires the `aws_lc_fips_0_14_3_*` symbols with
+  ([packaging.md](packaging.md#what-changes-after-the-build)). It requires the `aws_lc_fips_0_14_4_*` symbols with
   `awslc_version_string` defined in text (the Security Policy's static-link check), and zero
   non-FIPS `aws_lc_<version>_*`, `ring_core_*` or other-version FIPS symbols. `--self-test`
   runs the script's own tests.
@@ -145,7 +148,7 @@ the module's dylib, and `seaworthy verify` runs its checks there). `seaworthy ve
 core of a FIPS product to its symbol table instead (`seaworthy::verify::fips_macos_core_findings`),
 one leading `_` off each Mach-O name:
 
-- it imports `aws_lc_fips_0_14_3_*` symbols and defines none, locally or not: a definition is a copy
+- it imports `aws_lc_fips_0_14_4_*` symbols and defines none, locally or not: a definition is a copy
   of the module that no sidecar ships;
 - it has no non-FIPS `aws_lc_<version>_*` symbols, `ring_core_*` symbols or other-version FIPS
   symbols, defined or imported, and no AWS-LC built without a prefix (`awslc_*`, `AWSLC_*`,
@@ -160,7 +163,7 @@ Build the cores with `strip = false`, as the build plan does (`seaworthy build-p
 
 ## A product's module release
 
-`seaworthy-crypto` pins `aws-lc-fips-sys` 0.14.3; a product's own cores may be built with another
+`seaworthy-crypto` pins `aws-lc-fips-sys` 0.14.4; a product's own cores may be built with another
 release of the same module. `seaworthy.toml`'s `[defaults] fips-module` names the release its FIPS
 products' cores carry, and `verify` (and `seaworthy fips-check --module`) then require that
 release's symbol prefix (`aws_lc_fips_<major>_<minor>_<patch>_`) and module libraries
@@ -170,7 +173,8 @@ release known to build a validated, or in-process, AWS-LC FIPS module is accepte
 | `fips-module` | AWS-LC FIPS module | Status |
 |---|---|---|
 | `0.14.2` | 4.2.0 | CMVP: in process, Comment Resolution |
-| `0.14.3` (the pin, the default) | 4.2.0 | CMVP: in process, Comment Resolution |
+| `0.14.3` | 4.2.0 | CMVP: in process, Comment Resolution |
+| `0.14.4` (the pin, the default) | 4.2.0 | CMVP: in process, Comment Resolution |
 
 Another release joins the table (`FIPS_MODULES` in `crates/seaworthy/src/config.rs`) once the
 module release it builds and its symbol prefix are confirmed: build a core with it, check it with
