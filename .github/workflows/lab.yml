@@ -67,8 +67,12 @@ jobs:
           prefix-key: v1-lab-launcher
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # An assignment first, so a failed install fails this step: bash -e
+      # ignores a command substitution's status inside echo's arguments.
       - name: qemu-user (pinned, SHA-256 verified)
-        run: echo "QEMU_X86_64=$(scripts/ci-qemu.sh)" >> "$GITHUB_ENV"
+        run: |
+          qemu="$(scripts/ci-qemu.sh)"
+          echo "QEMU_X86_64=$qemu" >> "$GITHUB_ENV"
       - name: scripts/launcher-e2e.sh selection
         env:
           SEAWORTHY_LAUNCHER_E2E_REQUIRED: "1"
