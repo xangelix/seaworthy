@@ -135,8 +135,14 @@ advisory) per [SECURITY.md](../SECURITY.md).
 
 The development toolchain is pinned to an exact stable release in `rust-toolchain.toml`. A new
 release brings new lints, rustdoc rules and codegen, so it is a reviewed change of its own.
-Dependabot proposes it weekly (the `rust-toolchain` ecosystem); a bump by hand follows the same
-steps.
+Dependabot checks for it weekly (the `rust-toolchain` ecosystem), so a pull request comes when a
+new stable ships; a bump by hand follows the same steps. Builds never float to `stable`: the same
+commit must build the same bytes.
+
+**The Toolchain canary** workflow runs clippy, the tests and the docs on the floating `stable` and
+`beta` toolchains every Monday, on Linux. It gates nothing: it only shows ahead of time what the
+next bump will report. When it goes red on `beta`, the next stable will need that fix; when it
+goes red on `stable`, the bump Dependabot proposes will too.
 
 1. Change `channel` in `rust-toolchain.toml`, and nothing else in that pull request except fixes
    for what the new toolchain reports.
@@ -146,8 +152,9 @@ steps.
 3. Leave `workspace.package.rust-version` alone unless the MSRV is raised on purpose (see
    above); raising it is a separate commit that says why.
 
-**The fuzz nightly** is pinned in `fuzz/rust-toolchain.toml` and bumped the same way
-(Dependabot proposes it). Check a new nightly with `scripts/fuzz.sh smoke` locally, or by running
+**The fuzz nightly** is pinned in `fuzz/rust-toolchain.toml`, so a fuzz crash reproduces on the
+nightly that found it. Dependabot proposes a newer one monthly (a new nightly ships every day)
+and it is bumped by hand. Check a new nightly with `scripts/fuzz.sh smoke` locally, or by running
 the Fuzz workflow manually on the branch.
 
 **GitHub Actions** are pinned to full commit SHAs with the version in a comment, and Dependabot
