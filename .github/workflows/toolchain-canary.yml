@@ -1,0 +1,109 @@
+# Toolchain canary: the workspace's clippy, tests and docs on the floating
+# `stable` and `beta` toolchains, weekly, so a new release's lints and
+# breakage show up before the pinned toolchain (rust-toolchain.toml) is
+# bumped, not on the day it is.
+#
+# It never gates anything: it runs only on its schedule or by hand, and is not
+# among CI's required checks, so a red canary blocks no pull request. A failed
+# scheduled run notifies by GitHub's usual workflow-failure notice. Builds stay
+# on the pinned toolchain (docs/releasing.md, "Toolchain bumps"); only this
+# canary floats.
+name: Toolchain canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: toolchain-canary
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash scripts/ci/logged.sh {0}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      crates: ${{ steps.plan.outputs.crates }}
+      features: ${{ steps.plan.outputs.features }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Describe the workspace
+        id: plan
+        run: scripts/ci/plan.sh | tee -a "$GITHUB_OUTPUT"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
+
+  canary:
+    name: Canary (${{ matrix.toolchain }})
+    needs: plan
+    if: needs.plan.outputs.crates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    # Linux only: a new toolchain's lints and rustdoc rules are the same on
+    # every OS, and CI's pinned jobs cover Windows and macOS.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # Every feature except the FIPS ones, as CI's clippy, test and docs jobs.
+      FEATURES: ${{ needs.plan.outputs.features }}
+      # The container suites run in CI's `containers` job; here they skip.
+      SEAWORTHY_TEST_CONTAINERS_REQUIRED: "0"
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The floating toolchain, set as the workspace's rustup override in place
+      # of rust-toolchain.toml's pin (with clippy, which the pin brings itself).
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      # No build cache: a floating toolchain changes under it, and a canary's
+      # artifacts are never reused.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked --features "$FEATURES" -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace --locked --no-fail-fast --features "$FEATURES"
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked --features "$FEATURES"
+      # The failure's output as annotations, readable without signing in
+      # (.github/actions/annotate-failure).
+      - name: Publish the failure's log tail
+        if: failure()
+        uses: ./.github/actions/annotate-failure
