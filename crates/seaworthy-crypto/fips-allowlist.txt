@@ -1,0 +1,34 @@
+# The AWS-LC FIPS allowlist: the aws-lc-fips-sys releases a FIPS build may
+# link, each with the AWS-LC FIPS module it builds and that module's branch,
+# and the aws-lc-rs releases that bind them.
+#
+# Libraries accept a version range of both crates; this list decides which
+# releases a FIPS build may actually link. Anything else is refused: by the
+# crypto crate's build script and its startup self-check, by the lockfile
+# check in CI (an application's locked releases must be listed here, and its
+# locked aws-lc-fips-sys must be the module it declares), and by the symbol
+# checks of release binaries.
+#
+# The same file, byte for byte, in three repositories:
+#   seaworthy  crates/seaworthy-crypto/fips-allowlist.txt  (the reference)
+#   carpc      crates/carpc_crypto/fips-allowlist.txt
+#   tg_spade   crates/spade-aws-lc-fips/fips-allowlist.txt
+# Change seaworthy's first. carpc's and tg_spade's lockfile checks compare
+# their copy with the one in the seaworthy commit they build with.
+#
+# A release joins only once it has been built and checked: a FIPS build with
+# it reports the module version and branch below in FIPS mode, its symbol
+# prefix passes the binary check, the build-environment knobs it reads are
+# reviewed, and the module's CMVP status is recorded.
+#
+# Format: one entry per line, fields separated by spaces, in ascending order;
+# a line starting with `#` is a comment.
+#   module     <aws-lc-fips-sys release>  <AWS-LC FIPS module>  <module branch>
+#   aws-lc-rs  <aws-lc-rs release>        <aws-lc-fips-sys series it binds>
+
+module 0.14.2 4.2.0 4
+module 0.14.3 4.2.0 4
+module 0.14.4 4.2.0 4
+
+aws-lc-rs 1.18.2 0.14
+aws-lc-rs 1.19.0 0.14

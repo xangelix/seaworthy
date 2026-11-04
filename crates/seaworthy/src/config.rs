@@ -143,8 +143,8 @@ pub struct Defaults {
     /// with (`"0.14.2"`): one of [`FIPS_MODULES`], each known to build a
     /// validated, or in-process, AWS-LC FIPS module. It names the module's
     /// symbol prefix and libraries the FIPS checks require
-    /// ([`Config::fips_symbol_prefix`]). Default: the release
-    /// `seaworthy-crypto` pins (`EXPECTED_FIPS_SYS_VERSION`).
+    /// ([`Config::fips_symbol_prefix`]). Default: the newest release on
+    /// `seaworthy-crypto`'s FIPS allowlist ([`default_fips_module`]).
     #[serde(default)]
     pub fips_module: Option<String>,
     /// The package maintainer (deb `Maintainer:`, rpm `Packager:`).
@@ -183,66 +183,35 @@ pub struct Defaults {
 }
 
 /// An `aws-lc-fips-sys` release `defaults.fips-module` may name, and the
-/// AWS-LC FIPS module release it builds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FipsModule {
-    /// The `aws-lc-fips-sys` crate release (`0.14.4`): it prefixes every
-    /// module symbol (`aws_lc_fips_0_14_4_`) and names the module's
-    /// libraries off Linux (`aws_lc_fips_0_14_4_crypto.dll`).
-    pub sys: &'static str,
-    /// The AWS-LC FIPS module release it builds (`4.2.0`).
-    pub module: &'static str,
-}
+/// AWS-LC FIPS module release it builds: an entry of `seaworthy-crypto`'s
+/// FIPS allowlist.
+pub use seaworthy_crypto::module::FipsModule;
 
-impl FipsModule {
-    /// The prefix the sys crate gives every module symbol, and the module's
-    /// libraries' names: `aws_lc_fips_<major>_<minor>_<patch>_`.
-    #[must_use]
-    pub fn symbol_prefix(&self) -> String {
-        format!("aws_lc_fips_{}_", self.sys.replace('.', "_"))
-    }
-}
+/// The `aws-lc-fips-sys` releases `defaults.fips-module` accepts:
+/// `seaworthy-crypto`'s FIPS allowlist (`fips-allowlist.txt`, the one
+/// source of truth, which the crypto crate also enforces at build time and
+/// at startup). Each builds an AWS-LC FIPS module that is validated or in
+/// the CMVP's process (AWS-LC FIPS 4.2.0: in process, its validated
+/// predecessor AWS-LC 3, certificate #5314), and was built and checked with
+/// seaworthy's FIPS checks. Another release joins only when its module
+/// release and symbol prefix are confirmed the same way: add it to the
+/// allowlist, and the module's status to `docs/fips.md`.
+pub const FIPS_MODULES: &[FipsModule] = seaworthy_crypto::module::FIPS_MODULES;
 
-/// The `aws-lc-fips-sys` releases `defaults.fips-module` accepts: each
-/// builds an AWS-LC FIPS module that is validated or in the CMVP's process
-/// (AWS-LC FIPS 4.2.0: in process, its validated predecessor AWS-LC 3,
-/// certificate #5314), and was built and checked with seaworthy's FIPS
-/// checks. Another release joins only when its module release and symbol
-/// prefix are confirmed the same way: add it here, with a test in
-/// `tests/fips_builds.rs`, and the module's status to `docs/fips.md`.
-pub const FIPS_MODULES: [FipsModule; 3] = [
-    FipsModule {
-        sys: "0.14.2",
-        module: "4.2.0",
-    },
-    FipsModule {
-        sys: "0.14.3",
-        module: "4.2.0",
-    },
-    FipsModule {
-        sys: "0.14.4",
-        module: "4.2.0",
-    },
-];
-
-/// The module release `seaworthy-crypto` pins: `defaults.fips-module`'s
-/// default.
+/// `defaults.fips-module`'s default: the newest release on the allowlist
+/// (its last entry: the list is ascending). A product that builds its cores
+/// with another allowlisted release names it; the lockfile check of a FIPS
+/// product holds its locked `aws-lc-fips-sys` to the release it names.
 #[must_use]
-pub fn pinned_fips_module() -> FipsModule {
-    FIPS_MODULES
-        .iter()
-        .copied()
-        .find(|m| m.sys == seaworthy_crypto::module::EXPECTED_FIPS_SYS_VERSION)
-        .unwrap_or(FipsModule {
-            sys: seaworthy_crypto::module::EXPECTED_FIPS_SYS_VERSION,
-            module: seaworthy_crypto::module::EXPECTED_FIPS_MODULE_VERSION,
-        })
+pub fn default_fips_module() -> FipsModule {
+    const { assert!(!FIPS_MODULES.is_empty(), "the allowlist names a module") };
+    FIPS_MODULES[FIPS_MODULES.len() - 1]
 }
 
 /// The release `version` names in [`FIPS_MODULES`], if any.
 #[must_use]
 pub fn fips_module(version: &str) -> Option<FipsModule> {
-    FIPS_MODULES.iter().copied().find(|m| m.sys == version)
+    seaworthy_crypto::module::fips_module(version)
 }
 
 fn default_macos_targets() -> Vec<String> {
@@ -2415,7 +2384,7 @@ impl Config {
         if let Some(version) = &d.fips_module {
             if fips_module(version).is_none() {
                 return Err(DistError::Config(format!(
-                    "defaults.fips-module {version:?} isn't an aws-lc-fips-sys release seaworthy knows to build a validated or in-process AWS-LC FIPS module ({})",
+                    "defaults.fips-module {version:?} isn't an aws-lc-fips-sys release on seaworthy's FIPS allowlist, each known to build a validated or in-process AWS-LC FIPS module ({})",
                     FIPS_MODULES
                         .iter()
                         .map(|m| format!("{} builds AWS-LC FIPS {}", m.sys, m.module))
@@ -2446,14 +2415,15 @@ impl Config {
     }
 
     /// The FIPS module the FIPS products' cores carry:
-    /// `defaults.fips-module`, else the release `seaworthy-crypto` pins.
+    /// `defaults.fips-module`, else the newest allowlisted release
+    /// ([`default_fips_module`]).
     #[must_use]
     pub fn fips_module(&self) -> FipsModule {
         self.defaults
             .fips_module
             .as_deref()
             .and_then(fips_module)
-            .unwrap_or_else(pinned_fips_module)
+            .unwrap_or_else(default_fips_module)
     }
 
     /// The module's symbol prefix (`aws_lc_fips_0_14_4_`), which the FIPS

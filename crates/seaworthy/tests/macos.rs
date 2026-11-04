@@ -1084,10 +1084,7 @@ fn off_a_mac_package_refuses_a_pkg_by_name() {
 /// path, and the module's own symbols meet the Linux checks.
 #[test]
 fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
-    let module = format!(
-        "lib{}crypto.dylib",
-        seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
-    );
+    let module = format!("lib{PREFIX}crypto.dylib");
     let fips = fips_desktop();
     let config_fips = config(&fips).unwrap();
     // The rules: fips with a macOS output needs the module's sidecar, and a
@@ -1227,7 +1224,18 @@ fn a_fips_product_ships_the_module_s_dylib_in_the_bundle() {
 // core's table shows the non-FIPS AWS-LC, which aws-lc-rs compiles into a
 // FIPS build too, stayed out of the link.
 
-const PREFIX: &str = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+/// The default module's symbol prefix (`defaults.fips-module` unset: the
+/// newest release on the FIPS allowlist), held to it by
+/// `the_test_prefix_is_the_default_module_s`.
+const PREFIX: &str = "aws_lc_fips_0_14_4_";
+
+#[test]
+fn the_test_prefix_is_the_default_module_s() {
+    assert_eq!(
+        PREFIX,
+        seaworthy::config::default_fips_module().symbol_prefix()
+    );
+}
 
 /// [`DESKTOP`] as a FIPS product, shipping the module's dylib.
 fn fips_desktop() -> String {

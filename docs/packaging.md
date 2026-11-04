@@ -127,7 +127,8 @@ wrong:
    module's library, and the sidecars ship it. A macOS core's symbol table shows the same from the
    other side: the module's symbols imported and none defined, no second AWS-LC, no other module
    version ([fips.md](fips.md#macos-cores)). The pinned module is `defaults.fips-module`'s release,
-   else `seaworthy-crypto`'s ([fips.md](fips.md#a-products-module-release)).
+   else the newest on `seaworthy-crypto`'s FIPS allowlist
+   ([fips.md](fips.md#a-products-module-release)).
 6. **Runtime dependencies.** Windows binaries link the C runtime statically. Linux binaries need
    only the base system's libraries plus those the product declares in `linux.needed`, and no glibc
    newer than the floor (`linux.glibc`, default 2.34): every entry of the version-needs table counts,

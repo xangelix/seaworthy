@@ -90,7 +90,8 @@ fn linux_core(cpu: &str) -> Elf {
 }
 
 fn windows_core(cpu: &str) -> Pe {
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     Pe {
         sections: vec![(".cpureq".into(), record(WINDOWS, cpu, V2))],
         imports: vec![format!("{prefix}crypto.dll"), "kernel32.dll".into()],
@@ -102,7 +103,8 @@ fn windows_core(cpu: &str) -> Pe {
 fn good_tree() -> Tree {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     let launcher = |triple: &str| (format!("{triple}/launcher"), cpulist("acme_core", &CPUS));
     let (l, list) = launcher(LINUX);
     write(
@@ -327,7 +329,8 @@ fn the_launchers_cpu_list_must_match_the_targets() {
 
 #[test]
 fn windows_sidecars_must_be_identical_and_unique() {
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     let tree = good_tree();
     let other = Pe {
         sections: vec![(".text".into(), b"a per-target build".to_vec())],
@@ -359,7 +362,8 @@ fn windows_sidecars_must_be_identical_and_unique() {
 
 #[test]
 fn linux_fips_cores_pass_the_symbol_checks() {
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     let cases: Vec<(&str, Vec<(String, bool)>)> = vec![
         ("no symbol table", Vec::new()),
         ("not linked", vec![("main".into(), true)]),
@@ -446,7 +450,8 @@ fn codegen_unit_file_symbols_are_not_module_symbols() {
 /// refused a correct release. Now the cores' imports decide.
 #[test]
 fn windows_fips_sidecars_ship_the_module_dlls_the_cores_import() {
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     // The 0.14 shape (the good tree): one DLL, imported, shipped.
     let tree = good_tree();
     assert!(
@@ -936,7 +941,8 @@ fn artifacts_must_be_regular_files() {
 fn the_version_symbol_must_be_a_real_text_definition() {
     // `nm` shows these as W, D and a double-underscore name: the script
     // refuses all three, and so must the port.
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     let version = format!("{prefix}awslc_version_string");
     let rand = (format!("{prefix}RAND_bytes"), true);
     for core in [

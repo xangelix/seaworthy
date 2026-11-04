@@ -148,7 +148,7 @@ fn a_products_fips_decides_its_checks() {
         artifacts(
             &config,
             dir.path(),
-            seaworthy_crypto::module::FIPS_SYMBOL_PREFIX,
+            &seaworthy::config::default_fips_module().symbol_prefix(),
         );
         for id in ["fips", "aws-lc", "portable"] {
             assert_eq!(
@@ -183,28 +183,25 @@ fn a_products_fips_decides_its_checks() {
     }
 }
 
-/// The module releases `defaults.fips-module` accepts: the pinned one is
-/// among them, its prefix the one `seaworthy-crypto` pins.
+/// The module releases `defaults.fips-module` accepts: seaworthy-crypto's
+/// FIPS allowlist, the default its newest entry.
 #[test]
-fn the_known_modules_include_the_pinned_one() {
-    use seaworthy::config::{FIPS_MODULES, fips_module, pinned_fips_module};
-    let pinned = pinned_fips_module();
-    assert!(FIPS_MODULES.contains(&pinned));
-    assert_eq!(
-        pinned.sys,
-        seaworthy_crypto::module::EXPECTED_FIPS_SYS_VERSION
-    );
-    assert_eq!(
-        pinned.module,
-        seaworthy_crypto::module::EXPECTED_FIPS_MODULE_VERSION
-    );
-    assert_eq!(
-        pinned.symbol_prefix(),
-        seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
-    );
-    let older = fips_module("0.14.2").unwrap();
-    assert_eq!(older.module, "4.2.0");
-    assert_eq!(older.symbol_prefix(), "aws_lc_fips_0_14_2_");
+fn the_known_modules_are_the_allowlist() {
+    use seaworthy::config::{FIPS_MODULES, default_fips_module, fips_module};
+    assert_eq!(FIPS_MODULES, seaworthy_crypto::module::FIPS_MODULES);
+    let default = default_fips_module();
+    assert_eq!(Some(&default), FIPS_MODULES.last());
+    assert_eq!(default.sys, "0.14.4");
+    assert_eq!(default.module, "4.2.0");
+    assert_eq!(default.symbol_prefix(), "aws_lc_fips_0_14_4_");
+    for sys in ["0.14.2", "0.14.3", "0.14.4"] {
+        let known = fips_module(sys).unwrap();
+        assert_eq!(known.module, "4.2.0");
+        assert_eq!(
+            known.symbol_prefix(),
+            format!("aws_lc_fips_{}_", sys.replace('.', "_"))
+        );
+    }
     for unknown in ["0.13.0", "0.14.5", "0.14", "latest", ""] {
         assert!(fips_module(unknown).is_none(), "{unknown}");
     }
@@ -220,7 +217,7 @@ fn the_fips_module_is_a_known_release_of_a_fips_build() {
     let pinned = Config::parse(&profiles(false, "")).unwrap();
     assert_eq!(
         pinned.fips_symbol_prefix(),
-        seaworthy_crypto::module::FIPS_SYMBOL_PREFIX
+        seaworthy::config::default_fips_module().symbol_prefix()
     );
     for unknown in ["0.13.0", "0.14.5", "4.2.0"] {
         let err = Config::parse(&profiles(false, &format!("fips-module = \"{unknown}\"")))

@@ -1045,7 +1045,8 @@ pub(crate) const LOADER: &str = "/lib64/ld-linux-x86-64.so.2";
 
 /// The FIPS module's symbols as a pinned static link leaves them.
 pub(crate) fn fips_symbols() -> Vec<(String, bool)> {
-    let prefix = seaworthy_crypto::module::FIPS_SYMBOL_PREFIX;
+    let prefix = seaworthy::config::default_fips_module().symbol_prefix();
+    let prefix = prefix.as_str();
     vec![
         (format!("{prefix}awslc_version_string"), true),
         (format!("{prefix}RAND_bytes"), true),

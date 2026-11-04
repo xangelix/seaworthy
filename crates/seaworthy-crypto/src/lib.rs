@@ -8,8 +8,10 @@
 //! **The module.** Under the `fips` feature every operation runs in the
 //! AWS-LC FIPS 4.2.0 module (CMVP: in process, Comment Resolution; its
 //! validated predecessor is AWS-LC 3, certificate #5314), built from source
-//! by `aws-lc-fips-sys` 0.14.4 behind `aws-lc-rs` 1.19.0, both pinned with
-//! `=` and asserted at runtime ([`module`]).
+//! by `aws-lc-fips-sys` behind `aws-lc-rs`. The manifest accepts a range of
+//! both; the FIPS allowlist (`fips-allowlist.txt`: `aws-lc-fips-sys` 0.14.2,
+//! 0.14.3 and 0.14.4, each building AWS-LC FIPS 4.2.0) decides which releases
+//! a FIPS build may link, at build time, at startup and in CI ([`module`]).
 //!
 //! FIPS status of the three signature schemes (sourced from the CMVP record,
 //! see [`fips_policy`]): the linked 4.2.0 module's service indicator
@@ -46,8 +48,10 @@
 //!   site.
 //! - **No silent non-FIPS builds.** The build script refuses a `fips` build
 //!   whose environment would swap in a pre-installed AWS-LC or alter the
-//!   module build (see `build/knobs.rs`), and [`module::ensure_expected_module`]
-//!   refuses, at runtime, anything but the pinned module.
+//!   module build (see `build/knobs.rs`) or link a module that is not on the
+//!   FIPS allowlist (`build/allowlist.rs`), and
+//!   [`module::ensure_expected_module`] refuses, at runtime, anything but an
+//!   allowlisted module.
 
 #![forbid(unsafe_code)]
 // The security baseline beyond the workspace lints: no panicking index or
@@ -78,7 +82,8 @@ pub enum CryptoError {
     #[error("system RNG failed")]
     Rng,
     /// A configuration refused at runtime, such as a FIPS build linking a
-    /// module other than the pinned one ([`module::ensure_expected_module`]).
+    /// module the FIPS allowlist does not accept
+    /// ([`module::ensure_expected_module`]).
     /// The message names what was found and what was expected, never a
     /// secret value.
     #[error("{0}")]
