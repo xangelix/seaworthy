@@ -1001,6 +1001,31 @@ fn images_it_cannot_edit_safely_are_refused() {
         "{}",
         stamp(&headers)
     );
+    // SizeOfHeaders short of the section table, on an image whose trailing
+    // resource section is rewritten in place (so no header room is needed):
+    // alone, the stamp's own check would compare no header byte; with the
+    // first section's data at file offset 0, that data is the headers the
+    // stamp rewrites (found by `dist_post_link`: the stamp's own check
+    // refused the result).
+    let stamped = stamp_version(
+        &core_dll(),
+        &Release::new("0.9.0", 1).unwrap(),
+        &info("a.dll", true),
+    )
+    .unwrap();
+    let optional = u32_at(&stamped, 0x3c) as usize + 24;
+    let first = optional + 240;
+    let mut short = stamped.clone();
+    short[optional + 60..optional + 64].copy_from_slice(&0u32.to_le_bytes());
+    let mut covering = short.clone();
+    covering[first + 20..first + 24].copy_from_slice(&0u32.to_le_bytes());
+    for image in [&short, &covering] {
+        assert!(
+            stamp(image).contains("SizeOfHeaders doesn't cover the section table"),
+            "{}",
+            stamp(image)
+        );
+    }
     // A COFF symbol table (an object file's leftovers; its data would sit
     // where the new section goes).
     let mut symbols = core_dll();
