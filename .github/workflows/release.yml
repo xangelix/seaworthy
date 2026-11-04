@@ -44,7 +44,7 @@ jobs:
       cli: ${{ steps.plan.outputs.cli }}
       version: ${{ steps.plan.outputs.version }}
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -106,7 +106,7 @@ jobs:
       contents: read
     steps:
       # sudo stays available here: the musl C toolchain comes from apt.
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         if: runner.os == 'Linux'
         with:
           egress-policy: audit
@@ -178,7 +178,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -213,7 +213,7 @@ jobs:
       id-token: write # a Sigstore signing certificate for this workflow run (OIDC)
       attestations: write # store the attestations in the repository
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -236,7 +236,7 @@ jobs:
     permissions:
       contents: write # create the draft release and upload its assets
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
           disable-sudo-and-containers: true

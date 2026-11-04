@@ -43,7 +43,7 @@ jobs:
       crates: ${{ steps.plan.outputs.crates }}
       features: ${{ steps.plan.outputs.features }}
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -79,7 +79,7 @@ jobs:
       # The container suites run in CI's `containers` job; here they skip.
       SEAWORTHY_TEST_CONTAINERS_REQUIRED: "0"
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
