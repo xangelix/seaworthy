@@ -32,10 +32,11 @@
 //!   already Authenticode-signed (stamping would break the signature), one
 //!   with data after its last section (a COFF symbol table, an overlay),
 //!   one whose data directories don't fit its optional header or reach
-//!   past its last section, one whose `SizeOfHeaders` reaches into a
-//!   section's data, one breaking the format's alignment rules or with
-//!   sections overlapping in memory or in the file, and one without room
-//!   for one more section header before its first section's data.
+//!   past its last section, one whose `SizeOfHeaders` doesn't cover its
+//!   section table or reaches into a section's data, one breaking the
+//!   format's alignment rules or with sections overlapping in memory or in
+//!   the file, and one without room for one more section header before its
+//!   first section's data.
 //!
 //! `FileVersion` is `major.minor.patch.sequence` (the sequence clamped to
 //! the 16 bits the field holds), `ProductVersion` the release as written
@@ -676,6 +677,14 @@ pub fn set_resource(
         .into_iter()
         .min()
         .unwrap_or(to_usize(l.size_of_headers)?);
+    // SizeOfHeaders covers the headers through the section table, as the
+    // format requires and every linker writes: the stamp rewrites fields
+    // there, and its own check compares only the SizeOfHeaders bytes. With
+    // a smaller one (0), the check below would let a section's data start
+    // inside the headers.
+    if to_usize(l.size_of_headers)? < table_end {
+        return Err(refused("SizeOfHeaders doesn't cover the section table"));
+    }
     // The headers end before any section's data (a linker sets
     // SizeOfHeaders to the first section's file offset or less).
     if to_usize(l.size_of_headers)? > first_data {
