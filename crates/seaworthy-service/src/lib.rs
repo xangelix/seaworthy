@@ -97,6 +97,10 @@ mod state;
 
 #[cfg(feature = "runtime")]
 pub mod backend;
+#[cfg(feature = "runtime")]
+pub mod boot_marker;
+#[cfg(feature = "runtime")]
+pub mod logs;
 pub mod render;
 #[cfg(feature = "runtime")]
 pub mod run;
