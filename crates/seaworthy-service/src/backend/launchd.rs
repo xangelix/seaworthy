@@ -201,6 +201,22 @@ impl ServiceBackend for LaunchdBackend {
         }
     }
 
+    fn request_restart(&self) -> Result<(), ServiceError> {
+        if self.print()?.is_none() {
+            return Err(ServiceError::DoesNotExist);
+        }
+        // `kickstart -k` kills this process: detached, so the caller's
+        // answer goes out first.
+        Command::new(&self.launchctl)
+            .args(["kickstart", "-k", &self.target()?])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(drop)
+            .map_err(ServiceError::from)
+    }
+
     fn status(&self) -> Result<Option<ServiceState>, ServiceError> {
         match self.print()? {
             Some(text) => Ok(Some(render::state(&text))),
@@ -326,6 +342,31 @@ esac
             ]
         );
         assert_eq!(f.backend.status().unwrap(), Some(ServiceState::Running));
+        fs::remove_dir_all(&f.dir).unwrap();
+    }
+
+    /// R05 — a running job asks launchd to restart it: `kickstart -k`,
+    /// detached; an unknown job is refused before launchctl acts.
+    #[test]
+    fn a_running_job_requests_its_own_restart() {
+        let f = fixture("self-restart");
+        assert!(matches!(
+            f.backend.request_restart(),
+            Err(ServiceError::DoesNotExist)
+        ));
+        packaged(&f);
+        f.backend.request_restart().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !calls(&f.dir).contains(&"kickstart -k system/com.acme.agent".to_owned())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            calls(&f.dir).contains(&"kickstart -k system/com.acme.agent".to_owned()),
+            "{:?}",
+            calls(&f.dir)
+        );
         fs::remove_dir_all(&f.dir).unwrap();
     }
 
