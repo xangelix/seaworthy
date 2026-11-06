@@ -477,6 +477,34 @@ impl Product {
             .join("update-logs")
     }
 
+    /// The Linux service's log directory, `/var/lib/<state-directory>/logs`:
+    /// the counterpart of Windows' `<data directory>\logs`, inside the
+    /// state directory systemd's `StateDirectory=` keeps the service's
+    /// alone. `None` without a service or state directory.
+    #[must_use]
+    pub fn linux_log_directory(&self) -> Option<PathBuf> {
+        let state = self.service.as_ref()?.state_directory.as_ref()?;
+        Some(PathBuf::from("/var/lib").join(state).join("logs"))
+    }
+
+    /// The service's log directory on THIS platform: Windows'
+    /// [`windows_log_directory`](Self::windows_log_directory) under
+    /// `program_data` (`%ProgramData%`; ignored elsewhere), macOS's
+    /// [`macos_log_directory`](Self::macos_log_directory), Linux's
+    /// [`linux_log_directory`](Self::linux_log_directory). What a GUI or a
+    /// support tool reads the service's log from (a reader that may: the
+    /// directories are the service's and the administrators').
+    #[must_use]
+    pub fn service_log_directory(&self, program_data: &Path) -> Option<PathBuf> {
+        if cfg!(windows) {
+            Some(self.windows_log_directory(program_data))
+        } else if cfg!(target_os = "macos") {
+            Some(self.macos_log_directory())
+        } else {
+            self.linux_log_directory()
+        }
+    }
+
     /// The Windows helper's staging directory, `<data directory>\updates`:
     /// SYSTEM and Administrators only.
     #[must_use]
@@ -630,6 +658,20 @@ windows-directory = "Desk"
             text(agent.macos_log_directory()),
             "/Library/Logs/Acme/Agent"
         );
+        assert_eq!(
+            agent.linux_log_directory(),
+            Some(PathBuf::from("/var/lib/acme/agent/logs"))
+        );
+        let here = agent.service_log_directory(Path::new(r"C:\ProgramData"));
+        if cfg!(windows) {
+            assert_eq!(here, Some(PathBuf::from(r"C:\ProgramData\Acme\Agent\logs")));
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(here.map(text).as_deref(), Some("/Library/Logs/Acme/Agent"));
+        } else {
+            assert_eq!(here, agent.linux_log_directory());
+        }
+        let console = Product::from_config(CONFIG, "console").unwrap();
+        assert_eq!(console.linux_log_directory(), None, "no service");
         assert_eq!(
             text(agent.macos_staging_directory()),
             "/Library/Application Support/Acme/Agent/updates"

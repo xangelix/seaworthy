@@ -174,6 +174,10 @@ impl ServiceBackend for SystemdBackend {
         }
     }
 
+    fn request_restart(&self) -> Result<(), ServiceError> {
+        self.run_systemctl(&["--no-block", "restart", &self.unit_file_name()?])
+    }
+
     fn status(&self) -> Result<Option<ServiceState>, ServiceError> {
         let output = self
             .systemctl()
@@ -349,7 +353,14 @@ mod tests {
             Some(ServiceState::Running)
         );
         backend.start().expect("start");
+        backend.request_restart().expect("restart requested");
         let calls = fs::read_to_string(&log).expect("log");
+        assert!(
+            calls
+                .lines()
+                .any(|l| l == "--user --no-block restart acme-stub.service"),
+            "{calls}"
+        );
         assert!(
             calls.lines().any(|l| l == "--user start acme-stub.service"),
             "{calls}"

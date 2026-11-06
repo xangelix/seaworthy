@@ -136,6 +136,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "updater_status"
+path = "fuzz_targets/updater_status.rs"
+test = false
+doc = false
+bench = false
+
 # The fuzzed crates, as path dependencies. A crate that reaches private
 # parsers exposes them behind its own `fuzzing` feature (off by default, no
 # extra dependencies); enable it here, e.g.:

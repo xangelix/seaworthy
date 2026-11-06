@@ -1263,7 +1263,12 @@ async fn a_previous_runs_leftovers_are_swept_under_the_lock() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     left.sort();
-    assert_eq!(left, [".lock", "failure-memo", "last-run"]);
+    assert_eq!(left, [".lock", "failure-memo", "last-run", "update-status"]);
+    // The app reads where the run ended (the status record survives the
+    // sweep).
+    let status = crate::status::read_status(staging.path()).unwrap().unwrap();
+    assert_eq!(status.stage, crate::status::UpdateStage::UpToDate);
+    assert_eq!(status.version.as_deref(), Some("1.1.0"));
 }
 
 #[tokio::test]

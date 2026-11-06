@@ -56,7 +56,7 @@
 //!
 //! | Feature | Adds |
 //! |---|---|
-//! | (none) | the request API, the policy readers, [`process`], [`openpgp`] |
+//! | (none) | the request API, the policy readers, the helper's [`status`] record, [`process`], [`openpgp`] |
 //! | `installers` | `installer`: apt, dnf, pacman, macOS's installer, msiexec |
 //! | `helper` | `helper` and its download path, staging, failure memo (implies `installers`) |
 //! | `relaunch` | `relaunch` (implies `installers`) |
@@ -86,6 +86,7 @@ pub mod relaunch;
 mod request;
 #[cfg(feature = "helper")]
 mod staging;
+pub mod status;
 
 pub use policy::{
     AdminServer, PolicyDecision, PolicyFile, PolicySource, dpkg_holds, is_machine_server,
@@ -93,6 +94,10 @@ pub use policy::{
 };
 pub use request::{
     DEFAULT_REQUEST_INTERVAL, RequestError, RequestOutcome, UpdateRequester, request_update,
+};
+pub use status::{
+    MAX_STATUS_BYTES, StatusError, UPDATE_STATUS_FILE, UPDATE_STATUS_TAG, UpdateStage,
+    UpdateStatus, read_status, write_status,
 };
 // The contract, re-exported so a caller can use one crate.
 pub use seaworthy_formats::{

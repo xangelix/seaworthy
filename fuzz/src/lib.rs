@@ -54,6 +54,7 @@ targets![
     s3_xml,
     service_unit,
     updater_manifest,
+    updater_status,
 ];
 
 /// Drive a future to completion on the current thread. Fuzzed futures

@@ -62,6 +62,39 @@ pub trait ServiceBackend {
     fn stop(&self) -> Result<(), ServiceError>;
     /// Current state, or `None` when the service is not installed.
     fn status(&self) -> Result<Option<ServiceState>, ServiceError>;
+
+    /// Restart the service from another process (an administrator's tool,
+    /// a GUI acting for an authorized user): [`stop`](Self::stop), then
+    /// [`start`](Self::start), each waiting for its state. A stopped service
+    /// is just started.
+    ///
+    /// # Errors
+    /// The first failing step's [`ServiceError`].
+    fn restart(&self) -> Result<(), ServiceError> {
+        if self.status()?.is_none() {
+            return Err(ServiceError::DoesNotExist);
+        }
+        self.stop()?;
+        self.start()
+    }
+
+    /// The running service asks its own manager to restart it, without
+    /// waiting: the request returns before the manager stops this process
+    /// (`systemctl --no-block restart`; `launchctl kickstart -k`, detached).
+    /// Where the manager has no such request (the Windows Service Control
+    /// Manager: a service can't wait for its own stop), this answers
+    /// [`ServiceError::Platform`] and the caller exits non-zero instead, so
+    /// the service's recovery actions start it again.
+    ///
+    /// # Errors
+    /// [`ServiceError`].
+    fn request_restart(&self) -> Result<(), ServiceError> {
+        Err(ServiceError::Platform(
+            "this service manager has no self-restart request; exit non-zero and let its \
+             recovery actions restart the service"
+                .to_owned(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
