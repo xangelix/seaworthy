@@ -39,7 +39,14 @@ unsound = "all"
 # An ignore that no longer matches anything fails, so exceptions cannot
 # outlive their reason. Each entry needs `reason` (and preferably `expiry`).
 unused-ignored-advisory = "deny"
-ignore = []
+ignore = [
+  # astral-tokio-tar is unmaintained (no vulnerability). It reaches only the test
+  # suites, through testcontainers 0.28.0 (the latest release) in
+  # seaworthy-test-support; nothing it touches ships. Drop this when
+  # testcontainers moves off it (unused-ignored-advisory then fails) or by
+  # 2027-02-01, whichever comes first.
+  { id = "RUSTSEC-2026-0440", reason = "unmaintained, dev-only via testcontainers 0.28.0 (seaworthy-test-support); review by 2027-02-01" },
+]
 
 # ---------------------------------------------------------------------------
 # Licenses
