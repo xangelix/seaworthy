@@ -143,8 +143,37 @@ refused, not guessed at), and every package format orders this grammar the same 
 
 Files are created exclusively (0600, never through a symlink), hashed through their own open
 descriptor, and renamed to the name the installer needs. Between runs the directory holds
-`.lock`, `failure-memo` (`seaworthy-update-memo:1`, written atomically) and `last-run`, plus
-msiexec's last log on Windows.
+`.lock`, `failure-memo` (`seaworthy-update-memo:1`, written atomically), `last-run` and
+`update-status` ([The status record](#the-status-record)), plus msiexec's last log on Windows.
+
+### The status record
+
+So that an application can say what the helper is doing ("installing 2.4.0") instead of
+nothing, the helper writes one small record at each stage of a run into its staging
+directory, `update-status` (`seaworthy_updater::status`):
+
+| Stage | When |
+|---|---|
+| `checking` | the run passed its policy check, its lock and its throttle |
+| `downloading`, `verifying`, `installing` | before the download, the checks and the installer |
+| `installed`, `handed-off`, `up-to-date`, `failed` | how the run ended (`failed` with the error's words) |
+
+- **Format:** `seaworthy-update-status:1`, five lines of text: the tag, then `stage <stage>`,
+  `version <version or ->`, `at <milliseconds since the Unix epoch>`, `detail <text>`. The
+  version passes the same gate as a version token; the detail has its control characters
+  removed and is cut to 512 bytes, so it can't add a line.
+- **Written by** the helper (root, LocalSystem) only, through a new file beside the record
+  (created exclusively; 0600 on Unix) renamed over it: a reader never sees half a record. A
+  record is best effort: failing to write one never stops an update.
+- **Read by** the application's privileged side (its service, as root or LocalSystem: the
+  staging directory is private) with `read_status(staging)`: `None` when the helper never
+  wrote one. The reader refuses a link or anything but a regular file in its place, reads at
+  most 2 KiB, and refuses another tag (a newer `seaworthy-update-status:2` included), an
+  unknown, repeated or missing line, and a bad value: the caller then shows nothing.
+- **What it may decide:** nothing. It is a display. Nothing installs, skips or retries
+  because of it, and a record is as old as its `at` says: a reader judges staleness from it
+  (a helper that died mid-run leaves its last stage). A fuzz target (`updater_status`) holds
+  the parser to a round trip.
 
 The helper's own log (Windows: no stderr under the Service Control Manager) is
 `%ProgramData%\<Vendor>\<Directory>\update-logs\<stem>.log` (`helper::log_file`): a directory of

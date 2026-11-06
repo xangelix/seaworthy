@@ -14,8 +14,10 @@ starts, stops and queries the installed service, and runs the service's own main
 | `render::systemd` | always | Service unit, update helper units and polkit rule, `sysusers.d` entry |
 | `render::windows` | always | MSI service record, failure actions, account and SID, SDDLs |
 | `render::launchd` | always | LaunchDaemon plists, the `launchctl print` state mapping |
-| `backend` | `runtime` | start / stop / status through the SCM, `systemctl`, `launchctl` |
+| `backend` | `runtime` | start / stop / status / restart through the SCM, `systemctl`, `launchctl` |
 | `run` | `runtime` | `run_service`, the Unix signal loop, the Windows SCM dispatcher |
+| `boot_marker` | `runtime` | The boot marker (`seaworthy-boot-marker:1`): a start that died without a word |
+| `logs` | `runtime` | `current_log_file`: the file a daily rotating log writes now |
 
 The pure half has no OS-specific dependency and no tokio, so one Linux build host renders
 every platform's files.
@@ -212,6 +214,59 @@ The `runtime` feature adds the backends and the run loop. It builds on Unix and 
 Every backend validates the name before it asks the service manager anything, and polls at a
 configurable interval (default 1 s) up to a timeout (default 30 s).
 
+Two restart calls sit beside them:
+
+- `restart()` (a provided method) stops, then starts, the service, each waiting for its state;
+  a stopped service is just started, one that isn't installed is `ServiceError::DoesNotExist`.
+  It is for another process: an administrator's tool, or a GUI acting for a user the caller
+  has already authorized. The service manager decides whether the caller may (a non-root
+  `systemctl restart` is refused unless polkit allows it).
+- `request_restart()` is for the running service itself, which can't wait for its own stop:
+  `SystemdBackend` runs `systemctl --no-block restart <unit>` (the job is queued and the call
+  returns before this process is stopped); `LaunchdBackend` spawns `launchctl kickstart -k
+  system/<label>` detached, so the caller's answer goes out before launchd kills it, and
+  refuses a job launchd doesn't know. The Windows SCM has no such request: the default answers
+  `ServiceError::Platform`, and the service exits non-zero for its failure actions to start it
+  again. Both restart only the backend's own, validated unit, with the same absolute tool path
+  as its other verbs; neither takes any other input. Like `start` and `stop`, they are meant
+  to run behind the caller's own authorization: seaworthy doesn't decide who may restart a
+  service.
+
+### Boot markers
+
+`boot_marker::BootMarker` records a start that died in a step that leaves nothing else behind:
+a cryptographic module's power-on self-test that aborts, a library that calls `abort()`. The
+service arms it before the step (`arm`) and disarms it after (`ArmedBootMarker::disarm`); a GUI
+or a health check calls `stale_since(now, grace)` while the service isn't running, and a marker
+armed at least `grace` ago means the step never returned. A failure the service can report
+itself is the service's to record; it disarms the marker either way. Dropping an armed marker
+without disarming it leaves it standing on purpose (an unwinding panic in the step is a failed
+start too).
+
+- **Format:** `seaworthy-boot-marker:1`. The file's first line is the tag and the second the
+  process id, for people reading the directory. No reader parses the content: only the file's
+  existence, its type (a regular file; anything else reads as no marker) and its modification
+  time count. A later format that changes the meaning gets a new file name, so an older reader
+  never reads it as this one.
+- **Where:** a path the caller chooses, in a directory only the service may write (a planted
+  marker would only make a reader report a failed start).
+- **Writes:** an earlier marker (or anything else at the path: a link is removed, never
+  followed) is removed first, then the file is created with `O_CREAT | O_EXCL`, mode 0644 on
+  Unix, so a link that appears meanwhile is never followed. Readers need no privilege.
+
+### Logs
+
+A service's daily rotating log (`<prefix>.2026-11-06.log`, the next day's file from midnight)
+leaves a reader that opened yesterday's file reading a file nothing writes any more.
+`logs::current_log_file(dir, prefix)` names the newest regular file whose name starts with
+`prefix` (by modification time, then by name); links and directories are never returned. A
+reader asks again from time to time and reopens when the answer changes. The directory is
+`seaworthy_formats::Product::service_log_directory(program_data)`: Windows'
+`%ProgramData%\<Vendor>\<Directory>\logs`, macOS's `/Library/Logs/<Vendor>/<Directory>`, and on
+Linux `Product::linux_log_directory()`, `/var/lib/<state-directory>/logs` (inside the state
+directory systemd's `StateDirectory=` keeps the service's alone; `None` without a service or a
+state directory).
+
 ### The run loop
 
 `run_service(name, init, body)` runs `init` (typically the first server contact, retried until
@@ -274,7 +329,8 @@ so the package lays every DLL beside the program.
 
 - Unit tests on every platform cover every renderer (golden units and plists), every
   validation rule, the SCM state machine's exit paths (platform-neutral, so Linux runs them),
-  the systemd and launchd backends against stub tools, and, where present,
+  the systemd and launchd backends against stub tools (the restart requests included), the
+  boot marker and `current_log_file`, and, where present,
   `systemd-analyze security` and `verify` on the rendered sandboxed unit and node on the polkit
   rule (`SEAWORTHY_REQUIRE_NODE=1` makes node mandatory).
 - `fuzz/` target `service_unit` renders arbitrary specs and checks the unit, the update units
