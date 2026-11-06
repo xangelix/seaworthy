@@ -470,9 +470,12 @@ jobs:
         if: needs.plan.outputs.crates == 'true'
         run: cargo deny --locked check
       # The fuzz crate is never distributed: its licenses are not checked,
-      # but advisories, bans and sources are.
+      # but advisories, bans and sources are. deny.toml's advisory exceptions
+      # are the workspace's, and the fuzz graph need not contain the crate an
+      # exception names, so an exception it doesn't encounter is allowed here;
+      # the workspace step above keeps an unused exception an error.
       - name: cargo deny (fuzz)
-        run: cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check advisories bans sources
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check --allow advisory-not-detected advisories bans sources
       # The failure's output as annotations, readable without signing in
       # (.github/actions/annotate-failure).
       - name: Publish the failure's log tail
