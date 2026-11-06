@@ -118,6 +118,7 @@ use crate::openpgp::{self, OpenPgpKeys};
 use crate::policy::{PolicyDecision, read_policy};
 use crate::release::Release;
 use crate::staging::{Expected, StagedFile, TargetLock};
+use crate::status::UpdateStage;
 use crate::{ArtifactFormat, ManifestTrust, Product, ReleaseTrust, UpdateError};
 
 /// How long the server probe may take.
@@ -144,11 +145,12 @@ pub const MIN_RUN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The files a run keeps in the staging directory; everything else is a
 /// previous run's leftover and is removed at the start of the next.
-const STAGING_KEEPS: [&str; 4] = [
+const STAGING_KEEPS: [&str; 5] = [
     ".lock",
     "failure-memo",
     "last-run",
     crate::installer::MSIEXEC_LOG,
+    crate::status::UPDATE_STATUS_FILE,
 ];
 
 type ProbeFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
@@ -640,6 +642,7 @@ pub async fn run(config: &HelperConfig) -> Result<HelperOutcome, HelperError> {
     })?;
     sweep_staging(&staging);
     throttle(&staging, config.min_run_interval)?;
+    report(&staging, UpdateStage::Checking, None, "");
     let package = config.product.package();
     let installer = match &config.installer {
         Some(installer) => Arc::clone(installer),
@@ -676,7 +679,49 @@ pub async fn run(config: &HelperConfig) -> Result<HelperOutcome, HelperError> {
     if matches!(result, Ok(HelperOutcome::Installed { .. })) {
         memo.clear();
     }
+    match &result {
+        Ok(HelperOutcome::Installed { to, .. }) => {
+            report(
+                &staging,
+                UpdateStage::Installed,
+                Some(&to.version.to_string()),
+                "",
+            );
+        }
+        Ok(HelperOutcome::HandedOff { to, .. }) => {
+            report(
+                &staging,
+                UpdateStage::HandedOff,
+                Some(&to.version.to_string()),
+                "",
+            );
+        }
+        Ok(HelperOutcome::UpToDate { installed }) => {
+            report(
+                &staging,
+                UpdateStage::UpToDate,
+                Some(&installed.version.to_string()),
+                "",
+            );
+        }
+        Ok(HelperOutcome::PolicyNotAuto(_)) => {}
+        Err(error) => report(
+            &staging,
+            UpdateStage::Failed,
+            Some(&token),
+            &error.to_string(),
+        ),
+    }
     result
+}
+
+/// Tell the app where the run stands ([`crate::status`]): best effort, a
+/// failure is only logged (the update itself never depends on it).
+fn report(staging: &Path, stage: UpdateStage, version: Option<&str>, detail: &str) {
+    let status = crate::status::UpdateStatus::now(stage, version, detail);
+    if let Err(e) = crate::status::write_status(staging, &status) {
+        tracing::warn!("couldn't record the update's status: {e}");
+    }
 }
 
 /// Removes a previous run's leftovers (a download, a signature, a scratch
@@ -1126,9 +1171,21 @@ async fn update(
             .try_clone()
             .map_err(UpdateError::Io)?,
     );
+    report(
+        staging,
+        UpdateStage::Downloading,
+        Some(&offered.version.to_string()),
+        "",
+    );
     tracing::info!("downloading {package} {offered}");
     net::download_to(&url, &mut file, &config.limits, Some(manifest.size)).await?;
     drop(file);
+    report(
+        staging,
+        UpdateStage::Verifying,
+        Some(&offered.version.to_string()),
+        "",
+    );
     let expected = Expected {
         algorithm: manifest.digest_algorithm,
         hex: hex::encode(&manifest.digest),
@@ -1203,6 +1260,12 @@ async fn update(
             now: now.map_or_else(|| "not installed".to_owned(), |r| r.to_string()),
         });
     }
+    report(
+        staging,
+        UpdateStage::Installing,
+        Some(&offered.version.to_string()),
+        "",
+    );
     let install_installer = Arc::clone(&installer);
     let (install_package, install_file, install_release, install_replaces) = (
         package.clone(),
