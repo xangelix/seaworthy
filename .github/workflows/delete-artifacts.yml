@@ -29,6 +29,10 @@ on:
         type: string
         default: ubuntu-24.04
 
+# No default grant: the one job declares the one permission it needs (a
+# called workflow's job is still capped by the calling job's grant).
+permissions: {}
+
 jobs:
   delete:
     name: Delete the run's artifacts

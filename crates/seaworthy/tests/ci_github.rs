@@ -216,8 +216,8 @@ fn the_reusable_workflow_follows_the_actions_baseline() {
     );
 }
 
-/// delete-artifacts.yml: a reusable workflow alone, its one job capped at
-/// `actions: write`, held to dist.yml's baseline (harden-runner first,
+/// delete-artifacts.yml: a reusable workflow alone, with no default grant
+/// and its one job capped at `actions: write`, held to dist.yml's baseline (harden-runner first,
 /// every action pinned, no credentials kept, no expression in a script) and
 /// running `github.sh delete-artifacts` from seaworthy's checkout at the
 /// workflow's own commit. The self-test calls it as a caller does, after
@@ -240,7 +240,12 @@ fn the_artifact_deletion_workflow_follows_the_actions_baseline() {
         defaults,
         [("pattern", "*"), ("linux-runner", "ubuntu-24.04")]
     );
-    assert!(key(&workflow, "permissions").is_badvalue());
+    assert!(
+        key(&workflow, "permissions")
+            .as_hash()
+            .is_some_and(|grant| grant.is_empty()),
+        "no default grant (permissions: {{}})"
+    );
     assert_eq!(key(&workflow, "jobs").as_hash().unwrap().len(), 1);
     let job = &workflow["jobs"]["delete"];
     assert!(job["timeout-minutes"].as_i64().is_some());

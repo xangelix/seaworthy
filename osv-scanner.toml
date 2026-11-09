@@ -1,0 +1,11 @@
+# OSV-Scanner's exceptions for the workspace's Cargo.lock, which OpenSSF
+# Scorecard's Vulnerabilities check (.github/workflows/scorecard.yml) honours.
+# The same advisories, for the same reasons, as deny.toml's [advisories]
+# ignore list: cargo-deny is the gate, this file only keeps Scorecard from
+# reporting what deny.toml already accepts. scripts/check-advisory-ignores.sh
+# holds the two lists to the same IDs; every entry here also expires.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0440"
+ignoreUntil = 2027-02-01T00:00:00Z
+reason = "astral-tokio-tar is unmaintained (no vulnerability); dev-only via testcontainers 0.28.0 (seaworthy-test-support), nothing it touches ships; review by 2027-02-01"

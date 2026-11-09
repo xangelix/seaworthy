@@ -38,6 +38,8 @@ unmaintained = "all"
 unsound = "all"
 # An ignore that no longer matches anything fails, so exceptions cannot
 # outlive their reason. Each entry needs `reason` (and preferably `expiry`).
+# osv-scanner.toml repeats this list for OpenSSF Scorecard
+# (scripts/check-advisory-ignores.sh holds the two to the same IDs).
 unused-ignored-advisory = "deny"
 ignore = [
   # astral-tokio-tar is unmaintained (no vulnerability). It reaches only the test
