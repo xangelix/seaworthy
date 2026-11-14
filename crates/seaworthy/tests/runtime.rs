@@ -302,15 +302,16 @@ fn a_runtime_holds_exactly_its_pinned_bytes() {
     write(&fx.runtime(WINDOWS), "resources.pak", b"PAK other");
     fx.expect(&["resources.pak", "SHA-256", "engine-1.0-win64"]);
     // A link (never followed) and no directory at all.
-    let fx = fixture();
     #[cfg(unix)]
     {
+        let fx = fixture();
         std::os::unix::fs::symlink("/etc/passwd", fx.runtime(LINUX).join("passwd")).unwrap();
         fx.expect(&["passwd", "a link or a special file"]);
     }
     let fx = fixture();
     std::fs::remove_dir_all(fx.runtime(WINDOWS)).unwrap();
-    fx.expect(&["runtime/engine", "the runtime's directory"]);
+    let dir = Path::new("runtime").join("engine");
+    fx.expect(&[&dir.to_string_lossy(), "the runtime's directory"]);
 }
 
 #[test]

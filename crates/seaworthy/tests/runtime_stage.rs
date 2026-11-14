@@ -215,11 +215,12 @@ fn the_first_root_holding_a_path_wins() {
     // it isn't the pinned one, so the stage is refused rather than falling
     // through to the second root's matching copy.
     fx.write("dist/Release/resources.pak", b"PAK other");
+    let release_pak = Path::new("Release").join("resources.pak");
     let found = fx.refusals(LINUX, false);
     assert!(
         found
             .iter()
-            .any(|f| f.contains("Release/resources.pak") && f.contains("pins")),
+            .any(|f| f.contains(&*release_pak.to_string_lossy()) && f.contains("pins")),
         "{found:#?}"
     );
     assert!(!fx.runtime(LINUX).exists(), "nothing staged");
@@ -362,12 +363,11 @@ fn beside_the_cores_on_windows_and_never_over_a_different_file() {
     let fx = fixture();
     // No core build directory yet: --beside-cores runs after the build.
     let found = fx.refusals(WINDOWS, true);
-    assert!(
-        found
-            .iter()
-            .any(|f| f.contains("cores/x86-64-v3: no core build directory")),
-        "{found:#?}"
+    let v3 = format!(
+        "{}: no core build directory",
+        Path::new("cores").join("x86-64-v3").display()
     );
+    assert!(found.iter().any(|f| f.contains(&v3)), "{found:#?}");
     for cpu in ["x86-64-v3", "x86-64-v2"] {
         fx.write(
             &format!("artifacts/{WINDOWS}/cores/{cpu}/acme_viewer_core.dll"),

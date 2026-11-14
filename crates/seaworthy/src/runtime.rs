@@ -416,13 +416,6 @@ fn copy_hashed(from: &Path, to: &Path, cap: u64) -> Result<(String, u64), String
             cap / (1024 * 1024)
         ));
     }
-    #[cfg(unix)]
-    let executable = {
-        use std::os::unix::fs::PermissionsExt as _;
-        meta.permissions().mode() & 0o100 != 0
-    };
-    #[cfg(not(unix))]
-    let executable = false;
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -430,7 +423,8 @@ fn copy_hashed(from: &Path, to: &Path, cap: u64) -> Result<(String, u64), String
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let executable = meta.permissions().mode() & 0o100 != 0;
         options.mode(if executable { 0o755 } else { 0o644 });
     }
     let mut out = options
