@@ -77,7 +77,9 @@ a start-limit budget that only a reboot or a hand-run `reset-failed` clears.
 
 A freshly installed release that crashes at start is restarted forever at the capped delay. It
 stays down on that release until a fix-forward release reaches it; there is no mark-good
-sentinel or automatic rollback.
+sentinel or automatic rollback for a service. A desktop product can opt into one:
+first-paint probation ([updates.md](updates.md#first-paint-probation)) reverts a release whose
+app never paints to exactly the release before it.
 
 ## What render produces
 
