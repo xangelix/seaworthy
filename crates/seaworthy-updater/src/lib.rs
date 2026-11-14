@@ -89,8 +89,9 @@ mod staging;
 pub mod status;
 
 pub use policy::{
-    AdminServer, PolicyDecision, PolicyFile, PolicySource, dpkg_holds, is_machine_server,
-    parse_policy_file, parse_policy_settings, read_admin_server, read_policy, versionlock_holds,
+    AdminServer, PolicyDecision, PolicyFile, PolicySource, ProbationSwitch, dpkg_holds,
+    is_machine_server, parse_policy_file, parse_policy_settings, read_admin_server, read_policy,
+    read_probation_switch, versionlock_holds,
 };
 pub use request::{
     DEFAULT_REQUEST_INTERVAL, RequestError, RequestOutcome, UpdateRequester, request_update,
