@@ -169,6 +169,7 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `updates.default` | no | The install-time update policy: `auto` (the default), `notify` or `off`. |
 | `sidecars.windows` | no | File-name globs (`*` only) matched in each Windows core build: each matches exactly one file, identical in every build, shipped beside the cores (the FIPS module's DLL). |
 | `sidecars.macos` | with `fips` (the product's) and a macOS output | The same for macOS (`libaws_lc_fips_*_crypto.dylib`), shipped in `Contents/Frameworks`. |
+| `runtime` | no | `[[product.<id>.runtime]]`: bundled runtimes, third-party native code and its data pinned file by file ([below](#productidruntime)). |
 
 `[[product.<id>.programs]]`: a product of several programs (a command-line tool and an app, say),
 in place of `executable`, `core`, `launcher`, `launcher-bin`, `aliases` and `linux.command`, which can't be set beside it:
@@ -360,6 +361,50 @@ install root (data only: see [packaging.md](packaging.md#layout)):
 | `destination` | the source's name | Where it installs, relative to the install root, `/`-separated. |
 | `platforms` | every platform | `linux`, `windows`, `macos`. On macOS data files install in `Contents/Resources`. |
 | `hidden` | `false` | Ship hidden files found below a directory source. Version-control directories never ship. |
+
+`[[product.<id>.runtime]]`: a bundled runtime, third-party native code and its data shipped beside
+the product's own binaries (a browser engine's distribution: its libraries, resources, locales and
+helpers), one entry per platform. Unlike a data file it may hold native code; unlike a sidecar it is
+a tree, pinned file by file to a named distribution ([packaging.md](packaging.md#bundled-runtimes)):
+
+```toml
+[[product.console.runtime]]
+name = "cef"
+distribution = "cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal"
+platform = "linux"
+pins = "runtime/cef-linux64.sha256"   # sha256sum's format: every file, nothing else
+destination = "lib"                    # beside the cores, which find libcef.so through $ORIGIN
+max-file-mib = 1536                    # libcef.so is 1.4 GiB before stripping
+strip = true
+
+[[product.console.runtime.files]]
+path = "chrome-sandbox"
+destination = "chrome-sandbox"         # beside the launcher, where Chromium looks for it
+mode = "4755"                          # setuid root
+
+[[product.console.runtime]]
+name = "cef"
+distribution = "cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_windows64_minimal"
+platform = "windows"
+pins = "runtime/cef-windows64.sha256"
+max-file-mib = 512
+
+[[product.console.runtime.publishers]]   # who may have signed a DLL that arrives signed
+subject = "CN=Microsoft Corporation,O=Microsoft Corporation,L=Redmond,ST=Washington,C=US"
+trust = "keys/microsoft-roots.pem"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `name` | required | `[a-z0-9][a-z0-9-]*`, at most 64 bytes, once per platform: its files arrive in `<artifacts>/<triple>/runtime/<name>/` ([packaging.md](packaging.md#the-artifact-directory)), laid out as they install under `destination`. |
+| `distribution` | required | The distribution it is (the release archive's name): 1 to 200 bytes of text without control characters or `$`, recorded in `layout.json` and the SBOM. |
+| `platform` | required | `linux` or `windows`: the one platform it ships on, which an output of the product must target. (macOS, a framework with helper apps inside the bundle, is not supported yet.) |
+| `pins` | required | The pin list, relative to `seaworthy.toml`: `sha256sum`'s output, `<64 lowercase hex>  <path>` per line (blank lines and `#` comments allowed), each path relative to the runtime directory, `/`-separated, plain segments of printable ASCII. It names every file of the runtime once, and nothing else: `verify` refuses a missing file, an extra one and other bytes. `load` (and `check`) read it. |
+| `destination` | the install root | Where its tree installs, relative to the install root, `/`-separated. |
+| `max-file-mib` | 256 | The largest file it may hold, in MiB (1 to 2048): a file past it is refused, so a runtime's large libraries are an explicit choice, never the data files' default. |
+| `strip` | `false` | Linux: strip every ELF file's symbols (`strip --strip-all`, as the product's own binaries are), each stripped copy checked to map exactly what the pinned one maps. |
+| `files` | `[]` | `[[product.<id>.runtime.files]]`, single files' settings: `path` (as `pins` names it, once), `destination` (its install path relative to the install root, instead of under the runtime's `destination`) and `mode`: `"0644"`, `"0755"` or, for a Linux ELF executable, `"4755"` (setuid root: the packages install every file root-owned). Default modes: 0755 for an ELF or PE image, 0644 otherwise. |
+| `publishers` | `[]` | `[[product.<id>.runtime.publishers]]` (Windows): `subject` (as `osslsigncode verify` prints it) and `trust` (a PEM file of the anchors its chain and its timestamp's reach), like `[defaults.authenticode]`. A file that arrives Authenticode-signed keeps its signature only when it verifies to one of them; any other signed file is refused. An unsigned PE file is signed with the product's own identity. |
 
 ### Text that reaches a package
 

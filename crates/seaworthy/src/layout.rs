@@ -1014,6 +1014,41 @@ pub(crate) fn read_project_file(dir: &Path, relative: &Path) -> Result<Vec<u8>, 
     read_data(&inside(dir, relative)?)
 }
 
+/// A small text file `seaworthy.toml` names (a runtime's pin list): read
+/// once, a regular file inside `seaworthy.toml`'s directory and no link, at
+/// most `limit` bytes.
+///
+/// # Errors
+/// [`DistError::Io`], [`DistError::Layout`] for a link, a special file, a
+/// file outside the directory or past the limit.
+pub(crate) fn read_project_file_limited(
+    dir: &Path,
+    relative: &Path,
+    limit: u64,
+) -> Result<Vec<u8>, DistError> {
+    use std::io::Read as _;
+    let path = inside(dir, relative)?;
+    let file = open_no_follow(&path).map_err(|e| DistError::io(&path, e))?;
+    let meta = file.metadata().map_err(|e| DistError::io(&path, e))?;
+    if !meta.is_file() {
+        return Err(DistError::Layout(format!(
+            "{}: not a regular file (a link or a special file)",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| DistError::io(&path, e))?;
+    if bytes.len() as u64 > limit {
+        return Err(DistError::Layout(format!(
+            "{}: more than {limit} bytes",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
 /// `seaworthy.toml`'s directory (`.` for a config parsed from text).
 fn base_dir(dir: &Path) -> &Path {
     if dir.as_os_str().is_empty() {
