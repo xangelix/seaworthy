@@ -139,11 +139,7 @@ pub fn expected(config: &Config, product: &Product, artifacts: &Path) -> Vec<Pla
                 stem.to_owned()
             }
         };
-        let cpus = if os == Os::Macos {
-            &config.defaults.macos_targets
-        } else {
-            &config.defaults.targets
-        };
+        let cpus = config.targets(product, os);
         let programs = product
             .programs()
             .into_iter()

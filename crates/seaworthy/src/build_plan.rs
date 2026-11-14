@@ -227,13 +227,6 @@ pub fn plan_for(
     } else {
         Vec::new()
     };
-    let cpus = if os == Os::Macos {
-        &config.defaults.macos_targets
-    } else {
-        &config.defaults.targets
-    };
-    // The CPU whose build's FIPS module library ships beside every core.
-    let module_cpu = cpus.first().cloned();
     let mut plan = Plan::default();
     let mut any = false;
     let mut sidecars: Vec<Step> = Vec::new();
@@ -247,6 +240,11 @@ pub fn plan_for(
             continue;
         }
         any = true;
+        // The product's CPU targets (its own `targets`, else the defaults'),
+        // and the CPU whose build's FIPS module library ships beside every
+        // core.
+        let cpus = config.targets(product, os);
+        let module_cpu = cpus.first().cloned();
         // A crate path named in seaworthy.toml: its manifest, so the build
         // enables that crate's features alone.
         let manifest = |key: &str,

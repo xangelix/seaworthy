@@ -1187,3 +1187,56 @@ fn the_repository_settings_are_validated() {
         "unknown field `mirror`",
     );
 }
+
+/// A product's own `targets` replace `defaults.targets` for its Linux and
+/// Windows cores alone; another product keeps the defaults, and macOS
+/// cores keep `defaults.macos-targets`.
+#[test]
+fn a_products_targets_override_the_defaults_for_it_alone() {
+    use seaworthy::inputs::Os;
+    let text = edit(
+        "kind = \"desktop\"\n",
+        "kind = \"desktop\"\ntargets = [\"x86-64-v2\"]\n",
+    );
+    let config = Config::parse(&text).unwrap();
+    let console = &config.products["console"];
+    let collector = &config.products["collector"];
+    assert_eq!(config.targets(console, Os::Linux), ["x86-64-v2"]);
+    assert_eq!(config.targets(console, Os::Windows), ["x86-64-v2"]);
+    assert_eq!(config.targets(console, Os::Macos), ["apple-m1"]);
+    assert_eq!(
+        config.targets(collector, Os::Linux),
+        ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+    );
+    // Without it, the defaults (the file as it was).
+    let config = Config::parse(EXAMPLE).unwrap();
+    assert_eq!(
+        config.targets(&config.products["console"], Os::Windows),
+        ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+    );
+}
+
+#[test]
+fn a_products_targets_are_validated_naming_the_key() {
+    for bad in [
+        "targets = []",
+        "targets = [\"x86-64-v2\", \"x86-64-v2\"]",
+        "targets = [\"x86 64\"]",
+        "targets = [\"\"]",
+    ] {
+        refused(
+            &edit(
+                "kind = \"desktop\"\n",
+                &format!("kind = \"desktop\"\n{bad}\n"),
+            ),
+            "product.console.targets",
+        );
+    }
+    refused(
+        &edit(
+            "kind = \"desktop\"\n",
+            "kind = \"desktop\"\ntargets = \"x86-64-v2\"\n",
+        ),
+        "targets",
+    );
+}

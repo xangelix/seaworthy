@@ -51,6 +51,13 @@ is the x86-64 microarchitecture levels:
   reports no signal for, so the launcher would skip it and fall back.
 - **Not per-CPU:** when the hardware is known (a server container, a
   fleet of identical machines), ship one binary built for that CPU instead.
+- **One level for one product:** a product whose time is spent outside its
+  own code (a UI process over a bundled browser runtime, whose work runs in
+  the runtime's prebuilt libraries and in the page) gains nothing from more
+  cores, and each costs a build and a copy in every package. Give it its own
+  `targets = ["x86-64-v2"]` in `[product.<id>]`: its launcher lists that one
+  CPU and it ships one core, while the file's other products keep
+  `defaults.targets` ([configuration.md](configuration.md#productid)).
 
 The levels are given once, to `launcher_main!`, most preferred first:
 

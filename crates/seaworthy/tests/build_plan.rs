@@ -653,3 +653,55 @@ fn a_product_s_build_rustflags_are_refused() {
     std::fs::write(crate_dir.join(".cargo/config.toml"), "[build\n").unwrap();
     assert!(check_cargo_config(&manifest).is_err());
 }
+
+/// A product with its own `targets` builds one core per program for each of
+/// them, and nothing for the defaults' other CPUs; another product in the
+/// same file keeps the defaults. Its FIPS module library comes from its own
+/// first CPU's build.
+#[test]
+fn a_products_own_targets_decide_its_cores() {
+    let text = CONFIG.replace(
+        "[product.console]\n",
+        "[product.viewer]\ndisplay-name = \"Acme Viewer\"\ndescription = \"Views.\"\nlauncher = \"crates/viewer/launcher\"\nexecutable = \"AcmeViewer\"\ncore = \"acme_viewer_core\"\nkind = \"desktop\"\nupdates.default = \"off\"\nwindows-directory = \"Viewer\"\noutputs = [\"deb\", \"zip\"]\ntargets = [\"x86-64-v2\"]\nsidecars.windows = [\"aws_lc_fips_*_crypto.dll\"]\n\n[product.console]\n",
+    );
+    let config = Config::parse(&text).unwrap();
+    let cores = |triple: &str, product: &str| -> Vec<String> {
+        plan(&config, triple, Some(product))
+            .unwrap()
+            .into_iter()
+            .filter_map(|step| match step {
+                Step::Copy { to, .. } if to.contains("/cores/") => Some(to),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        cores("x86_64-unknown-linux-gnu", "viewer"),
+        ["x86_64-unknown-linux-gnu/cores/x86-64-v2/libacme_viewer_core.so"]
+    );
+    assert_eq!(
+        cores("x86_64-pc-windows-msvc", "viewer"),
+        ["x86_64-pc-windows-msvc/cores/x86-64-v2/acme_viewer_core.dll"]
+    );
+    assert_eq!(
+        cores("x86_64-unknown-linux-gnu", "agent"),
+        [
+            "x86_64-unknown-linux-gnu/cores/x86-64-v3/libacme_agent_core.so",
+            "x86_64-unknown-linux-gnu/cores/x86-64-v2/libacme_agent_core.so"
+        ]
+    );
+    // The viewer's FIPS module library is its v2 build's.
+    let sidecars: Vec<Step> = plan(&config, "x86_64-pc-windows-msvc", Some("viewer"))
+        .unwrap()
+        .into_iter()
+        .filter(|step| matches!(step, Step::Sidecars { .. }))
+        .collect();
+    assert_eq!(
+        sidecars,
+        [Step::Sidecars {
+            directory: "x86-64-v2/x86_64-pc-windows-msvc/release/build".to_owned(),
+            pattern: "aws_lc_fips_*_crypto.dll".to_owned(),
+            to: "x86_64-pc-windows-msvc/cores/x86-64-v2".to_owned(),
+        }]
+    );
+}

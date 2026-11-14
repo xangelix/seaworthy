@@ -91,7 +91,7 @@ destination = "share"
 | Key | Required | Meaning |
 |---|---|---|
 | `vendor` | yes | The vendor: the install directories' parent (`Acme` → `%ProgramFiles%\Acme`, `/opt/acme`) and the Linux package names' first part. A directory name (`[A-Za-z0-9][A-Za-z0-9._-]*`), lowercase-able to `[a-z0-9.-]` when a Linux package is an output. |
-| `targets` | yes | The CPU targets, most preferred first (`x86-64-v4`, `x86-64-v3`, `x86-64-v2`, …). Each needs a core; the launcher's CPU list must name exactly these, in this order. |
+| `targets` | yes | The CPU targets, most preferred first (`x86-64-v4`, `x86-64-v3`, `x86-64-v2`, …). Each needs a core; the launcher's CPU list must name exactly these, in this order. A product's own `targets` replaces it for that product. |
 | `channel` | yes | The release channel (`stable`): at most 64 characters of `[a-z0-9-]`. |
 | `maintainer` | yes | deb `Maintainer:`, rpm `Packager:`. |
 | `license` | yes | The license expression (rpm `License:`, deb copyright, pacman). |
@@ -156,6 +156,7 @@ The id is `[a-z0-9][a-z0-9-]*`; the Linux package name is `<vendor>-<id>`, lower
 | `programs` | no | `[[product.<id>.programs]]`: several programs, each its own launcher and cores ([below](#productidprograms)). Without it, `executable`, `core`, `launcher`, `launcher-bin`, `aliases` and `linux.command` describe the product's one program. |
 | `outputs` | yes | The deliverables, each once: `msi`, `zip`, `deb`, `rpm`, `pacman`, `tar`, `dmg` (a desktop app alone), `pkg` (a macOS service, a tool, or a product with `cli` programs: [packaging.md](packaging.md#macos)). |
 | `kind` | no | `service` (the default; needs `[service]`), `desktop` (run by the logged-in user; its helper is started through the interactive-users grant or a polkit rule) or `tool` (no service, no helper start right). |
+| `targets` | no | This product's Linux and Windows CPU targets, most preferred first, instead of `defaults.targets` (`["x86-64-v2"]`: one core for a UI process whose work runs in a bundled runtime, [cpu-levels.md](cpu-levels.md#choosing-levels)). Same rules as `defaults.targets`: CPU names, each once, at least one; every program's launcher lists exactly these, in this order. macOS cores keep `defaults.macos-targets`. |
 | `launcher` | no | The launcher crate's path from the workspace root (the directory of `build-plan --manifest`), for builds that follow the build plan. |
 | `helper` | unless `updates.default = "off"` | The update helper executable's file stem, different from every program's executable. A helper needs `release-signatures` and `release-keys`. One per product, whatever its programs. |
 | `helper-crate` | no | The helper's crate path from the workspace root: the build plan builds it from its own manifest, so only its own features are enabled (without it the helper is built `--bin <helper>` from the workspace root, which unifies every member's features). |

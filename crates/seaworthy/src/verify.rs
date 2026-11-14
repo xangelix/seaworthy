@@ -566,11 +566,7 @@ impl Run {
         inputs: &PlatformInputs,
     ) -> Vec<PathBuf> {
         let os = inputs.os();
-        let targets = if os == Os::Macos {
-            &config.defaults.macos_targets
-        } else {
-            &config.defaults.targets
-        };
+        let targets = config.targets(product, os);
 
         // Each program's launcher and its CPU list.
         for program in &inputs.programs {
@@ -599,13 +595,19 @@ impl Run {
                             ),
                         );
                     }
-                    if &list.cpus != targets {
+                    if list.cpus != targets {
                         self.finding(
                             launcher,
                             format!(
                                 "its .cpulist lists {:?}, seaworthy.toml's {} are {:?} (same CPUs, same order)",
                                 list.cpus,
-                                if os == Os::Macos { "macos-targets" } else { "targets" },
+                                if os == Os::Macos {
+                                    "macos-targets"
+                                } else if product.targets.is_some() {
+                                    "product's own targets"
+                                } else {
+                                    "targets"
+                                },
                                 targets
                             ),
                         );

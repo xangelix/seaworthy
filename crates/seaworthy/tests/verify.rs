@@ -1306,3 +1306,53 @@ fn a_binary_that_trusts_ci_test_keys_ships_only_in_a_ci_test_build() {
         assert!(findings_under(&config, &tree).is_empty());
     }
 }
+
+/// A product's own `targets` decide which cores it needs and what its
+/// launchers must list: one v2 core passes once the launchers name v2
+/// alone, and a launcher still listing the defaults' three is refused.
+#[test]
+fn a_products_own_targets_decide_its_cores_and_launcher_lists() {
+    let text = config_text(true).replace(
+        "windows-directory = \"Tool\"\n",
+        "windows-directory = \"Tool\"\ntargets = [\"x86-64-v2\"]\n",
+    );
+    let config = Config::parse(&text).unwrap();
+    let tree = good_tree();
+    for cpu in ["x86-64-v4", "x86-64-v3"] {
+        std::fs::remove_dir_all(tree.root().join(LINUX).join("cores").join(cpu)).unwrap();
+        std::fs::remove_dir_all(tree.root().join(WINDOWS).join("cores").join(cpu)).unwrap();
+    }
+    let run = |tree: &Tree| match seaworthy::verify::verify(&config, "tool", tree.root()) {
+        Ok(_) => Vec::new(),
+        Err(DistError::Verify(findings)) => findings,
+        Err(other) => panic!("not a verify error: {other}"),
+    };
+    let found = run(&tree);
+    assert!(
+        found.iter().all(|f| f.contains("same CPUs, same order")) && found.len() == 2,
+        "only the launchers' lists differ: {found:#?}"
+    );
+    let v2 = cpulist("acme_core", &["x86-64-v2"]);
+    write(
+        tree.root(),
+        &format!("{LINUX}/launcher/AcmeTool"),
+        &Elf {
+            sections: vec![(".cpulist".into(), v2.clone())],
+            needed: vec!["libc.so.6".into()],
+            interp: Some(LOADER.into()),
+            ..Elf::default()
+        }
+        .build(),
+    );
+    write(
+        tree.root(),
+        &format!("{WINDOWS}/launcher/AcmeTool.exe"),
+        &Pe {
+            sections: vec![(".cpulist".into(), v2)],
+            imports: vec!["kernel32.dll".into()],
+            executable: true,
+        }
+        .build(),
+    );
+    assert_eq!(run(&tree), Vec::<String>::new());
+}

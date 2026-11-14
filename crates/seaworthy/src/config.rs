@@ -620,6 +620,14 @@ pub struct Product {
     /// The program kind.
     #[serde(default)]
     pub kind: Kind,
+    /// This product's Linux and Windows CPU targets, most preferred first,
+    /// instead of `defaults.targets` ([`Config::targets`]): a product whose
+    /// time is spent outside its own code (a UI process over a bundled
+    /// browser runtime) ships one core (`["x86-64-v2"]`) while the others
+    /// keep theirs. Each target needs a core; each program's launcher lists
+    /// exactly these, in this order. macOS cores keep `defaults.macos-targets`.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
     /// Sidecar files.
     #[serde(default)]
     pub sidecars: Sidecars,
@@ -2433,6 +2441,19 @@ impl Config {
         self.fips_module().symbol_prefix()
     }
 
+    /// The CPU targets `product`'s cores build for on `os`, most preferred
+    /// first: on Linux and Windows the product's own `targets`, else
+    /// `defaults.targets`; on macOS `defaults.macos-targets`.
+    #[must_use]
+    pub fn targets<'a>(&'a self, product: &'a Product, os: crate::inputs::Os) -> &'a [String] {
+        match os {
+            crate::inputs::Os::Macos => &self.defaults.macos_targets,
+            crate::inputs::Os::Linux | crate::inputs::Os::Windows => {
+                product.targets.as_deref().unwrap_or(&self.defaults.targets)
+            }
+        }
+    }
+
     /// Whether `product`'s cores carry the AWS-LC FIPS module: its own
     /// `fips`, else `defaults.fips`. `verify` applies the FIPS binary
     /// checks to the cores (and on Windows and macOS to the sidecars) of
@@ -2670,6 +2691,22 @@ impl Config {
                 "windows-directory",
                 "a directory name ([A-Za-z0-9][A-Za-z0-9._-]*); the default is the display name's last word",
             ));
+        }
+        if let Some(targets) = &p.targets {
+            if targets.is_empty() {
+                return Err(at(
+                    "targets",
+                    "lists no CPU target: leave it out to build the cores for defaults.targets",
+                ));
+            }
+            for (i, target) in targets.iter().enumerate() {
+                if !is_file_stem(target) || targets[..i].contains(target) {
+                    return Err(at(
+                        "targets",
+                        &format!("{target:?} is not a CPU name, or is listed twice"),
+                    ));
+                }
+            }
         }
         if let Some(glibc) = &p.linux.glibc
             && parse_glibc_version(glibc).is_none_or(|(major, _)| major != 2)
