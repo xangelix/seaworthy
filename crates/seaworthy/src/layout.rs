@@ -1275,7 +1275,7 @@ fn read_data(path: &Path) -> Result<Vec<u8>, DistError> {
 }
 
 #[cfg(unix)]
-fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new()
         .read(true)
@@ -1284,7 +1284,7 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(std::io::Error::other("a link"));
     }

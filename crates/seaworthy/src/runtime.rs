@@ -293,6 +293,387 @@ pub fn name_of(install: &str) -> &str {
     install.rsplit_once('/').map_or(install, |(_, name)| name)
 }
 
+/// The runtime `runtime-stage` stages: product `id`'s runtime `name` for
+/// the platform of `triple` (Linux or Windows).
+///
+/// # Errors
+/// [`DistError::Config`] for an unknown product, a triple that isn't
+/// Linux's or Windows', or a runtime the product doesn't have there.
+pub fn find<'a>(
+    config: &'a crate::config::Config,
+    id: &str,
+    name: &str,
+    triple: &str,
+) -> Result<
+    (
+        &'a crate::config::Product,
+        &'a crate::config::Runtime,
+        crate::inputs::Os,
+    ),
+    DistError,
+> {
+    use crate::inputs::Os;
+    let product = config
+        .products
+        .get(id)
+        .ok_or_else(|| DistError::Config(format!("no product {id:?} in seaworthy.toml")))?;
+    let os = match Os::of_triple(triple) {
+        Some(os @ (Os::Linux | Os::Windows)) => os,
+        _ => {
+            return Err(DistError::Config(format!(
+                "{triple:?}: a bundled runtime ships for {} or {}",
+                crate::inputs::LINUX,
+                crate::inputs::WINDOWS
+            )));
+        }
+    };
+    let runtime = product
+        .runtime
+        .iter()
+        .find(|r| r.name == name && r.platform == os.platform())
+        .ok_or_else(|| {
+            DistError::Config(format!(
+                "product {id} has no runtime {name:?} for {} ([[product.{id}.runtime]])",
+                os.platform().name()
+            ))
+        })?;
+    Ok((product, runtime, os))
+}
+
+/// What [`stage`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staged {
+    /// `<artifacts>/<triple>/runtime/<name>`.
+    pub dir: std::path::PathBuf,
+    /// How many files it holds.
+    pub files: usize,
+    /// How many bytes they hold.
+    pub bytes: u64,
+    /// The core build directories the files were also copied into
+    /// (`--beside-cores`).
+    pub beside_cores: Vec<std::path::PathBuf>,
+}
+
+/// Where a pinned path is in one root.
+enum Located {
+    /// Not in this root (a later root may hold it).
+    Missing,
+    /// A regular file, reached through real directories.
+    Found(std::path::PathBuf),
+    /// Something this root holds at the path that may not be staged (a
+    /// link, a special file): refused, never looked past.
+    Refused(String),
+}
+
+/// Finds `path` (a [`is_runtime_path`]) under `root` without following a
+/// link: every directory on the way a real directory, the file a regular
+/// one.
+fn locate(root: &Path, path: &str) -> Located {
+    let mut at = root.to_path_buf();
+    let segments: Vec<&str> = path.split('/').collect();
+    for (i, segment) in segments.iter().enumerate() {
+        at.push(segment);
+        let last = i.saturating_add(1) == segments.len();
+        match std::fs::symlink_metadata(&at) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Located::Missing,
+            Err(e) => return Located::Refused(format!("{}: {e}", at.display())),
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Located::Refused(format!(
+                    "{}: a link (a runtime is staged from regular files, never through a link)",
+                    at.display()
+                ));
+            }
+            Ok(meta) if last && !meta.is_file() => {
+                return Located::Refused(format!("{}: not a regular file", at.display()));
+            }
+            Ok(meta) if !last && !meta.is_dir() => {
+                return Located::Refused(format!("{}: not a directory", at.display()));
+            }
+            Ok(_) => {}
+        }
+    }
+    Located::Found(at)
+}
+
+/// Copies `from` (opened without following a link) to the new file `to`,
+/// at most `cap` bytes, returning its SHA-256 (hex) and size. The mode is
+/// 0755 when the source is executable by its owner, else 0644.
+fn copy_hashed(from: &Path, to: &Path, cap: u64) -> Result<(String, u64), String> {
+    use std::io::{Read as _, Write as _};
+    let mut source =
+        crate::layout::open_no_follow(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let meta = source
+        .metadata()
+        .map_err(|e| format!("{}: {e}", from.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a regular file", from.display()));
+    }
+    if meta.len() > cap {
+        return Err(format!(
+            "{}: {} bytes, past the runtime's max-file-mib ({} MiB)",
+            from.display(),
+            meta.len(),
+            cap / (1024 * 1024)
+        ));
+    }
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.permissions().mode() & 0o100 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = false;
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(if executable { 0o755 } else { 0o644 });
+    }
+    let mut out = options
+        .open(to)
+        .map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut hasher = seaworthy_crypto::digest::Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    let mut total: u64 = 0;
+    loop {
+        let n = source
+            .read(&mut buffer)
+            .map_err(|e| format!("{}: {e}", from.display()))?;
+        if n == 0 {
+            break;
+        }
+        let chunk = buffer.get(..n).unwrap_or_default();
+        total = total.saturating_add(n as u64);
+        if total > cap {
+            return Err(format!(
+                "{}: grew past the runtime's max-file-mib while it was copied",
+                from.display()
+            ));
+        }
+        hasher.update(chunk);
+        out.write_all(chunk)
+            .map_err(|e| format!("{}: {e}", to.display()))?;
+    }
+    out.sync_all()
+        .map_err(|e| format!("{}: {e}", to.display()))?;
+    Ok((hex::encode(hasher.finish()), total))
+}
+
+/// The SHA-256 of a file already in place (a core build directory's), read
+/// without following a link; `None` when nothing is there.
+fn existing_digest(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read as _;
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+        Ok(meta) if !meta.is_file() => {
+            return Err(format!(
+                "{}: holds something other than a regular file",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+    }
+    let mut file =
+        crate::layout::open_no_follow(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut hasher = seaworthy_crypto::digest::Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(buffer.get(..n).unwrap_or_default());
+    }
+    Ok(Some(hex::encode(hasher.finish())))
+}
+
+/// Stages product `id`'s runtime `name` for `triple` from an unpacked
+/// distribution (`seaworthy runtime-stage`): each pinned path is taken from
+/// the first of `roots` holding it (a regular file reached through real
+/// directories; a link there is refused, never followed, and a file no root
+/// holds is named), checked against its pinned SHA-256 as it is copied, and
+/// lands in `<artifacts>/<triple>/runtime/<name>/<path>`. Files the pins
+/// don't name are left behind (a distribution carries more than ships).
+/// With `beside_cores` (Windows) every file is also copied into each core
+/// build directory the product's build plan fills for the triple
+/// (`<artifacts>/<triple>/cores/<build>/`), at its install path relative
+/// to the install root, where a core finds it as the installed product's
+/// does; a different file already there is refused.
+///
+/// Every refusal is reported together, and nothing is staged unless all of
+/// it can be: the files are copied into a sibling directory renamed into
+/// place at the end (an earlier staging of the runtime is replaced).
+///
+/// # Errors
+/// [`DistError::Config`] as [`find`] and [`read_pins`];
+/// [`DistError::Verify`] with every refusal; [`DistError::Io`].
+pub fn stage(
+    config: &crate::config::Config,
+    id: &str,
+    name: &str,
+    triple: &str,
+    roots: &[std::path::PathBuf],
+    artifacts: &Path,
+    beside_cores: bool,
+) -> Result<Staged, DistError> {
+    use crate::inputs::Os;
+    let (product, runtime, os) = find(config, id, name, triple)?;
+    if beside_cores && os != Os::Windows {
+        return Err(DistError::Config(format!(
+            "--beside-cores: a {triple} core finds the runtime's libraries through its search path, not its directory; only a Windows core loads them from beside it"
+        )));
+    }
+    if roots.is_empty() {
+        return Err(DistError::Config(
+            "no root to stage the runtime from".to_owned(),
+        ));
+    }
+    let pins = read_pins(&config.dir, id, runtime)?;
+    let mut findings = Vec::new();
+    for root in roots {
+        match std::fs::symlink_metadata(root) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => findings.push(format!(
+                "{}: a root to stage from is a directory, not a link or a file",
+                root.display()
+            )),
+            Err(e) => findings.push(format!("{}: {e}", root.display())),
+        }
+    }
+    if !findings.is_empty() {
+        return Err(DistError::Verify(findings));
+    }
+    // The core build directories the files also go into.
+    let cores = artifacts.join(triple).join("cores");
+    let mut core_dirs = Vec::new();
+    if beside_cores {
+        for program in product.programs() {
+            for cpu in config.targets(product, os) {
+                let dir = cores.join(program.build_dir(cpu));
+                if !core_dirs.contains(&dir) {
+                    core_dirs.push(dir);
+                }
+            }
+        }
+        for dir in &core_dirs {
+            if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+                findings.push(format!(
+                    "{}: no core build directory (--beside-cores runs after the build)",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    let runtime_dir = artifacts.join(triple).join("runtime");
+    std::fs::create_dir_all(&runtime_dir).map_err(|e| DistError::io(&runtime_dir, e))?;
+    let pid = std::process::id();
+    let staging = runtime_dir.join(format!(".{name}.staging-{pid}"));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| DistError::io(&staging, e))?;
+    }
+    std::fs::create_dir(&staging).map_err(|e| DistError::io(&staging, e))?;
+    let cap = runtime.max_file_bytes();
+    let (mut files, mut bytes) = (0_usize, 0_u64);
+    for pin in &pins {
+        let mut found = None;
+        for root in roots {
+            match locate(root, &pin.path) {
+                Located::Missing => continue,
+                Located::Refused(why) => {
+                    findings.push(why);
+                    found = Some(None);
+                    break;
+                }
+                Located::Found(path) => {
+                    found = Some(Some(path));
+                    break;
+                }
+            }
+        }
+        let source = match found {
+            Some(Some(source)) => source,
+            Some(None) => continue,
+            None => {
+                findings.push(format!(
+                    "{}: pinned in runtime {name:?}, but in no root ({})",
+                    pin.path,
+                    roots
+                        .iter()
+                        .map(|r| r.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                continue;
+            }
+        };
+        let target = staging.join(&pin.path);
+        match copy_hashed(&source, &target, cap) {
+            Ok((digest, size)) if digest == pin.sha256 => {
+                files = files.saturating_add(1);
+                bytes = bytes.saturating_add(size);
+            }
+            Ok((digest, _)) => findings.push(format!(
+                "{}: SHA-256 {digest}, but runtime {name:?} pins {} for {} ({})",
+                source.display(),
+                pin.sha256,
+                pin.path,
+                runtime.distribution
+            )),
+            Err(why) => findings.push(why),
+        }
+        for dir in &core_dirs {
+            let beside = dir.join(runtime.install_path(&pin.path));
+            match existing_digest(&beside) {
+                Ok(Some(digest)) if digest != pin.sha256 => findings.push(format!(
+                    "{}: a different file is there already; --beside-cores never overwrites one",
+                    beside.display()
+                )),
+                Ok(_) => {}
+                Err(why) => findings.push(why),
+            }
+        }
+    }
+    if !findings.is_empty() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(DistError::Verify(findings));
+    }
+    // Into place: an earlier staging moved aside, then removed.
+    let dir = runtime_dir.join(name);
+    if std::fs::symlink_metadata(&dir).is_ok() {
+        let old = runtime_dir.join(format!(".{name}.old-{pid}"));
+        std::fs::rename(&dir, &old).map_err(|e| DistError::io(&dir, e))?;
+        std::fs::rename(&staging, &dir).map_err(|e| DistError::io(&staging, e))?;
+        std::fs::remove_dir_all(&old).map_err(|e| DistError::io(&old, e))?;
+    } else {
+        std::fs::rename(&staging, &dir).map_err(|e| DistError::io(&staging, e))?;
+    }
+    for core_dir in &core_dirs {
+        for pin in &pins {
+            let beside = core_dir.join(runtime.install_path(&pin.path));
+            if existing_digest(&beside)
+                .map_err(DistError::Layout)?
+                .is_some()
+            {
+                continue;
+            }
+            copy_hashed(&dir.join(&pin.path), &beside, cap).map_err(DistError::Layout)?;
+        }
+    }
+    Ok(Staged {
+        dir,
+        files,
+        bytes,
+        beside_cores: core_dirs,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
