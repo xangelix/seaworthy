@@ -139,6 +139,9 @@ spec:
     cargo-args:
       description: More cargo arguments for every build, such as --features fips.
       default: ""
+    runtime-archives:
+      description: The bundled runtimes' distribution archives ([[product.<id>.runtime]]), one line (or ;-separated entry) per runtime and triple - <product> <runtime> <triple> <https url> <sha256> <root>[,<root>...], the roots relative to the unpacked archive. prepare checks every line and runtime before any download; the build jobs download their triple's archives, check each SHA-256 before anything reads it and name the unpacked archive to the build as SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>; package stages each runtime into the artifacts by its pins (seaworthy runtime-stage). Never cached. Pass the same value to seaworthy-windows.yml. Empty, none.
+      default: ""
     version-file:
       description: A Cargo.toml whose literal [package] version names a release without a tag (one from a branch) and every pipeline outside a release; a release tag must name the same version. Empty, the tag alone names a release.
       default: ""
@@ -194,7 +197,7 @@ spec:
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "0fb92c4ba330e3da"
+    SEAWORTHY_TEMPLATE: "287b9f7c386706b1"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
@@ -205,6 +208,10 @@ spec:
     SEAWORTHY_BUILD_COMMAND:
       value: >-
         $[[ inputs.build-metadata ]]
+      expand: false
+    SEAWORTHY_RUNTIME_ARCHIVES:
+      value: >-
+        $[[ inputs.runtime-archives ]]
       expand: false
     SEAWORTHY_CHECKOUT: $[[ inputs.seaworthy-dir ]]
     SEAWORTHY_FETCH:
