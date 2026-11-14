@@ -23,7 +23,7 @@ use seaworthy::msi_check::{self, Table};
 /// them, for the comparison.
 const WXS: &str = r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Acme" Manufacturer="Acme" Version="1.0.0" UpgradeCode="{6A1F0C2E-3B4D-4E5F-9A6B-7C8D9E0F1A2B}" Scope="perMachine" Language="1033">
-    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <Property Id="ARPNOMODIFY" Value="1" />
     <UI>
       <TextStyle Id="SeaworthyText" FaceName="Segoe UI" Size="9" />

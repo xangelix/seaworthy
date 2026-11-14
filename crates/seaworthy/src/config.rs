@@ -425,6 +425,42 @@ pub struct Updates {
     /// The install-time default policy.
     #[serde(default)]
     pub default: UpdatePolicy,
+    /// First-paint probation (a desktop product with the update helper,
+    /// Linux and Windows): a release the helper installs stays on probation
+    /// until the app reports its first paint; one that never paints within
+    /// `launches` launches, or within `window` of its first launch, is
+    /// replaced by exactly the release it replaced. Off without it.
+    #[serde(default)]
+    pub probation: Option<Probation>,
+}
+
+/// `[product.<id>.updates] probation = { launches = 3, window = "24h" }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Probation {
+    /// Launches of the new release without a first paint that revert it
+    /// (1 to [`MAX_PROBATION_LAUNCHES`]).
+    pub launches: u32,
+    /// How long after its first launch a release that never painted is
+    /// reverted ([`parse_duration`]: `30m`, `24h`, `7d`; one minute to
+    /// [`MAX_PROBATION_WINDOW_DAYS`] days).
+    pub window: String,
+}
+
+/// The most launches a probation may count before it reverts.
+pub const MAX_PROBATION_LAUNCHES: u32 = 20;
+
+/// The longest probation window, in days.
+pub const MAX_PROBATION_WINDOW_DAYS: u64 = 30;
+
+impl Probation {
+    /// The window as a duration.
+    ///
+    /// # Errors
+    /// [`DistError::Config`] for a window that isn't a duration.
+    pub fn window(&self) -> Result<Duration, DistError> {
+        parse_duration(&self.window)
+    }
 }
 
 /// `[product.<id>.sidecars]`: files shipped beside the cores, per platform.
@@ -3207,6 +3243,7 @@ impl Config {
         }
         self.validate_desktop_and_files(id, p)?;
         self.validate_runtimes(id, p)?;
+        self.validate_probation(id, p)?;
         self.validate_file_types(id, p)
     }
 
@@ -3367,6 +3404,54 @@ impl Config {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `updates.probation`: a desktop product whose update helper ships,
+    /// on Linux and Windows.
+    fn validate_probation(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        let Some(probation) = &p.updates.probation else {
+            return Ok(());
+        };
+        let at = |key: &str, why: &str| {
+            DistError::Config(format!("product.{id}.updates.probation.{key}: {why}"))
+        };
+        let whole = |why: &str| DistError::Config(format!("product.{id}.updates.probation: {why}"));
+        if p.kind != Kind::Desktop {
+            return Err(whole(
+                "first-paint probation is for a desktop product (kind = \"desktop\"): its app reports the first paint",
+            ));
+        }
+        if !p.ships_helper() {
+            return Err(whole(
+                "needs the update helper (helper, and updates.default other than \"off\"): the helper reverts a release",
+            ));
+        }
+        if p.outputs.contains(&Output::Pkg) {
+            return Err(whole(
+                "isn't supported on macOS yet: a product with a pkg output can't use it",
+            ));
+        }
+        if probation.launches == 0 || probation.launches > MAX_PROBATION_LAUNCHES {
+            return Err(at("launches", &format!("1 to {MAX_PROBATION_LAUNCHES}")));
+        }
+        let window = probation.window().map_err(|_| {
+            at(
+                "window",
+                &format!(
+                    "{:?} is not a duration (a whole number followed by s, m, h or d)",
+                    probation.window
+                ),
+            )
+        })?;
+        if window < Duration::from_secs(60)
+            || window > Duration::from_secs(MAX_PROBATION_WINDOW_DAYS * 86_400)
+        {
+            return Err(at(
+                "window",
+                &format!("one minute to {MAX_PROBATION_WINDOW_DAYS} days"),
+            ));
         }
         Ok(())
     }
@@ -4486,6 +4571,12 @@ impl Config {
             names = names
                 .with_macos_bundle_id(&macos.bundle_id)
                 .map_err(refused)?;
+        }
+        if let Some(probation) = &product.updates.probation {
+            let settings =
+                seaworthy_updater::ProbationSettings::new(probation.launches, probation.window()?)
+                    .map_err(refused)?;
+            names = names.with_probation(settings);
         }
         Ok(names)
     }

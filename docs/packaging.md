@@ -168,6 +168,7 @@ floor and the packages' dependency together.
 | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | the bundle's `Contents/MacOS`, else the tool directory's `bin` (not in a dmg) |
 | Data files | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>`, and `Resources/<destination>` in the tool directory |
+| Installed release record (`updates.probation` only; `package` writes it) | `seaworthy-release`, mode 0644 | `seaworthy-release` | — |
 
 On macOS the app bundle holds the bundled program: the `gui` program, or the single-program form's
 service or desktop app. The tool directory holds every other program (`cli` programs, a tool's),
@@ -295,7 +296,12 @@ stamped after linking, then every Windows binary is Authenticode-signed, then th
   writes each named program's Windows Error Reporting exclusion
   (`…\Windows Error Reporting\ExcludedApplications`, a DWORD 1 named for the executable, as
   `WerAddExcludedApplication` writes it) under `HKLM`, or `HKCU` per user;
-- allows two builds of one version (the sequence orders them) and refuses downgrades. Its
+- allows two builds of one version (the sequence orders them) and refuses downgrades, except for a
+  product with first-paint probation (`updates.probation`), whose MSI removes every other release,
+  older ones included (`<MajorUpgrade AllowDowngrades="yes">`), so that its update helper can put
+  the previous release back ([updates.md](updates.md#first-paint-probation)); its helper's version
+  floor still refuses every other older release, and adopt-msi refuses that form for any other
+  product. Its
   UpgradeCode is `upgrade-code`, else derived from the vendor and the product id: pin it before
   renaming either, and to the code earlier MSIs carry when another tool built them
   ([Migrating an existing product](#migrating-an-existing-product)).
@@ -397,7 +403,7 @@ Windows release; the checks keep its MSI from doing more than the release declar
 
 The Group Policy templates define two machine policies under `HKLM\SOFTWARE\Policies\<Vendor>\…`:
 `UpdatePolicy` (`auto`, `notify`, `off`), which overrides the MSI's default, and `Server`, the
-machine's update server.
+machine's update server; a product with first-paint probation a third, `Probation` (`on`, `off`).
 
 ### macOS
 

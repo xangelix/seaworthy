@@ -980,6 +980,8 @@ fn the_helper_reads_the_same_names_from_config() {
                outputs = [\"dmg\"]\nupdates.default = \"off\"\n\
                sidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]\n\n\
                [product.viewer.macos]\nbundle-id = \"com.acme.viewer\"\n",
+        // First-paint probation reaches the helper.
+        format!("{EXAMPLE}updates.probation = {{ launches = 2, window = \"90m\" }}\n"),
     ];
     for text in variants {
         let config = Config::parse(&text).expect("valid");
@@ -999,6 +1001,14 @@ fn the_helper_reads_the_same_names_from_config() {
             assert_eq!(packaged.windows_directory(), product.windows_directory());
             assert_eq!(packaged.default_policy(), product.updates.default);
             assert_eq!(packaged.release_trust(), config.defaults.release_trust);
+            assert_eq!(
+                packaged.probation().map(|p| (p.launches, p.window)),
+                product
+                    .updates
+                    .probation
+                    .as_ref()
+                    .map(|p| (p.launches, p.window().unwrap()))
+            );
             // The Group Policy template writes the key the helper reads.
             let template = seaworthy::admx::template(
                 &config.defaults.vendor,
@@ -1241,11 +1251,11 @@ fn a_products_targets_are_validated_naming_the_key() {
     );
 }
 
-/// The console of the example with a bundled runtime per platform: every
-/// runtime key in one place.
+/// The console of the example with a bundled runtime per platform and
+/// first-paint probation: every new key in one place.
 fn with_runtime(extra: &str) -> String {
     format!(
-        "{EXAMPLE}\n\
+        "{EXAMPLE}updates.probation = {{ launches = 3, window = \"24h\" }}\n\n\
          [[product.console.runtime]]\n\
          name = \"cef\"\n\
          distribution = \"cef_binary_154.0.34_linux64_minimal\"\n\
@@ -1271,10 +1281,13 @@ fn with_runtime(extra: &str) -> String {
 }
 
 #[test]
-fn bundled_runtimes_parse() {
+fn bundled_runtimes_and_probation_parse() {
     use seaworthy::config::Platform;
     let config = Config::parse(&with_runtime("")).unwrap();
     let console = &config.products["console"];
+    let probation = console.updates.probation.as_ref().unwrap();
+    assert_eq!(probation.launches, 3);
+    assert_eq!(probation.window().unwrap(), Duration::from_secs(86_400));
     let [linux, windows] = console.runtime.as_slice() else {
         panic!("two runtimes: {:?}", console.runtime);
     };
@@ -1297,7 +1310,7 @@ fn bundled_runtimes_parse() {
     assert_eq!(windows.publishers.len(), 1);
     // The collector, without any of it, is unchanged.
     let collector = &config.products["collector"];
-    assert!(collector.runtime.is_empty());
+    assert!(collector.runtime.is_empty() && collector.updates.probation.is_none());
 }
 
 /// Every bad runtime value is refused, naming the key.
@@ -1432,6 +1445,75 @@ fn bundled_runtimes_are_validated_naming_the_key() {
         &with_runtime("[[product.console.runtime.files]]\npath = \"x.dll\"\nowner = \"root\"\n"),
         "owner",
     );
+}
+
+/// Probation: a desktop product with its helper, not on macOS, within its
+/// bounds; every refusal names the key.
+#[test]
+fn probation_is_validated_naming_the_key() {
+    let base = with_runtime("");
+    let swap = |from: &str, to: &str| {
+        assert!(base.contains(from), "{from:?}");
+        base.replacen(from, to, 1)
+    };
+    for (to, key) in [
+        (
+            "{ launches = 0, window = \"24h\" }",
+            "updates.probation.launches",
+        ),
+        (
+            "{ launches = 21, window = \"24h\" }",
+            "updates.probation.launches",
+        ),
+        (
+            "{ launches = 3, window = \"59s\" }",
+            "updates.probation.window",
+        ),
+        (
+            "{ launches = 3, window = \"31d\" }",
+            "updates.probation.window",
+        ),
+        (
+            "{ launches = 3, window = \"a day\" }",
+            "updates.probation.window",
+        ),
+    ] {
+        refused(
+            &swap("{ launches = 3, window = \"24h\" }", to),
+            &format!("product.console.{key}"),
+        );
+    }
+    refused(
+        &swap("{ launches = 3, window = \"24h\" }", "{ launches = 3 }"),
+        "window",
+    );
+    refused(
+        &swap(
+            "{ launches = 3, window = \"24h\" }",
+            "{ launches = 3, window = \"24h\", revert = false }",
+        ),
+        "revert",
+    );
+    // A service, a product without its helper, a pkg output.
+    let service = edit(
+        "updates.default = \"auto\"\n",
+        "updates.default = \"auto\"\nupdates.probation = { launches = 3, window = \"1h\" }\n",
+    );
+    refused(&service, "product.collector.updates.probation");
+    refused(
+        &swap(
+            "helper = \"AcmeConsoleUpdate\"\n",
+            "updates.default = \"off\"\n",
+        ),
+        "product.console.updates.probation",
+    );
+    // The bounds themselves pass.
+    for ok in [
+        "{ launches = 1, window = \"1m\" }",
+        "{ launches = 20, window = \"30d\" }",
+    ] {
+        Config::parse(&swap("{ launches = 3, window = \"24h\" }", ok)).unwrap();
+    }
 }
 
 /// `load` reads each runtime's pin list (and its publishers' trust

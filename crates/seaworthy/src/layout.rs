@@ -10,6 +10,7 @@
 //! | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 //! | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS/<helper>`, else `bin/<helper>` |
 //! | Data files (`[[files]]`) | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>`; `Resources/<destination>` |
+//! | Installed release record (`updates.probation`; `package` writes it) | `seaworthy-release`, mode 0644 | `seaworthy-release` | — |
 //! | Icons | `[desktop]`: `/usr/share/icons/hicolor/<size>/apps/<app-id>.<ext>` | `[desktop]`: `tree/<Vendor>/<Directory>.ico`, for the MSI only | `[macos] icon`: `Contents/Resources/<file>.icns` |
 //!
 //! On macOS the app bundle holds the bundled program (the `gui` program,
@@ -153,6 +154,11 @@ pub enum Role {
     /// `DefaultIcon` names (in the install directory), the macOS `.icns`
     /// in the bundle's `Contents/Resources`. Data, never stamped or signed.
     DocumentIcon,
+    /// The installed release record (`seaworthy-release` in the install
+    /// root, `seaworthy-installed-release:1`): `package` writes it into the
+    /// Linux and Windows trees of a product with first-paint probation
+    /// (`updates.probation`). Data, never stamped or signed.
+    ReleaseRecord,
 }
 
 /// One file in a laid-out tree.
@@ -966,7 +972,8 @@ pub(crate) fn recheck_record(path: &Path, role: &Role, when: &str) -> Result<(),
         | Role::CodeSignature
         | Role::Uninstaller
         | Role::License
-        | Role::DocumentIcon => Ok(()),
+        | Role::DocumentIcon
+        | Role::ReleaseRecord => Ok(()),
     };
     result.map_err(|e| {
         DistError::Layout(format!(

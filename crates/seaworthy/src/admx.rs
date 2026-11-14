@@ -27,6 +27,12 @@
 //! the helper reads before the MSI's `SERVER=`
 //! (`seaworthy_updater::read_admin_server`) and checks itself. Not Configured
 //! leaves the installation's server, else the product's default.
+//!
+//! A product with first-paint probation (`updates.probation`) gets a third
+//! policy, `Probation` ([`template_with`]): `on` or `off`, written as
+//! `REG_SZ` to the same key's `Probation`. `off` stops the update helper
+//! from starting a probation and from reverting a release that never
+//! painted; Not Configured and Disabled leave probation on.
 
 /// An ADMX/ADML pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +58,13 @@ fn xml(text: &str) -> String {
 /// registry keys and policy names. `display_name` is any plain text.
 #[must_use]
 pub fn template(vendor: &str, product: &str, display_name: &str) -> Template {
+    template_with(vendor, product, display_name, false)
+}
+
+/// [`template`], with the `Probation` policy when `probation` (a product
+/// with `updates.probation`).
+#[must_use]
+pub fn template_with(vendor: &str, product: &str, display_name: &str, probation: bool) -> Template {
     let mut id = format!(
         "{}{}",
         vendor.replace(['.', '-'], ""),
@@ -93,12 +106,31 @@ pub fn template(vendor: &str, product: &str, display_name: &str) -> Template {
         <text id="Server" valueName="Server" required="true" maxLength="2048" />
       </elements>
     </policy>
-  </policies>
+{probation_policy}  </policies>
 </policyDefinitions>
 "#,
         id = xml(&id),
         namespace = xml(&namespace),
         key = xml(&key),
+        probation_policy = if probation {
+            format!(
+                r#"    <policy name="Probation" class="Machine" displayName="$(string.Probation)" explainText="$(string.Probation_Help)" presentation="$(presentation.Probation)" key="{key}">
+      <parentCategory ref="{id}" />
+      <supportedOn ref="windows:SUPPORTED_Windows_10_0" />
+      <elements>
+        <enum id="Probation" valueName="Probation" required="true">
+          <item displayName="$(string.Probation_on)"><value><string>on</string></value></item>
+          <item displayName="$(string.Probation_off)"><value><string>off</string></value></item>
+        </enum>
+      </elements>
+    </policy>
+"#,
+                key = xml(&key),
+                id = xml(&id),
+            )
+        } else {
+            String::new()
+        },
     );
     let adml = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -130,7 +162,7 @@ A value set here overrides the server chosen at installation (SERVER=). Not Conf
 A user whose copy of {display} connects to another server can still connect, but updates for that user are Notify only: an individual's server never drives a machine-wide install.
 
 The update helper refuses a value that isn't such a URL, and installs nothing until it's corrected.</string>
-    </stringTable>
+{probation_strings}    </stringTable>
     <presentationTable>
       <presentation id="UpdatePolicy">
         <dropdownList refId="UpdatePolicy" noSort="true" defaultItem="0">Update policy:</dropdownList>
@@ -140,11 +172,38 @@ The update helper refuses a value that isn't such a URL, and installs nothing un
           <label>Update server URL:</label>
         </textBox>
       </presentation>
-    </presentationTable>
+{probation_presentation}    </presentationTable>
   </resources>
 </policyDefinitionResources>
 "#,
         display = xml(display_name),
+        probation_strings = if probation {
+            format!(
+                r#"      <string id="Probation">First-paint probation</string>
+      <string id="Probation_Help">Whether {display}'s update helper keeps watch over a release it installs until the app first shows its window, and goes back to the release before it when the new one never does.
+
+On: after an update, the helper keeps the previous signed release. If the new release's app never finishes its first paint within the product's number of launches or time window, the helper installs exactly that previous release again, and doesn't install the failed release again. This is the default.
+
+Off: the helper starts no probation and never goes back to an earlier release. A release that fails to start stays installed until a newer one replaces it.
+
+The app's report can only keep a release or send it back to the one before it; it never chooses what installs. Not Configured and Disabled leave probation on.</string>
+      <string id="Probation_on">On (go back to the previous release when a new one never starts)</string>
+      <string id="Probation_off">Off (never go back to an earlier release)</string>
+"#,
+                display = xml(display_name),
+            )
+        } else {
+            String::new()
+        },
+        probation_presentation = if probation {
+            r#"      <presentation id="Probation">
+        <dropdownList refId="Probation" noSort="true" defaultItem="0">First-paint probation:</dropdownList>
+      </presentation>
+"#
+            .to_owned()
+        } else {
+            String::new()
+        },
     );
     Template {
         stem: format!("{vendor}.{product}"),

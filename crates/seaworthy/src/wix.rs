@@ -184,7 +184,9 @@
 //!   there, naming it. A repair or a removal is never refused.
 //! - **Upgrades:** `MajorUpgrade` removes the installed version first
 //!   (`afterInstallInitialize`), allows two builds of one version (the
-//!   sequence orders them) and refuses downgrades. The UpgradeCode is
+//!   sequence orders them) and refuses downgrades, unless the product has
+//!   first-paint probation, whose helper may put the previous release back
+//!   ([`MAJOR_UPGRADE_DOWNGRADES`]). The UpgradeCode is
 //!   `upgrade-code` from `seaworthy.toml`, else derived from the vendor and the
 //!   product id ([`upgrade_code`]).
 //!
@@ -206,6 +208,27 @@ use crate::config::{Config, InstallScope, UpdatePolicy};
 use crate::layout::{Layout, Role};
 use crate::version::Release;
 use seaworthy_service::render::windows::{self as win, HelperGrantee};
+
+/// The `<MajorUpgrade>` element: same-version upgrades allowed and
+/// downgrades refused, or, for a product with first-paint probation
+/// (`allows_downgrades`), every other version removed, older ones included.
+/// `crate::msi_check` models exactly these two.
+#[must_use]
+pub fn major_upgrade(allows_downgrades: bool) -> &'static str {
+    if allows_downgrades {
+        MAJOR_UPGRADE_DOWNGRADES
+    } else {
+        MAJOR_UPGRADE
+    }
+}
+
+/// `<MajorUpgrade>` refusing downgrades (every product without probation).
+pub const MAJOR_UPGRADE: &str = "<MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\" DowngradeErrorMessage=\"A newer version of [ProductName] is already installed.\" />";
+
+/// `<MajorUpgrade>` allowing downgrades (a product with first-paint
+/// probation, whose helper may reinstall the previous release).
+pub const MAJOR_UPGRADE_DOWNGRADES: &str =
+    "<MajorUpgrade AllowDowngrades=\"yes\" Schedule=\"afterInstallInitialize\" />";
 
 /// The argument the MSI's custom action starts the installed launcher with
 /// to make the product's `%ProgramData%` folders: seaworthy-launcher's
@@ -826,10 +849,12 @@ pub fn wxs(
             xml(vendor)
         ),
     );
-    line(
-        4,
-        "<MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\" DowngradeErrorMessage=\"A newer version of [ProductName] is already installed.\" />",
-    );
+    // Every other release of the product is removed first. A product with
+    // first-paint probation also lets an older release replace a newer one
+    // (its update helper reinstalls exactly the previous release when a new
+    // one never paints; its version floor still refuses any other older
+    // release); every other product refuses a downgrade.
+    line(4, major_upgrade(product.updates.probation.is_some()));
     // The products this one can't be installed beside (`conflicts`, both
     // ways) that ship an MSI: each found by its UpgradeCode, detect-only
     // (never removed), and the install refused while one is there. A

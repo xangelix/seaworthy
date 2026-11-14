@@ -186,7 +186,14 @@ pub const COLUMNS: &[(&str, &[&str])] = &[
     ),
     (
         "Upgrade",
-        &["UpgradeCode", "ActionProperty", "Attributes", "Remove"],
+        &[
+            "UpgradeCode",
+            "VersionMin",
+            "VersionMax",
+            "ActionProperty",
+            "Attributes",
+            "Remove",
+        ],
     ),
     (
         "Directory",
@@ -651,6 +658,12 @@ pub struct Expected {
     /// (`SecureCustomProperties`): `Secure="yes"`, the detect-only searches'
     /// and the major upgrade's.
     secure: BTreeSet<String>,
+    /// The `<MajorUpgrade>`'s form: `Some(false)` refuses downgrades (every
+    /// product without first-paint probation; its own upgrade rows are
+    /// left as WiX makes them), `Some(true)` allows them (a product with
+    /// first-paint probation, `crate::wix::MAJOR_UPGRADE_DOWNGRADES`: its
+    /// own rows must be the allowing form's).
+    allows_downgrades: Option<bool>,
 }
 
 /// A setup dialog set as its tables hold it: each row's columns that
@@ -901,8 +914,44 @@ pub fn expected_from_wxs(wxs: &str) -> Result<Expected, String> {
                 }
             }
             "MajorUpgrade" => {
-                for property in ["WIX_UPGRADE_DETECTED", "WIX_DOWNGRADE_DETECTED"] {
-                    expected.secure.insert(property.to_owned());
+                // Exactly one of the two forms seaworthy writes
+                // (crate::wix::major_upgrade), and once.
+                let found: BTreeMap<&str, &str> = attributes
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let refuses: BTreeMap<&str, &str> = [
+                    ("AllowSameVersionUpgrades", "yes"),
+                    ("Schedule", "afterInstallInitialize"),
+                    (
+                        "DowngradeErrorMessage",
+                        "A newer version of [ProductName] is already installed.",
+                    ),
+                ]
+                .into_iter()
+                .collect();
+                let allows: BTreeMap<&str, &str> = [
+                    ("AllowDowngrades", "yes"),
+                    ("Schedule", "afterInstallInitialize"),
+                ]
+                .into_iter()
+                .collect();
+                let downgrades = if found == refuses {
+                    false
+                } else if found == allows {
+                    true
+                } else {
+                    return Err(
+                        "a <MajorUpgrade> other than seaworthy's two forms, which this check doesn't model"
+                            .to_owned(),
+                    );
+                };
+                if expected.allows_downgrades.replace(downgrades).is_some() {
+                    return Err("a second <MajorUpgrade>".to_owned());
+                }
+                expected.secure.insert("WIX_UPGRADE_DETECTED".to_owned());
+                if !downgrades {
+                    expected.secure.insert("WIX_DOWNGRADE_DETECTED".to_owned());
                 }
             }
             "Property" => {
@@ -2186,6 +2235,24 @@ pub fn findings(
         if code.eq_ignore_ascii_case(upgrade_code)
             && code.eq_ignore_ascii_case(&expected.upgrade_code)
         {
+            // A first-paint probation product's own rows, as its
+            // `AllowDowngrades` <MajorUpgrade> makes them: WiX's
+            // WIX_UPGRADE_DETECTED alone, removing (never detect-only). Every
+            // other product's own rows are left as they always were.
+            if expected.allows_downgrades == Some(true) {
+                let property = get(row, "ActionProperty");
+                let detect_only = get(row, "Attributes")
+                    .parse::<u32>()
+                    .is_ok_and(|attributes| attributes & 2 == 2);
+                if property != "WIX_UPGRADE_DETECTED" || detect_only {
+                    findings.push(format!(
+                        "the product's own upgrade row {property:?} (VersionMin {:?}, VersionMax {:?}, Attributes {:?}) isn't what the .wxs's AllowDowngrades <MajorUpgrade> makes",
+                        get(row, "VersionMin"),
+                        get(row, "VersionMax"),
+                        get(row, "Attributes"),
+                    ));
+                }
+            }
             continue;
         }
         let property = get(row, "ActionProperty");
@@ -2714,6 +2781,93 @@ mod tests {
         let expected = expected_from_wxs(WXS).unwrap();
         let found = findings(&expected, &wix_tables(), CODE);
         assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// A probation product's own upgrade rows are exactly what its
+    /// `AllowDowngrades` `<MajorUpgrade>` makes (one row removing every other
+    /// version), and nothing else; every other product's are checked as they
+    /// always were.
+    #[test]
+    fn a_downgrade_is_allowed_only_where_the_wxs_allows_it() {
+        let refusing = expected_from_wxs(WXS).unwrap();
+        assert!(WXS.contains(crate::wix::MAJOR_UPGRADE));
+        let allowing_wxs = WXS.replacen(
+            crate::wix::MAJOR_UPGRADE,
+            crate::wix::MAJOR_UPGRADE_DOWNGRADES,
+            1,
+        );
+        let allowing = expected_from_wxs(&allowing_wxs).unwrap();
+        // What WiX builds from AllowDowngrades: one row removing every
+        // other version (VersionMinInclusive | MigrateFeatures), no
+        // downgrade detection, and only WIX_UPGRADE_DETECTED secure.
+        let mut downgrades = wix_tables();
+        let upgrade = downgrades.get_mut("Upgrade").unwrap();
+        upgrade.rows.truncate(1);
+        upgrade.rows[0].insert("VersionMin".to_owned(), "0".to_owned());
+        upgrade.rows[0].insert("VersionMax".to_owned(), String::new());
+        upgrade.rows[0].insert("Attributes".to_owned(), "257".to_owned());
+        let secure = downgrades["Property"]
+            .rows
+            .iter()
+            .position(|row| {
+                row.get("Property").map(String::as_str) == Some("SecureCustomProperties")
+            })
+            .unwrap();
+        let value =
+            downgrades["Property"].rows[secure]["Value"].replace("WIX_DOWNGRADE_DETECTED;", "");
+        set(&mut downgrades, "Property", secure, "Value", &value);
+        assert_eq!(findings(&allowing, &downgrades, CODE), Vec::<String>::new());
+        // Under the allowing form, a detect-only own row is not WiX's, nor
+        // one naming another property.
+        assert!(
+            findings(&allowing, &wix_tables(), CODE)
+                .iter()
+                .any(|f| f.contains("AllowDowngrades <MajorUpgrade>")),
+        );
+        let mut other = downgrades.clone();
+        set(&mut other, "Upgrade", 0, "ActionProperty", "PLANTED");
+        assert!(
+            findings(&allowing, &other, CODE)
+                .iter()
+                .any(|f| f.contains("\"PLANTED\"")),
+        );
+        // A product without probation: its own rows are left as WiX makes
+        // them, exactly as before first-paint probation existed.
+        assert_eq!(
+            findings(&refusing, &wix_tables(), CODE),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_major_upgrade_other_than_seaworthy_s_two_is_refused() {
+        for (from, to) in [
+            (
+                " DowngradeErrorMessage=\"A newer version of [ProductName] is already installed.\"",
+                "",
+            ),
+            (
+                "AllowSameVersionUpgrades=\"yes\"",
+                "AllowSameVersionUpgrades=\"yes\" AllowDowngrades=\"yes\"",
+            ),
+            (
+                "Schedule=\"afterInstallInitialize\"",
+                "Schedule=\"afterInstallExecute\"",
+            ),
+            (
+                crate::wix::MAJOR_UPGRADE,
+                "<MajorUpgrade AllowDowngrades=\"yes\" Schedule=\"afterInstallInitialize\" MigrateFeatures=\"no\" />",
+            ),
+            (
+                crate::wix::MAJOR_UPGRADE,
+                &format!("{0}\n    {0}", crate::wix::MAJOR_UPGRADE),
+            ),
+        ] {
+            assert!(WXS.contains(from), "{from}");
+            let wxs = WXS.replacen(from, to, 1);
+            let refused = expected_from_wxs(&wxs).unwrap_err();
+            assert!(refused.contains("MajorUpgrade"), "{refused}");
+        }
     }
 
     /// [`wix_tables`]'s descriptors as `msiinfo export -s` (msitools 0.106)
