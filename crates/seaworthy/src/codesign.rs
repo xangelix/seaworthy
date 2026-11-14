@@ -798,6 +798,34 @@ impl Pins {
                 "no Authenticode identity is pinned".to_owned(),
             ));
         };
+        self.check_signer(file, subject, trust, "defaults.authenticode.subject")
+    }
+
+    /// Checks `file`'s Authenticode signature against one identity: it
+    /// verifies to `trust`'s anchors (the signer's chain and its
+    /// timestamp's) and its signer is `subject` (a bundled runtime's
+    /// publisher, [`crate::config::Runtime::publishers`]).
+    ///
+    /// # Errors
+    /// As [`Pins::check_authenticode`].
+    pub fn check_authenticode_as(
+        &self,
+        file: &Path,
+        subject: &str,
+        trust: &Path,
+    ) -> Result<(), DistError> {
+        self.check_signer(file, subject, trust, "runtime.publishers")
+    }
+
+    /// The signature check itself, naming `key`, the setting that pinned
+    /// the identity, in a refusal.
+    fn check_signer(
+        &self,
+        file: &Path,
+        subject: &str,
+        trust: &Path,
+        key: &str,
+    ) -> Result<(), DistError> {
         let report = verify_authenticode(&self.osslsigncode, file, Some(trust)).map_err(|e| {
             DistError::Sign(format!(
                 "{}: the Authenticode signature doesn't verify to {} ({e})",
@@ -819,7 +847,7 @@ impl Pins {
         match signer_subject(&report) {
             Some(found) if found == subject => Ok(()),
             found => Err(DistError::Sign(format!(
-                "{}: signed by {:?}, not the pinned {subject:?} (defaults.authenticode.subject)",
+                "{}: signed by {:?}, not the pinned {subject:?} ({key})",
                 file.display(),
                 found.unwrap_or("nobody")
             ))),

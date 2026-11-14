@@ -10,6 +10,7 @@
 //! | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 //! | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | `Contents/MacOS/<helper>`, else `bin/<helper>` |
 //! | Data files (`[[files]]`) | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>`; `Resources/<destination>` |
+//! | Bundled runtimes (`[[runtime]]`) | `<destination>/<path>`, or a file's own `destination`; its mode | the same | — |
 //! | Installed release record (`updates.probation`; `package` writes it) | `seaworthy-release`, mode 0644 | `seaworthy-release` | — |
 //! | Icons | `[desktop]`: `/usr/share/icons/hicolor/<size>/apps/<app-id>.<ext>` | `[desktop]`: `tree/<Vendor>/<Directory>.ico`, for the MSI only | `[macos] icon`: `Contents/Resources/<file>.icns` |
 //!
@@ -154,6 +155,14 @@ pub enum Role {
     /// `DefaultIcon` names (in the install directory), the macOS `.icns`
     /// in the bundle's `Contents/Resources`. Data, never stamped or signed.
     DocumentIcon,
+    /// A file of a bundled runtime (`[[product.<id>.runtime]]`): third-party
+    /// code or data, pinned by `verify`, shipped with its own mode; a Linux
+    /// ELF file stripped only when the runtime says so, a Windows PE file
+    /// never stamped, and signed only when it arrives unsigned.
+    Runtime {
+        /// The runtime's name.
+        runtime: String,
+    },
     /// The installed release record (`seaworthy-release` in the install
     /// root, `seaworthy-installed-release:1`): `package` writes it into the
     /// Linux and Windows trees of a product with first-paint probation
@@ -205,6 +214,8 @@ pub struct Layout {
     /// `tree/<Vendor>/<Directory>.rtf` (its `install_path`) for the setup
     /// dialog's text; never installed as a file.
     pub license: Option<File>,
+    /// The bundled runtimes in the tree: `(name, distribution)`.
+    pub runtimes: Vec<(String, String)>,
 }
 
 impl Layout {
@@ -301,6 +312,17 @@ struct Manifest<'a> {
     install_root: &'a str,
     tree: &'static str,
     files: Vec<ManifestFile<'a>>,
+    /// The bundled runtimes and the distributions they are (left out
+    /// without any, so a tree without one reads as before).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runtimes: Vec<ManifestRuntime<'a>>,
+}
+
+/// A bundled runtime in `layout.json`.
+#[derive(Serialize)]
+struct ManifestRuntime<'a> {
+    name: &'a str,
+    distribution: &'a str,
 }
 
 /// Lays out product `id`'s verified artifacts under `out`.
@@ -396,6 +418,20 @@ pub fn layout(
         };
         let (mut data_files, mut data_bytes) = (0_usize, 0_u64);
         let mut post_link = PostLinks::new();
+        // Each bundled runtime file's mode, and whether it is stripped (a
+        // Linux ELF file of a runtime that says so).
+        let runtime_files: BTreeMap<&Path, (u32, bool)> = platform
+            .runtimes
+            .iter()
+            .flat_map(|runtime| {
+                runtime.files.iter().map(move |file| {
+                    let strip = os == Os::Linux
+                        && runtime.strip
+                        && file.image == crate::runtime::Image::Elf;
+                    (file.source.as_path(), (file.mode, strip))
+                })
+            })
+            .collect();
         let mut place = |source: &Path,
                          (root, staged_root): &(String, PathBuf),
                          relative: &str,
@@ -465,7 +501,18 @@ pub fn layout(
                 return Ok(());
             }
             std::fs::copy(source, &staged).map_err(|e| DistError::io(source, e))?;
-            set_mode(&staged, 0o755)?;
+            // A runtime file's mode is its own (recorded for the packages;
+            // staged without setuid, which only the installed copy gets).
+            let (mode, strip_it) = match &role {
+                Role::Runtime { .. } => runtime_files.get(source).copied().ok_or_else(|| {
+                    DistError::Layout(format!(
+                        "{} isn't a verified runtime file",
+                        source.display()
+                    ))
+                })?,
+                _ => (0o755, os == Os::Linux && role != Role::Sidecar),
+            };
+            set_mode(&staged, mode & 0o777)?;
             // The copy must be the file verify read, byte for byte.
             let copied = std::fs::read(&staged).map_err(|e| DistError::io(&staged, e))?;
             if verified.digest(source)
@@ -476,8 +523,7 @@ pub fn layout(
                     source.display()
                 )));
             }
-            let is_elf = os == Os::Linux && role != Role::Sidecar;
-            let bytes = if is_elf && options.strip {
+            let bytes = if strip_it && options.strip {
                 strip(&options.strip_tool, &staged)?;
                 recheck_record(&staged, &role, "stripped")?;
                 // What the loader maps is what verify read.
@@ -494,7 +540,7 @@ pub fn layout(
                 staged,
                 role,
                 program: program.map(str::to_owned),
-                mode: 0o755,
+                mode,
                 sha256: seaworthy_crypto::digest::sha256_hex(&bytes),
             });
             Ok(())
@@ -605,6 +651,20 @@ pub fn layout(
                 },
             };
             place(helper, root, &relative, Role::Helper, None)?;
+        }
+        // Bundled runtimes, under the install root as their settings say.
+        for runtime in &platform.runtimes {
+            for file in &runtime.files {
+                place(
+                    &file.source,
+                    &main_root,
+                    &file.install,
+                    Role::Runtime {
+                        runtime: runtime.name.clone(),
+                    },
+                    None,
+                )?;
+            }
         }
         let platform_kind: Platform = os.platform();
         for extra in product
@@ -831,6 +891,11 @@ pub fn layout(
             desktop_files,
             icon,
             license,
+            runtimes: platform
+                .runtimes
+                .iter()
+                .map(|r| (r.name.clone(), r.distribution.clone()))
+                .collect(),
         };
         write_manifest_with(&layout, &post_link)?;
         layouts.push(layout);
@@ -893,6 +958,11 @@ pub(crate) fn write_manifest_with(layout: &Layout, post_link: &PostLinks) -> Res
                     .get(&f.staged)
                     .and_then(|p| p.signed.then_some(crate::post_link::SIGNED)),
             })
+            .collect(),
+        runtimes: layout
+            .runtimes
+            .iter()
+            .map(|(name, distribution)| ManifestRuntime { name, distribution })
             .collect(),
     };
     let text =
@@ -973,7 +1043,8 @@ pub(crate) fn recheck_record(path: &Path, role: &Role, when: &str) -> Result<(),
         | Role::Uninstaller
         | Role::License
         | Role::DocumentIcon
-        | Role::ReleaseRecord => Ok(()),
+        | Role::ReleaseRecord
+        | Role::Runtime { .. } => Ok(()),
     };
     result.map_err(|e| {
         DistError::Layout(format!(

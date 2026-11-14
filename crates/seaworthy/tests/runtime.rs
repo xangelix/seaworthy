@@ -1,7 +1,8 @@
-//! Bundled runtimes (`[[product.<id>.runtime]]`) through `verify`: exactly
-//! the pinned files with the pinned bytes, native code of the platform
-//! checked as the product's own, and a `DT_NEEDED` entry reached through an
-//! `$ORIGIN` `DT_RUNPATH` and nothing else.
+//! Bundled runtimes (`[[product.<id>.runtime]]`) through `verify` and
+//! `layout`: exactly the pinned files with the pinned bytes, native code of
+//! the platform checked as the product's own, a `DT_NEEDED` entry reached
+//! through an `$ORIGIN` `DT_RUNPATH` and nothing else, and the tree laid out
+//! with each file's mode and destination.
 
 #![allow(
     clippy::expect_used,
@@ -18,6 +19,7 @@ use common::{Elf, LOADER, Pe, cpulist, record, write};
 use seaworthy::DistError;
 use seaworthy::config::Config;
 use seaworthy::inputs::{LINUX, WINDOWS};
+use seaworthy::layout::Role;
 
 const V2: &[&str] = &[
     "cmpxchg16b",
@@ -470,4 +472,407 @@ fn a_bundled_library_is_reached_only_through_an_origin_runpath() {
                 && !f.contains("DT_RUNPATH")),
         "{found:#?}"
     );
+}
+
+#[test]
+fn the_tree_lays_out_with_each_files_destination_mode_and_strip() {
+    let fx = fixture();
+    let config = fx.config();
+    let verified = seaworthy::verify::verify(&config, "viewer", &fx.artifacts()).unwrap();
+    let out = fx.dir.path().join("dist");
+    let strip = common::have("strip", &["--version"]);
+    let layouts = seaworthy::layout::layout(
+        &config,
+        "viewer",
+        &verified,
+        &out,
+        seaworthy::layout::Options {
+            strip,
+            ..seaworthy::layout::Options::default()
+        },
+    )
+    .expect("lays out");
+    let linux = common::layout_for(&layouts, LINUX);
+    let runtime: Vec<(&str, u32)> = linux
+        .files
+        .iter()
+        .filter(|f| matches!(&f.role, Role::Runtime { runtime } if runtime == "engine"))
+        .map(|f| (f.install_path.as_str(), f.mode))
+        .collect();
+    assert_eq!(
+        runtime,
+        [
+            ("/opt/acme/viewer/engine-sandbox", 0o4755),
+            ("/opt/acme/viewer/lib/libengine.so", 0o755),
+            ("/opt/acme/viewer/lib/locales/en-US.pak", 0o644),
+            ("/opt/acme/viewer/lib/resources.pak", 0o644),
+        ]
+    );
+    assert_eq!(
+        linux.runtimes,
+        [("engine".to_owned(), "engine-1.0-linux64".to_owned())]
+    );
+    // Staged without the setuid bit (only the package's copy gets it).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let sandbox = linux
+            .files
+            .iter()
+            .find(|f| f.install_path.ends_with("/engine-sandbox"))
+            .unwrap();
+        let mode = std::fs::metadata(&sandbox.staged)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o755);
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(out.join("viewer").join(LINUX).join("layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["runtimes"],
+        serde_json::json!([{ "name": "engine", "distribution": "engine-1.0-linux64" }])
+    );
+    let entry = |suffix: &str| {
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["install_path"].as_str().unwrap().ends_with(suffix))
+            .unwrap()
+            .clone()
+    };
+    let lib = entry("/lib/libengine.so");
+    assert_eq!(
+        lib["role"],
+        serde_json::json!({ "kind": "runtime", "runtime": "engine" })
+    );
+    if strip {
+        assert_eq!(lib["strip"], "non-alloc");
+        assert_eq!(entry("/engine-sandbox")["strip"], "non-alloc");
+    }
+    assert!(entry("/lib/resources.pak").get("strip").is_none());
+    let windows = common::layout_for(&layouts, WINDOWS);
+    let installs: Vec<&str> = windows
+        .files
+        .iter()
+        .filter(|f| matches!(f.role, Role::Runtime { .. }))
+        .map(|f| f.install_path.as_str())
+        .collect();
+    assert_eq!(
+        installs,
+        ["Acme\\Viewer\\engine.dll", "Acme\\Viewer\\resources.pak"]
+    );
+}
+
+#[test]
+fn a_runtime_file_may_not_land_on_the_products_own() {
+    let fx = fixture();
+    // Its destination is the launcher's.
+    let config = fx.with_config(&CONFIG.replace(
+        "destination = \"engine-sandbox\"",
+        "destination = \"AcmeViewer\"",
+    ));
+    let verified = seaworthy::verify::verify(&config, "viewer", &fx.artifacts()).unwrap();
+    let err = seaworthy::layout::layout(
+        &config,
+        "viewer",
+        &verified,
+        &fx.dir.path().join("dist"),
+        seaworthy::layout::Options {
+            strip: false,
+            ..seaworthy::layout::Options::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("two files would install as /opt/acme/viewer/AcmeViewer"),
+        "{err}"
+    );
+}
+
+/// The Linux packages and the tarball install the runtime with its modes,
+/// root-owned: the setuid helper as `-rwsr-xr-x root root`, a library 0755,
+/// data 0644, nested directories included; the zip carries the Windows
+/// runtime beside the launcher.
+#[test]
+fn the_packages_carry_each_runtime_file_root_owned_with_its_mode() {
+    let Some(nfpm) = common::nfpm() else { return };
+    let tools = ["dpkg-deb", "rpm", "bsdtar"];
+    if !tools.iter().all(|tool| common::have(tool, &["--version"])) {
+        assert!(!common::required(), "{tools:?} are required");
+        return;
+    }
+    let fx = fixture();
+    let config = fx.config();
+    let verified = seaworthy::verify::verify(&config, "viewer", &fx.artifacts()).unwrap();
+    let out = fx.dir.path().join("dist");
+    let layouts = seaworthy::layout::layout(
+        &config,
+        "viewer",
+        &verified,
+        &out,
+        seaworthy::layout::Options {
+            strip: false,
+            ..seaworthy::layout::Options::default()
+        },
+    )
+    .unwrap();
+    let artifacts = seaworthy::package::package(
+        &config,
+        "viewer",
+        &layouts,
+        &out,
+        &seaworthy::package::Options {
+            release: common::release(),
+            mtime: 1_700_000_000,
+            nfpm,
+            wix: None,
+            build: seaworthy::sign::BuildId::default(),
+        },
+        &seaworthy::package::Signing::default(),
+    )
+    .expect("packages");
+    use seaworthy::package::Kind;
+    let listing = |program: &str, args: &[&str], file: &Path| {
+        common::run(std::process::Command::new(program).args(args).arg(file))
+    };
+    let deb = listing(
+        "dpkg-deb",
+        &["-c"],
+        &common::artifact(&artifacts, Kind::Deb),
+    );
+    let line = |text: &str, path: &str| {
+        text.lines()
+            .find(|l| l.ends_with(path))
+            .unwrap_or_else(|| panic!("{path} not in:\n{text}"))
+            .to_owned()
+    };
+    assert!(line(&deb, "/opt/acme/viewer/engine-sandbox").starts_with("-rwsr-xr-x root/root"));
+    assert!(line(&deb, "/opt/acme/viewer/lib/libengine.so").starts_with("-rwxr-xr-x root/root"));
+    assert!(
+        line(&deb, "/opt/acme/viewer/lib/locales/en-US.pak").starts_with("-rw-r--r-- root/root")
+    );
+    assert!(line(&deb, "/opt/acme/viewer/lib/locales/").starts_with("drwxr-xr-x root/root"));
+    let rpm = listing(
+        "rpm",
+        &[
+            "-qp",
+            "--qf",
+            "[%{FILEMODES:perms} %{FILEUSERNAME} %{FILEGROUPNAME} %{FILENAMES}\n]",
+        ],
+        &common::artifact(&artifacts, Kind::Rpm),
+    );
+    assert_eq!(
+        line(&rpm, "/opt/acme/viewer/engine-sandbox"),
+        "-rwsr-xr-x root root /opt/acme/viewer/engine-sandbox"
+    );
+    assert_eq!(
+        line(&rpm, "/opt/acme/viewer/lib/resources.pak"),
+        "-rw-r--r-- root root /opt/acme/viewer/lib/resources.pak"
+    );
+    let tar = listing(
+        "bsdtar",
+        &["-tvf"],
+        &common::artifact(&artifacts, Kind::Tar),
+    );
+    assert!(
+        line(&tar, "/engine-sandbox").starts_with("-rwsr-xr-x"),
+        "{tar}"
+    );
+    assert!(
+        line(&tar, "/lib/locales/en-US.pak").starts_with("-rw-r--r--"),
+        "{tar}"
+    );
+    let zip = listing("bsdtar", &["-tf"], &common::artifact(&artifacts, Kind::Zip));
+    assert!(
+        zip.lines().any(|l| l.ends_with("/engine.dll"))
+            && zip.lines().any(|l| l.ends_with("/resources.pak")),
+        "{zip}"
+    );
+}
+
+/// A self-signed code-signing certificate for `subject` (OpenSSL's slash
+/// form) and its key (0600).
+fn certificate(dir: &Path, name: &str, subject: &str) -> (PathBuf, PathBuf) {
+    let (cert, key) = (
+        dir.join(format!("{name}.pem")),
+        dir.join(format!("{name}.key")),
+    );
+    common::run(
+        std::process::Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "30", "-subj", subject,
+            ])
+            .args([
+                "-addext",
+                "extendedKeyUsage=codeSigning",
+                "-addext",
+                "keyUsage=digitalSignature",
+            ])
+            .arg("-keyout")
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (cert, key)
+}
+
+fn osslsigncode(cert: &Path, key: &Path) -> seaworthy::codesign::Osslsigncode {
+    seaworthy::codesign::Osslsigncode {
+        tool: PathBuf::from("osslsigncode"),
+        certificate: cert.to_path_buf(),
+        key: key.to_path_buf(),
+        timestamp_url: None,
+        url: None,
+        timeout: std::time::Duration::from_secs(120),
+    }
+}
+
+/// Windows: an unsigned runtime DLL is signed with the product's identity
+/// (never version-stamped); one that arrives signed keeps its signature only
+/// when it verifies to a publisher the runtime lists, and anyone else's is
+/// refused; data is shipped as pinned.
+#[test]
+fn a_signed_runtime_dll_keeps_its_signature_only_from_a_listed_publisher() {
+    use seaworthy::codesign::AuthenticodeSigner as _;
+    if !common::have("osslsigncode", &["--version"]) || !common::have("openssl", &["version"]) {
+        assert!(!common::required(), "osslsigncode and openssl are required");
+        return;
+    }
+    let fx = fixture();
+    let keys = fx.project();
+    let (own_cert, own_key) = certificate(&keys, "own", "/CN=Acme Test Code Signing/O=Acme");
+    let (vendor_cert, vendor_key) = certificate(
+        &keys,
+        "vendor",
+        "/CN=Engine Vendor Code Signing/O=Engine Vendor",
+    );
+    let (stranger_cert, stranger_key) = certificate(&keys, "stranger", "/CN=Stranger/O=Nobody");
+    let runtime = fx.runtime(WINDOWS);
+    // The vendor's signed DLL, pinned as it arrives.
+    std::fs::copy(runtime.join("engine.dll"), runtime.join("vendor.dll")).unwrap();
+    osslsigncode(&vendor_cert, &vendor_key)
+        .sign(&runtime.join("vendor.dll"), "Engine")
+        .unwrap();
+    fx.pin();
+    let config_text = format!(
+        "{}\n[[product.viewer.runtime.publishers]]\nsubject = \"O=Engine Vendor,CN=Engine Vendor Code Signing\"\ntrust = \"vendor.pem\"\n",
+        CONFIG.replace(
+            "license = \"MIT\"\n",
+            "license = \"MIT\"\n\n[defaults.authenticode]\nsubject = \"O=Acme,CN=Acme Test Code Signing\"\ntrust = \"own.pem\"\n",
+        )
+    );
+    let config = fx.with_config(&config_text);
+    let package = |config: &Config, out: &str| {
+        let mut config = config.clone();
+        config.only_platforms(&[seaworthy::config::Platform::Windows]);
+        let config = &config;
+        let verified = seaworthy::verify::verify(config, "viewer", &fx.artifacts())?;
+        let out = fx.dir.path().join(out);
+        let layouts = seaworthy::layout::layout(
+            config,
+            "viewer",
+            &verified,
+            &out,
+            seaworthy::layout::Options {
+                strip: false,
+                ..seaworthy::layout::Options::default()
+            },
+        )?;
+        seaworthy::package::package(
+            config,
+            "viewer",
+            &layouts,
+            &out,
+            &seaworthy::package::Options {
+                release: common::release(),
+                mtime: 1_700_000_000,
+                nfpm: PathBuf::from("nfpm"),
+                wix: None,
+                build: seaworthy::sign::BuildId::default(),
+            },
+            &seaworthy::package::Signing {
+                authenticode: Some(Box::new(osslsigncode(&own_cert, &own_key))),
+                authenticode_only: true,
+                ..seaworthy::package::Signing::default()
+            },
+        )
+        .map(|_| out)
+    };
+    let out = package(&config, "dist").expect("packages");
+    let tree = out.join("viewer").join(WINDOWS).join("tree/Acme/Viewer");
+    let signer = |file: &str, ca: &Path| {
+        let report = seaworthy::codesign::verify_authenticode(
+            Path::new("osslsigncode"),
+            &tree.join(file),
+            Some(ca),
+        )
+        .unwrap();
+        seaworthy::codesign::signer_subject(&report).map(str::to_owned)
+    };
+    assert_eq!(
+        signer("engine.dll", &own_cert).as_deref(),
+        Some("O=Acme,CN=Acme Test Code Signing")
+    );
+    assert_eq!(
+        signer("vendor.dll", &vendor_cert).as_deref(),
+        Some("O=Engine Vendor,CN=Engine Vendor Code Signing")
+    );
+    // The vendor's file is shipped as pinned; data too; ours was only signed
+    // (no version resource stamped into the engine's DLL).
+    let pinned = |file: &str| std::fs::read(runtime.join(file)).unwrap();
+    assert_eq!(
+        std::fs::read(tree.join("vendor.dll")).unwrap(),
+        pinned("vendor.dll")
+    );
+    assert_eq!(
+        std::fs::read(tree.join("resources.pak")).unwrap(),
+        pinned("resources.pak")
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(out.join("viewer").join(WINDOWS).join("layout.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = |suffix: &str| {
+        manifest["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["install_path"].as_str().unwrap().ends_with(suffix))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(entry("\\engine.dll")["sign"], "certificate-table");
+    assert!(entry("\\engine.dll").get("stamp").is_none());
+    assert!(entry("\\vendor.dll").get("sign").is_none());
+    // Signed by anyone the runtime doesn't list: refused.
+    osslsigncode(&stranger_cert, &stranger_key)
+        .sign(&runtime.join("engine.dll"), "Engine")
+        .unwrap();
+    fx.pin();
+    let err = package(&config, "dist-refused").unwrap_err().to_string();
+    assert!(
+        err.contains("engine.dll: arrives Authenticode-signed, but not by a publisher runtime \"engine\" allows"),
+        "{err}"
+    );
+    // And with no publishers listed at all.
+    std::fs::write(
+        fx.project().join("seaworthy.toml"),
+        config_text
+            .split("\n[[product.viewer.runtime.publishers]]")
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let err = package(&fx.config(), "dist-none").unwrap_err().to_string();
+    assert!(err.contains("it lists none"), "{err}");
 }

@@ -23,6 +23,7 @@ artifacts ──▶ verify ──▶ layout ──▶ package ──▶ repo ─
 <artifacts>/<triple>/cores/<build>/lib<core>.so      Linux (x86_64-unknown-linux-gnu)
 <artifacts>/<triple>/cores/<build>/<core>.dll        Windows (x86_64-pc-windows-msvc), with the sidecars
 <artifacts>/<triple>/cores/<build>/lib<core>.dylib   macOS (aarch64-apple-darwin)
+<artifacts>/<triple>/runtime/<name>/…                 a bundled runtime's tree (Linux, Windows)
 ```
 
 `<build>` is the CPU target, or `<cpu>.f<8 hex>` for a program whose core builds with cargo features
@@ -135,7 +136,12 @@ wrong:
    as glibc's loader reads it, a weakly referenced symbol's version included. A Linux core with
    initial-exec TLS (`DF_STATIC_TLS`) is refused: the launcher loads cores with `dlopen`, and glibc
    then has only a small static TLS surplus to give. macOS binaries link the system's libraries
-   alone and need no macOS newer than `defaults.macos-minimum`.
+   alone and need no macOS newer than `defaults.macos-minimum`. A Linux binary may also need a
+   library a bundled runtime ships, through its `$ORIGIN` search path alone
+   ([Bundled runtimes](#bundled-runtimes)).
+7. **Bundled runtimes.** Each runtime's directory holds exactly its pinned files, with exactly the
+   pinned bytes; its native code is checked as the product's own binaries are
+   ([Bundled runtimes](#bundled-runtimes)).
 
 An import table, dynamic section or version table that doesn't parse, a stripped Linux binary and a
 stripped macOS core of a FIPS product are findings, never a pass: the checks would otherwise pass
@@ -168,6 +174,7 @@ floor and the packages' dependency together.
 | Sidecars | — | beside the cores, one copy | beside the cores, one copy per directory |
 | Helper | `libexec/<vendor>-<product>-update` | `<helper>.exe` | the bundle's `Contents/MacOS`, else the tool directory's `bin` (not in a dmg) |
 | Data files | `<destination>`, mode 0644 | `<destination>` | `Contents/Resources/<destination>`, and `Resources/<destination>` in the tool directory |
+| Bundled runtimes | `<destination>/<path>` (or the file's own `destination`), its mode | the same | — |
 | Installed release record (`updates.probation` only; `package` writes it) | `seaworthy-release`, mode 0644 | `seaworthy-release` | — |
 
 On macOS the app bundle holds the bundled program: the `gui` program, or the single-program form's
@@ -262,8 +269,9 @@ call warns and the transaction goes on; deb honours `policy-rc.d` and `DPKG_ROOT
 
 ### Windows
 
-Each Windows binary (the launcher, every core, the helper; never a sidecar) gets a version resource
-stamped after linking, then every Windows binary is Authenticode-signed, then the zip and the MSI's
+Each Windows binary (the launcher, every core, the helper; never a sidecar or a bundled runtime's
+file) gets a version resource stamped after linking, then every Windows binary is
+Authenticode-signed (a bundled runtime's as [below](#bundled-runtimes)), then the zip and the MSI's
 `.wxs` are written over the signed tree. The MSI:
 
 - installs to a fixed `%ProgramFiles%\<Vendor>\<Directory>` (no command-line relocation), or
@@ -444,6 +452,74 @@ same way
 ([configuration.md](configuration.md#signingtoml)). The ticket is stapled to the dmg or pkg, the
 outermost container; an app copied out of the dmg is checked against the notary service online.
 A dmg isn't byte-reproducible (`hdiutil` writes timestamps and a UUID).
+
+### Bundled runtimes
+
+A product built on a browser engine (Chromium through CEF, say) ships the engine's distribution
+beside its own code: native libraries, a setuid sandbox helper, resource packs, locales in nested
+directories, and one library far past the data files' 256 MiB. `[[product.<id>.runtime]]`
+([configuration.md](configuration.md#productidruntime)) is that class of file, one entry per
+platform: third-party code and data, pinned file by file to a named distribution.
+
+**Where it comes from.** The build (the CI templates' `runtime` input,
+[ci-gitlab.md](ci-gitlab.md), [ci-github.md](ci-github.md)) puts the distribution, as it installs
+under the runtime's `destination`, in `<artifacts>/<triple>/runtime/<name>/`. The pin list in the
+product's repository names every file with its SHA-256 (`sha256sum`'s output over that directory),
+so a different distribution, an added file or a changed byte is a reviewed change to the pins, never
+something a build picks up.
+
+**What `verify` checks**, every finding reported together:
+
+- the directory holds exactly the pinned files (a missing or extra file is named), regular files
+  only (a link or a special file is refused, never followed), each at most the runtime's
+  `max-file-mib` (default 256 MiB, at most 2 GiB: a large library is an explicit choice) and with
+  exactly its pinned SHA-256;
+- native code is the platform's: an ELF64 x86-64 image on Linux, a PE32+ AMD64 image on Windows; a
+  PE or Mach-O file in a Linux runtime, or an ELF or Mach-O file in a Windows one, is refused;
+- each image passes the checks the product's own binaries pass (check 6): on Linux the glibc floor,
+  no initial-exec TLS (`DF_STATIC_TLS`) in a shared library, and every `DT_NEEDED` entry from the
+  base system, `linux.needed` (whose packages `linux.depends` must name) or another bundled library;
+  on Windows the static C runtime (CEF 154's DLLs import no `vcruntime` or `msvcp` DLL: no
+  exemption exists, nor is one needed);
+- a file given mode `4755` is an ELF executable.
+
+**A bundled library a binary needs.** A Linux binary's `DT_NEEDED` entry outside the base system and
+`linux.needed` passes only when a bundled library of exactly that name, whose `DT_SONAME` is that
+name, installs in a directory the binary's `DT_RUNPATH` reaches, and **every** entry of that
+`DT_RUNPATH` is `$ORIGIN` or `$ORIGIN/<relative path>` resolving inside the install root (a core in
+`lib/` reaching `lib/libcef.so` through `$ORIGIN`, a launcher at the root through `$ORIGIN/lib`). An
+absolute entry, another token (`$LIB`, `$PLATFORM`), a path leaving the install root, or a
+`DT_RPATH` (which reaches into every library it loads, and before `LD_LIBRARY_PATH`) is refused: a
+bundled library is found beside the binary that needs it, never wherever the machine keeps
+libraries. Link with `-Wl,--enable-new-dtags,-rpath,$ORIGIN`.
+
+**The launcher's `dlopen`.** The core that links a runtime's library is loaded by the launcher with
+`dlopen`, so the library and everything it needs come from glibc's static-TLS surplus if they use
+initial-exec TLS. `verify` refuses such a library. CEF 154's `libcef.so` uses none (its TLS is
+general-dynamic: `R_X86_64_DTPMOD64` relocations, no `DF_STATIC_TLS`), and a core linking it and
+GTK 4 loads on RHEL 9's glibc 2.34 with the optional surplus set to zero.
+
+**Layout.** Each file installs at `<destination>/<path>` under the install root, or at its own
+`destination` (Chromium's `chrome-sandbox` beside the launcher, where Chromium looks for it), with
+its mode: 0755 for an ELF or PE image, 0644 for data, or the file's own (`4755` only for a Linux ELF
+executable). The packages install every file root-owned: a `4755` file is setuid root in the deb,
+the rpm, the pacman package and the tarball (the staged copy is never setuid). With `strip = true`
+a Linux runtime's ELF files are stripped (`strip --strip-all`), each stripped copy checked to map
+exactly what the pinned one maps (`"strip": "non-alloc"` in `layout.json`); otherwise they ship as
+pinned. `layout.json` names each runtime and its distribution (`runtimes`), and each file's role is
+`{"kind": "runtime", "runtime": "<name>"}`.
+
+**Windows signatures.** A runtime file is never version-stamped. A PE image that arrives unsigned is
+Authenticode-signed with the product's own identity, like every other binary. One that arrives
+signed (CEF's `d3dcompiler_47.dll` and `dxil.dll`, which Microsoft signs) keeps its signature only
+when it verifies to one of the runtime's `publishers`: their subject, with a chain and a timestamp
+reaching their trust anchors. A file signed by anyone else is refused. Data files are shipped as
+pinned. An unsigned build signs nothing.
+
+**What a runtime is not.** It isn't the product's code: no record, no CPU level, no FIPS check (a
+FIPS product's cryptography stays in its cores; a browser engine carries its own TLS and crypto, which
+the product's security model must account for). macOS (a framework and helper apps inside the
+bundle, signed inside out) is not supported yet.
 
 ### File types
 

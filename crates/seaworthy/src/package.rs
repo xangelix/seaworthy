@@ -1672,7 +1672,11 @@ fn prepare_windows(
                 | Role::Uninstaller
                 | Role::License
                 | Role::DocumentIcon
-                | Role::ReleaseRecord,
+                | Role::ReleaseRecord
+                // A bundled runtime's files are the distribution's own:
+                // never stamped (a signed one keeps its signature only as
+                // it arrived; an unsigned one is signed below).
+                | Role::Runtime { .. },
                 _,
             ) => None,
         };
@@ -1694,6 +1698,23 @@ fn prepare_windows(
         }
         if let Some(signer) = authenticode {
             let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
+            // A bundled runtime's file: its data is shipped as pinned; a PE
+            // image that arrives signed keeps that signature only when it
+            // verifies to one of the runtime's publishers, and is refused
+            // otherwise; an unsigned one is signed as the product's own.
+            if let Role::Runtime { runtime } = &file.role {
+                if crate::runtime::Image::of(&bytes) != crate::runtime::Image::Pe {
+                    file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
+                    continue;
+                }
+                let signed = crate::pe_version::is_signed(&bytes)
+                    .map_err(|e| DistError::Layout(format!("{}: {e}", file.staged.display())))?;
+                if signed {
+                    check_runtime_publisher(config, product, runtime, &file.staged, pins)?;
+                    file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
+                    continue;
+                }
+            }
             let signed_already = matches!(file.role, Role::Sidecar)
                 && crate::pe_version::is_signed(&bytes)
                     .map_err(|e| DistError::Layout(format!("{}: {e}", file.staged.display())))?;
@@ -1720,6 +1741,43 @@ fn prepare_windows(
         file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
     }
     crate::layout::write_manifest_with(layout, &post_link)
+}
+
+/// A bundled runtime's file that arrives Authenticode-signed: kept only when
+/// its signature verifies to one of the runtime's `publishers` (subject and
+/// trust anchors); refused naming the file and the runtime otherwise.
+fn check_runtime_publisher(
+    config: &Config,
+    product: &crate::config::Product,
+    runtime: &str,
+    file: &Path,
+    pins: &crate::codesign::Pins,
+) -> Result<(), DistError> {
+    let publishers = product
+        .runtime
+        .iter()
+        .filter(|r| r.name == runtime && r.platform == crate::config::Platform::Windows)
+        .flat_map(|r| r.publishers.iter());
+    let mut refusals = Vec::new();
+    for publisher in publishers {
+        match pins.check_authenticode_as(
+            file,
+            &publisher.subject,
+            &config.dir.join(&publisher.trust),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(e) => refusals.push(e.to_string()),
+        }
+    }
+    Err(DistError::Sign(format!(
+        "{}: arrives Authenticode-signed, but not by a publisher runtime {runtime:?} allows (runtime.publishers): {}",
+        file.display(),
+        if refusals.is_empty() {
+            "it lists none".to_owned()
+        } else {
+            refusals.join("; ")
+        }
+    )))
 }
 
 /// The macOS signer: the Developer ID with its pinned team (and the main
