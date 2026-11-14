@@ -13,6 +13,10 @@
 //!   release manifest ([`ManifestTrust`]) and the package, applies the
 //!   version floor ([`release`]), and hands the exact file to the OS
 //!   package manager (`installer`, feature `installers`).
+//! - **First-paint probation** ([`first_paint`], always available; the
+//!   helper's side with feature `helper`): a desktop app reports its first
+//!   paint, and the helper puts back exactly the release it replaced when a
+//!   new one never paints (`updates.probation`).
 //! - **A desktop app around its own update** (`relaunch`, feature
 //!   `relaunch`): the release installed now, and the app back once the
 //!   helper has installed another (a watcher that restarts it on Windows,
@@ -56,7 +60,7 @@
 //!
 //! | Feature | Adds |
 //! |---|---|
-//! | (none) | the request API, the policy readers, the helper's [`status`] record, [`process`], [`openpgp`] |
+//! | (none) | the request API, the policy readers, the helper's [`status`] record, first-paint probation's app side ([`first_paint`]), [`process`], [`openpgp`] |
 //! | `installers` | `installer`: apt, dnf, pacman, macOS's installer, msiexec |
 //! | `helper` | `helper` and its download path, staging, failure memo (implies `installers`) |
 //! | `relaunch` | `relaunch` (implies `installers`) |
@@ -67,6 +71,7 @@
 // allowed on its own with its invariant.
 #![deny(clippy::indexing_slicing, clippy::unreachable)]
 
+pub mod first_paint;
 #[cfg(feature = "helper")]
 pub mod helper;
 #[cfg(feature = "installers")]
@@ -254,6 +259,19 @@ pub mod __fuzz {
     /// The derivation's refusal, as text.
     pub fn metadata_url(artifact_url: &str, extension: &str) -> Result<String, String> {
         crate::net::metadata_url(artifact_url, extension).map_err(|e| e.to_string())
+    }
+
+    /// The helper's first-paint probation record: its text, re-encoded,
+    /// when it parses.
+    #[must_use]
+    pub fn probation_record(text: &str) -> Option<String> {
+        crate::helper::probation_record_round_trip(text)
+    }
+
+    /// The helper's rejected tokens: their text, re-encoded, when it parses.
+    #[must_use]
+    pub fn rejected_tokens(text: &str) -> Option<String> {
+        crate::helper::rejected_round_trip(text)
     }
 
     /// `helper::expand_package_url` for a fixed product (`Fuzz`, id

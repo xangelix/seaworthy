@@ -1,0 +1,12 @@
+seaworthy-update-probation:1
+pending 1.1.0 2
+pending-token 1.1.0+bbb
+previous 1.0.0 1
+previous-token 1.0.0+aaa
+previous-format deb
+previous-size 4096
+previous-digest sha256:abababababababababababababababababababababababababababababababab
+started 1700000000000
+launches 2
+first-launch 1700000100000
+state watching

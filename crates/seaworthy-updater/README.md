@@ -16,7 +16,7 @@ helper's systemd units, launchd daemon and Windows service).
 
 | Feature | Adds |
 |---|---|
-| (none) | the request API (`UpdateRequester`, `request_update`), the policy readers (`read_policy`, `read_admin_server`), the bounded process runner (`process`), the OpenPGP checks (`openpgp`) |
+| (none) | the request API (`UpdateRequester`, `request_update`), the policy readers (`read_policy`, `read_admin_server`, `read_probation_switch`), first-paint probation's app side (`first_paint::FirstPaint`), the bounded process runner (`process`), the OpenPGP checks (`openpgp`) |
 | `installers` | `installer`: apt, dnf and pacman (Linux), macOS's `installer`, msiexec (Windows) |
 | `helper` | `helper`: the privileged helper, its download path, staging and failure memo (implies `installers`; brings reqwest, the platform TLS verifier and tokio) |
 | `relaunch` | `relaunch`: a desktop app around its own update (implies `installers`) |
