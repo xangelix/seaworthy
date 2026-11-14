@@ -1403,3 +1403,543 @@ async fn rpm_packages_must_carry_a_signature_from_a_pinned_key() {
     );
     assert!(fake.installs().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// First-paint probation
+
+mod first_paint_probation {
+    use super::*;
+    use crate::first_paint::{FirstPaint, Locations, MarkerState};
+    use crate::policy::ProbationSwitch;
+    use crate::{InstalledRelease, ProbationSettings};
+
+    const OLD: &str = "1.0.0+aaa";
+    const NEW: &str = "1.1.0+bbb";
+    const NEWER: &str = "1.2.0+ccc";
+
+    fn probation_product() -> Product {
+        product(UpdatePolicy::Auto)
+            .with_probation(ProbationSettings::new(3, Duration::from_secs(3600)).unwrap())
+    }
+
+    /// One machine: its staging directory, its install root (with the
+    /// installed release record) and its probation directory.
+    struct Machine {
+        staging: tempfile::TempDir,
+        root: tempfile::TempDir,
+    }
+
+    impl Machine {
+        fn new(installed: &Release, build: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            for dir in ["opt", "var"] {
+                std::fs::create_dir(root.path().join(dir)).unwrap();
+                std::fs::set_permissions(
+                    root.path().join(dir),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            let machine = Self {
+                staging: private_dir(),
+                root,
+            };
+            machine.installed_tree(installed, build);
+            machine
+        }
+
+        /// The package manager put `release`'s tree in place.
+        fn installed_tree(&self, release: &Release, build: &str) {
+            std::fs::write(
+                self.root
+                    .path()
+                    .join("opt")
+                    .join(crate::INSTALLED_RELEASE_FILE),
+                InstalledRelease::new(release.clone(), build)
+                    .unwrap()
+                    .encode(),
+            )
+            .unwrap();
+        }
+
+        fn at(&self) -> Locations {
+            Locations {
+                install_root: Some(self.root.path().join("opt")),
+                public: self.root.path().join("var").join("acme").join("agent"),
+                top: self.root.path().join("var"),
+                require_root: false,
+                request: false,
+            }
+        }
+
+        fn staging(&self) -> &Path {
+            self.staging.path()
+        }
+
+        fn record(&self) -> Option<probation::ProbationRecord> {
+            probation::load(self.staging())
+        }
+
+        fn notice(&self) -> bool {
+            self.at()
+                .public
+                .join(crate::first_paint::NOTICE_FILE)
+                .exists()
+        }
+
+        /// The app runs once: it arms and, unless `crashes`, paints.
+        fn launch(&self, crashes: bool) -> Option<Release> {
+            let paint = FirstPaint::arm_at(&probation_product(), self.at());
+            let on = paint.on_probation().cloned();
+            if !crashes {
+                paint.painted();
+            }
+            on
+        }
+    }
+
+    /// The releases a stub serves: `(token, manifest, artifact)`.
+    fn serve_all(releases: &[(&str, &ReleaseManifest, &[u8])]) -> Served {
+        let key = SigningKey::generate(SignatureAlgorithm::Ed25519);
+        let mut routes = Vec::new();
+        for (token, manifest, artifact) in releases {
+            let path = format!(
+                "/{PACKAGE}/stable/{}/{}/{PACKAGE}.{}",
+                token.replace('+', "%2B"),
+                crate::TARGET_TRIPLE,
+                manifest.format.tag()
+            );
+            routes.push((path.clone(), Reply::Ok(artifact.to_vec())));
+            routes.push((
+                format!("{path}.manifest"),
+                Reply::Ok(signed(manifest, &[&key])),
+            ));
+        }
+        let stub = stub(routes);
+        let template = format!(
+            "{}/{{product}}/{{channel}}/{{version}}/{{target}}/{{product}}.{{format}}",
+            stub.base
+        );
+        Served {
+            stub,
+            key,
+            template,
+        }
+    }
+
+    fn release_of(
+        format: ArtifactFormat,
+        token: &str,
+        sequence: u64,
+    ) -> (Vec<u8>, ReleaseManifest) {
+        let (version, build) = token.split_once('+').unwrap();
+        let artifact = package_bytes(format, format!("release {token}").as_bytes());
+        let manifest = manifest(version, build, sequence, format, &artifact);
+        (artifact, manifest)
+    }
+
+    fn probation_config(
+        served: &Served,
+        token: &str,
+        fake: Fake,
+        machine: &Machine,
+        switch: ProbationSwitch,
+    ) -> HelperConfig {
+        config(served, probation_product(), token, fake, machine.staging())
+            .probation_for_tests(machine.at(), switch)
+    }
+
+    #[tokio::test]
+    async fn a_release_that_paints_is_committed() {
+        let format = ArtifactFormat::Deb;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let served = serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let config = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::Installed {
+                from: release("1.0.0", 1),
+                to: release("1.1.0", 2)
+            }
+        );
+        // The release it replaced is kept, verified, before the install.
+        let record = machine.record().expect("a probation started");
+        assert_eq!(
+            (&record.pending, &record.previous, record.launches),
+            (&release("1.1.0", 2), &release("1.0.0", 1), 0)
+        );
+        assert_eq!(record.pending_token, NEW);
+        assert_eq!(record.previous_token, OLD);
+        let kept = machine.staging().join("probation-previous.deb");
+        assert_eq!(std::fs::read(&kept).unwrap(), old);
+        assert!(machine.notice());
+        // The package manager put the new tree in place; the app launches,
+        // paints, and the next run commits the release.
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        assert_eq!(machine.launch(false), Some(release("1.1.0", 2)));
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::UpToDate {
+                installed: release("1.1.0", 2)
+            }
+        );
+        assert!(machine.record().is_none() && !kept.exists() && !machine.notice());
+        assert_eq!(fake.installs().len(), 1, "nothing reverted");
+        // Off probation, the app leaves nothing.
+        assert_eq!(machine.launch(false), None);
+    }
+
+    #[tokio::test]
+    async fn a_release_that_never_paints_is_reverted_to_exactly_the_one_before() {
+        let format = ArtifactFormat::Deb;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let (newer, newer_manifest) = release_of(format, NEWER, 3);
+        let served = serve_all(&[
+            (OLD, &old_manifest, &old),
+            (NEW, &new_manifest, &new),
+            (NEWER, &newer_manifest, &newer),
+        ]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let config = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        run(&config).await.unwrap();
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        // Two launches that never paint: counted, kept.
+        for _ in 0..2 {
+            assert_eq!(machine.launch(true), Some(release("1.1.0", 2)));
+        }
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::UpToDate {
+                installed: release("1.1.0", 2)
+            }
+        );
+        let record = machine.record().unwrap();
+        assert_eq!(record.launches, 2);
+        assert!(record.first_launch.is_some());
+        // The third: exactly the kept release goes back, as a downgrade.
+        machine.launch(true);
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::Reverted {
+                from: release("1.1.0", 2),
+                to: release("1.0.0", 1),
+                handed_off: false
+            }
+        );
+        let installs = fake.installs();
+        assert_eq!(installs.len(), 2);
+        assert_eq!(installs[1].bytes, old);
+        assert_eq!(installs[1].release, release("1.0.0", 1));
+        assert!(installs[1].downgrade);
+        assert!(machine.record().is_none() && !machine.notice());
+        let status = crate::status::read_status(machine.staging())
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.stage, UpdateStage::Installed);
+        assert!(status.detail.contains("never painted"), "{}", status.detail);
+        // The server still names the failed release: never installed again.
+        machine.installed_tree(&release("1.0.0", 1), "aaa");
+        let refused = run(&config).await.unwrap_err();
+        assert!(
+            matches!(&refused, HelperError::Rejected { token } if token == NEW),
+            "{refused}"
+        );
+        assert!(refused.is_expected());
+        assert_eq!(fake.installs().len(), 2);
+        // A newer release installs as usual, on probation again.
+        let config = probation_config(&served, NEWER, fake.clone(), &machine, ProbationSwitch::On);
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::Installed {
+                from: release("1.0.0", 1),
+                to: release("1.2.0", 3)
+            }
+        );
+        assert_eq!(machine.record().unwrap().previous, release("1.0.0", 1));
+    }
+
+    #[tokio::test]
+    async fn a_release_that_never_paints_within_the_window_is_reverted() {
+        let format = ArtifactFormat::Rpm;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let served = serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let config = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        run(&config).await.unwrap();
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        // Never launched: however long, nothing to judge. (The server's
+        // release is installed: the runs end up to date, or backing off.)
+        let mut record = machine.record().unwrap();
+        record.started = 0;
+        probation::tests_save(machine.staging(), &record);
+        let _ = run(&config).await;
+        assert!(machine.record().is_some());
+        // One launch, then the window passes.
+        machine.launch(true);
+        let _ = run(&config).await;
+        let mut record = machine.record().unwrap();
+        assert_eq!(record.launches, 1);
+        record.first_launch = Some(record.first_launch.unwrap() - 3_600_001);
+        probation::tests_save(machine.staging(), &record);
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::Reverted {
+                from: release("1.1.0", 2),
+                to: release("1.0.0", 1),
+                handed_off: false
+            }
+        );
+        assert_eq!(fake.installs()[1].bytes, old);
+    }
+
+    #[tokio::test]
+    async fn the_administrators_switch_off_starts_nothing_and_reverts_nothing() {
+        let format = ArtifactFormat::Deb;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let served = serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]);
+        // Off before the update: no probation, nothing kept, nothing fetched
+        // for the old release.
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let off = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::Off);
+        run(&off).await.unwrap();
+        assert!(machine.record().is_none() && !machine.notice());
+        assert_eq!(served.stub.requests().len(), 2, "the new release alone");
+        let status = crate::status::read_status(machine.staging())
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.stage, UpdateStage::Installed);
+        // Turned off during a probation: it ends, nothing goes back.
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let on = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        run(&on).await.unwrap();
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        for _ in 0..5 {
+            machine.launch(true);
+        }
+        let off = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::Off);
+        assert_eq!(
+            run(&off).await.unwrap(),
+            HelperOutcome::UpToDate {
+                installed: release("1.1.0", 2)
+            }
+        );
+        assert_eq!(fake.installs().len(), 1, "never reverted");
+        assert!(machine.record().is_none() && !machine.notice());
+    }
+
+    #[tokio::test]
+    async fn a_previous_release_that_cant_be_kept_installs_without_probation() {
+        let format = ArtifactFormat::Deb;
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let (old, mut old_manifest) = release_of(format, OLD, 1);
+        // Its manifest names another sequence than the installed one.
+        old_manifest.sequence = 9;
+        for (served, tree) in [
+            // Not published (404).
+            (serve_all(&[(NEW, &new_manifest, &new)]), true),
+            // Published, but not the installed release.
+            (
+                serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]),
+                true,
+            ),
+            // No installed release record in the tree.
+            (
+                serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]),
+                false,
+            ),
+        ] {
+            let machine = Machine::new(&release("1.0.0", 1), "aaa");
+            if !tree {
+                std::fs::remove_file(
+                    machine
+                        .root
+                        .path()
+                        .join("opt")
+                        .join(crate::INSTALLED_RELEASE_FILE),
+                )
+                .unwrap();
+            }
+            let fake = Fake::new(format, Some(release("1.0.0", 1)));
+            let config =
+                probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+            assert_eq!(
+                run(&config).await.unwrap(),
+                HelperOutcome::Installed {
+                    from: release("1.0.0", 1),
+                    to: release("1.1.0", 2)
+                }
+            );
+            assert!(machine.record().is_none() && !machine.notice());
+            assert!(
+                leftovers(machine.staging()).is_empty(),
+                "{:?}",
+                leftovers(machine.staging())
+            );
+            assert_eq!(fake.installs().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_probation_is_void_once_another_release_is_installed() {
+        let format = ArtifactFormat::Deb;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let served = serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let config = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        run(&config).await.unwrap();
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        for _ in 0..3 {
+            machine.launch(true);
+        }
+        // An administrator installed something else meanwhile: the
+        // probation ends, nothing goes back; the run then updates to the
+        // server's release, as any run would (without probation: the
+        // tree's record doesn't name the installed release).
+        *fake.0.installed.lock().unwrap() = Some(release("1.0.5", 7));
+        run(&config).await.unwrap();
+        let installs = fake.installs();
+        assert_eq!(installs.len(), 2);
+        assert_eq!(installs[1].release, release("1.1.0", 2));
+        assert!(!installs[1].downgrade, "never reverted");
+        assert!(machine.record().is_none() && !machine.notice());
+        assert!(!machine.staging().join("probation-previous.deb").exists());
+    }
+
+    #[tokio::test]
+    async fn too_many_markers_decide_nothing_and_a_tampered_kept_package_reverts_nothing() {
+        let format = ArtifactFormat::Deb;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let served = serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        let config = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        run(&config).await.unwrap();
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        // A flood of launches: read no further, nothing decided.
+        for _ in 0..=crate::first_paint::MAX_MARKER_ENTRIES {
+            machine.launch(true);
+        }
+        run(&config).await.unwrap();
+        assert_eq!(machine.record().unwrap().launches, 0);
+        assert_eq!(fake.installs().len(), 1);
+        // Cleared by an administrator: then the launches count, and the
+        // kept package, changed meanwhile, is refused rather than installed.
+        let drop_box = machine.at().public.join(crate::first_paint::DROP_BOX);
+        for entry in std::fs::read_dir(&drop_box).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        for _ in 0..3 {
+            machine.launch(true);
+        }
+        std::fs::write(
+            machine.staging().join("probation-previous.deb"),
+            b"tampered",
+        )
+        .unwrap();
+        let error = run(&config).await.unwrap_err();
+        assert!(matches!(error, HelperError::Probation(_)), "{error}");
+        assert_eq!(fake.installs().len(), 1, "nothing installed");
+        assert!(machine.record().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_revert_is_confirmed_by_the_next_run() {
+        let format = ArtifactFormat::Msi;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let served = serve_all(&[(OLD, &old_manifest, &old), (NEW, &new_manifest, &new)]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::handing_off(format, release("1.0.0", 1));
+        let config = probation_config(&served, NEW, fake.clone(), &machine, ProbationSwitch::On);
+        assert!(matches!(
+            run(&config).await.unwrap(),
+            HelperOutcome::HandedOff { .. }
+        ));
+        // msiexec installed it.
+        *fake.0.installed.lock().unwrap() = Some(release("1.1.0", 2));
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        for _ in 0..3 {
+            machine.launch(true);
+        }
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::Reverted {
+                from: release("1.1.0", 2),
+                to: release("1.0.0", 1),
+                handed_off: true
+            }
+        );
+        let record = machine.record().unwrap();
+        assert_eq!(record.state, probation::State::Reverting);
+        assert!(machine.staging().join("probation-previous.msi").exists());
+        // msiexec put it back; the next run confirms and cleans up.
+        *fake.0.installed.lock().unwrap() = Some(release("1.0.0", 1));
+        let refused = run(&config).await.unwrap_err();
+        assert!(matches!(refused, HelperError::Rejected { .. }), "{refused}");
+        assert!(machine.record().is_none());
+        assert!(!machine.staging().join("probation-previous.msi").exists());
+    }
+
+    #[tokio::test]
+    async fn a_newer_release_over_one_on_probation_keeps_the_release_before_both() {
+        let format = ArtifactFormat::Deb;
+        let (old, old_manifest) = release_of(format, OLD, 1);
+        let (new, new_manifest) = release_of(format, NEW, 2);
+        let (newer, newer_manifest) = release_of(format, NEWER, 3);
+        let served = serve_all(&[
+            (OLD, &old_manifest, &old),
+            (NEW, &new_manifest, &new),
+            (NEWER, &newer_manifest, &newer),
+        ]);
+        let machine = Machine::new(&release("1.0.0", 1), "aaa");
+        let fake = Fake::new(format, Some(release("1.0.0", 1)));
+        run(&probation_config(
+            &served,
+            NEW,
+            fake.clone(),
+            &machine,
+            ProbationSwitch::On,
+        ))
+        .await
+        .unwrap();
+        machine.installed_tree(&release("1.1.0", 2), "bbb");
+        machine.launch(true);
+        let config = probation_config(&served, NEWER, fake.clone(), &machine, ProbationSwitch::On);
+        assert_eq!(
+            run(&config).await.unwrap(),
+            HelperOutcome::Installed {
+                from: release("1.1.0", 2),
+                to: release("1.2.0", 3)
+            }
+        );
+        let record = machine.record().unwrap();
+        assert_eq!(
+            (&record.pending, &record.previous, record.launches),
+            (&release("1.2.0", 3), &release("1.0.0", 1), 0)
+        );
+        assert_eq!(
+            std::fs::read(machine.staging().join("probation-previous.deb")).unwrap(),
+            old
+        );
+    }
+
+    #[test]
+    fn markers_name_their_state() {
+        assert_eq!(MarkerState::Painted.as_str(), "painted");
+    }
+}

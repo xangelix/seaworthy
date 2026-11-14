@@ -261,10 +261,20 @@ pub fn linux_package(
             |e: seaworthy_service::ServiceError| DistError::Config(format!("product.{id}: {e}"));
         let names = config.update_product(id, product)?;
         let unit_name = systemd::desktop_update_unit_name(&names.helper_name()).map_err(render)?;
-        let unit = systemd::desktop_update_service_unit(
+        // A first-paint probation product's helper also writes its public
+        // directory, `/var/lib/<vendor>/<id>` (the notice and the drop box:
+        // seaworthy_updater::Product::probation_directory), the same
+        // `<vendor>/<id>` as its cache.
+        let state = product
+            .updates
+            .probation
+            .is_some()
+            .then(|| names.cache_directory());
+        let unit = systemd::desktop_update_service_unit_with_state(
             &product.display_name,
             Path::new(&helper.install_path),
             &names.cache_directory(),
+            state.as_deref(),
         )
         .map_err(render)?;
         files.push(PackagedFile {

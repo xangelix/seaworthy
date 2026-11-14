@@ -221,6 +221,7 @@ code and trust nothing earlier jobs left them but data:
 | `seaworthy-fetch` | (none) | a command putting it there when it's missing (a shallow fetch of the commit, a submodule update) |
 | `manifest` | `Cargo.toml` | the workspace the products build from; `seaworthy.toml`'s crate paths (`launcher`, `helper-crate`) are relative to its directory |
 | `cargo-args` | (none) | more cargo arguments for every build (`--features fips`); products built in several crypto builds give each program its own `features` in `seaworthy.toml` instead |
+| `runtime-archives` | (none) | the bundled runtimes' distribution archives, each pinned by its SHA-256 ([below](#bundled-runtimes-archives)) |
 | `version-file` | (none) | a `Cargo.toml` whose `[package]` version (read as TOML; a workspace-inherited one resolved) names a release that has no tag and every pipeline outside a release; a release tag must name the same version. A `SEAWORTHY_VERSION` pipeline variable overrides both |
 | `build-metadata` | (none) | a command (`bash -eo pipefail`, in the checkout) printing the release's build metadata (SemVer's: dot-separated `[0-9A-Za-z-]` identifiers, at most 64 characters), for a product that composes its own version token. It runs in prepare alone, before anything is staged: the build and package jobs read what it printed from `release.env`, so product code never shares a job with the signers. Without it, the commit's short SHA |
 | `release-if` | a `vX.Y.Z[-alpha\|beta\|rc[.N]]` tag | the rules expression for a release; the server deploy needs the same |
@@ -239,7 +240,7 @@ code and trust nothing earlier jobs left them but data:
 | `windows-tags` | **required** | the Windows runner's tags |
 | `build-stage`, `package-stage` | `build`, `build` | as `seaworthy.yml`'s |
 | `package-secrets`, `dev-sign-secrets` | (none) | the adopt job's prefixes: pass the same values as to `seaworthy.yml` (the MSI is signed with the package job's signers) |
-| `manifest`, `cargo-args` | as `seaworthy.yml`'s | the Windows build's |
+| `manifest`, `cargo-args`, `runtime-archives` | as `seaworthy.yml`'s | the Windows build's: pass the same values |
 | `release-if`, `dev-sign-if`, `artifact-access` | as `seaworthy.yml`'s | pass the same values |
 
 `seaworthy-macos.yml`:
@@ -280,6 +281,64 @@ The builds remap the source paths rustc writes into the binaries (the workspace,
 directories, the cargo home, each git dependency's checkout) to neutral ones, so a binary names no
 runner path or private repository ([packaging.md](packaging.md#source-paths));
 `SEAWORTHY_REMAP_PATHS: "0"` on the build jobs turns that off.
+
+## Bundled runtimes' archives
+
+A product with a bundled runtime (`[[product.<id>.runtime]]`, [packaging.md](packaging.md#bundled-runtimes))
+needs the runtime's distribution twice: its build may read it (CEF's `cef-dll-sys` links against
+`libcef`), and `package` ships the pinned part of it. `runtime-archives` names each runtime's
+archive, pinned by its SHA-256:
+
+```text
+<product> <runtime> <triple> <https url> <sha256> <root>[,<root>…]
+```
+
+one entry per runtime and triple, one per line or `;`-separated (blank lines and `#` comments are
+skipped). The roots are directories of the unpacked archive, relative to it; `seaworthy
+runtime-stage` takes each pinned file from the first root holding it, so a distribution that splits
+what ships over several directories (CEF's `Release` and `Resources`) and holds more than ships (an
+import library, headers) needs no repacking. With CEF 154.0.34's minimal distributions:
+
+```yaml
+    runtime-archives: >-
+      console cef x86_64-unknown-linux-gnu
+      https://cef-builds.spotifycdn.com/cef_binary_154.0.34%2Bg14c5a08%2Bchromium-154.0.8037.98_linux64_minimal.tar.bz2
+      e87e2c76304372dd28b899ceb6efa4b353f52700594ddc358a8237ec07ec6492
+      cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal/Release,cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal/Resources;
+      console cef x86_64-pc-windows-msvc
+      https://cef-builds.spotifycdn.com/cef_binary_154.0.34%2Bg14c5a08%2Bchromium-154.0.8037.98_windows64_minimal.tar.bz2
+      c81c34d048d87276f4a18f0b000206710a1709bb67dd658948b87100e1a538da
+      cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_windows64_minimal/Release,cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_windows64_minimal/Resources
+```
+
+(The folded scalar joins the lines with spaces; `;` ends an entry.) The URLs are an example of a
+third-party source, never a default: point them at a mirror you control once you have one, keeping the
+digests, which decide.
+
+What each job does with them:
+
+- **prepare** checks every entry (six fields; a product id and a runtime name; a Linux or Windows
+  triple; an `https` URL of plain characters naming a `.tar.bz2`, `.tar.gz`, `.tgz`, `.tar.xz`,
+  `.tar.zst` or `.zip` archive; 64 lowercase hex; plain relative roots; one entry per runtime and
+  triple) and that `seaworthy.toml` has each runtime for its triple and reads its pins (`seaworthy
+  runtime-stage --check`), before any job downloads anything. A bad entry fails the pipeline there.
+- **the build jobs** (Linux in `scripts/ci/seaworthy.sh build`, Windows in `seaworthy-build.ps1`)
+  download their own triple's archives (https only, redirects too, at most 4 GiB and an hour, three
+  retries; Windows through its own `curl.exe`), check each one's SHA-256 before anything reads it,
+  unpack it (bsdtar, or tar; Windows' own `tar.exe`) into a new directory outside the checkout, and
+  name it to the product's build as `SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>` (uppercase, `-` as `_`:
+  `SEAWORTHY_RUNTIME_CONSOLE_CEF`) before cargo runs. Point the build at it in the product's own
+  build script (`CEF_PATH` for `cef-dll-sys`, after laying the distribution out as the crate
+  expects).
+- **package** downloads and checks every entry's archive again and stages each runtime into the
+  artifact directory by its pins (`seaworthy runtime-stage`: `<artifacts>/<triple>/runtime/<name>/`;
+  a Windows runtime also beside each core, in `<artifacts>/<triple>/cores/<build>/`, where a core
+  finds its libraries as the installed product's does), then packages. The staging runs there, in
+  the tools image with the seaworthy it builds or trusts, rather than in the build jobs: the Windows
+  build has no seaworthy binary, and the Linux build image needn't run the prepare job's.
+
+An archive is never cached, on a release or otherwise: every job downloads it afresh and the digest
+decides. The unpacked copies are removed when the step ends.
 
 ## The release order
 

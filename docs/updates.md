@@ -58,13 +58,21 @@ without a DACL, or granting anyone else a write right. A value that doesn't pars
 so is a missing file under a directory someone else could write (they could have removed the
 administrator's file).
 
-The Linux file accepts comments and at most one each of two settings, nothing else:
+The Linux file accepts comments and at most one each of three settings, nothing else:
 
 ```toml
 # /etc/acme/agent/policy.toml
 updates = "notify"
 server = "https://updates.example.com"
+probation = "off"
 ```
+
+`probation` (`on` or `off`; or `Probation` under the Group Policy key on Windows, `on` or `off`,
+which the product's Group Policy template offers) is first-paint probation's switch
+([below](#first-paint-probation)), read by the helper alone (`read_probation_switch`): `off` starts
+no probation and reverts nothing. Not set, it is `on`. A source the policy would refuse
+(untrusted, unreadable, a value that doesn't parse) counts as `off`: a revert is an install, so
+failing safe means not reverting.
 
 `server` (or `Server` in either Windows key) is the update server an administrator set for the
 machine (`read_admin_server`): an `https://` URL with a host, an optional port and path, no user
@@ -207,6 +215,76 @@ watcher in the user's session (PowerShell from the system directory, Constrained
 waits for the MSI's `Release` value to change and starts the app again, telling it the outcome
 in `SEAWORTHY_UPDATE_RESULT` (`installed` or `timeout`).
 
+### First-paint probation
+
+A desktop product that sets `updates.probation = { launches = 3, window = "24h" }`
+([configuration.md](configuration.md#productid)) puts every release its helper installs on
+probation, on Linux and Windows: a release whose app never finishes its first paint goes back to
+exactly the release it replaced.
+
+1. **Before the install**, under policy `auto` with the switch on, the helper keeps the release
+   installed now: it reads the installed release record from the install root
+   (`/opt/<vendor>/<id>/seaworthy-release` or `%ProgramFiles%\<Vendor>\<Directory>\seaworthy-release`,
+   `seaworthy-installed-release:1`, which `package` writes into a probation product's trees),
+   fetches that release's manifest by its token and verifies it as it verifies an update (the same
+   keys, product, channel, target and format; it must name exactly the installed version and
+   sequence), and downloads and verifies its package into the staging directory
+   (`probation-previous.<ext>`, a pacman signature beside it). It records the probation
+   (`probation`, `seaworthy-update-probation:1`, in the staging directory) and publishes the
+   notice of the pending release, then installs. A release on probation that a newer one replaces
+   keeps the release kept before it. When the previous release can't be kept (no record in the
+   tree, a manifest that doesn't name it, a download that fails a check), the new release installs
+   without probation, and the log and the status record's `installing` detail say why.
+2. **The app**, at start (before its risky part: the browser engine, the GPU), calls
+   `seaworthy_updater::first_paint::FirstPaint::arm(&product)`: it reads the installed release
+   record beside its launcher and the notice, and only when they name the same release it leaves a
+   `launched` marker and asks the helper to run (the usual request). At its first paint it calls
+   `painted()`, which leaves a `painted` marker and asks again. Outside a probation both do
+   nothing; neither ever fails the app.
+3. **Each helper run**, before it asks the server anything: the installed release isn't the
+   pending one → the probation ends (nothing reverted); the switch is `off` → it ends; else the
+   markers for the pending release are read, counted and removed. A paint commits the release.
+   `launches` launches without one, or `window` since the first counted launch, revert it:
+   exactly the kept package, re-hashed against the digest kept from its manifest, is installed
+   through the installer's downgrade path (`apt-get --allow-downgrades`, `dnf downgrade`, an MSI
+   allowing a downgrade; Windows hands it to msiexec, and the next run confirms it), and the
+   pending release's token is remembered (`probation-rejected`, `seaworthy-update-rejected:1`,
+   the newest 8): the helper never installs it again, and a run whose server names it ends with
+   that reason (exit 0). A newer release installs as usual. A release never launched is never
+   reverted: no evidence, no decision.
+
+| | Linux | Windows |
+|---|---|---|
+| The notice (helper-written; `seaworthy-probation-notice:1`) | `/var/lib/<vendor>/<id>/probation`, root's, 0644 | `HKLM\SOFTWARE\<Vendor>\<Directory>\ProbationPending` (`REG_SZ`) |
+| The markers (app-written; `seaworthy-first-paint:1`) | `/var/lib/<vendor>/<id>/first-paint/<uid>.<pid>.<16 hex>`: a drop box the helper makes (root's, mode 1733: anyone may add a file, nobody but root may list it, and each file stays its owner's to remove); one file per marker, written as `.<name>` and renamed | `HKCU\Software\<Vendor>\<Directory>\FirstPaint`, one `REG_SZ` value per marker, named `<pid>.<16 hex>`, in the user's own hive |
+| The helper's record, kept package and rejected tokens | the staging directory | the staging directory |
+
+**What reads the markers.** They cross a privilege boundary (a user writes them, root or
+LocalSystem reads them), so the helper treats them as hostile input. On Linux it checks the drop
+box (a directory, not a link, mode 1733, root's, under a root-owned probation directory), reads
+only names of the marker's shape, opens each without following a link and without blocking (a
+FIFO never stalls it), and counts it only when it is a regular file with one link, owned by the
+uid its name gives, of at most 256 bytes, that parses exactly; it removes every marker it reads
+(valid or not) and a temporary one left ten minutes. On Windows it reads only the hives Windows
+has loaded under `HKEY_USERS` (user SIDs), opening each key on the way with
+`REG_OPTION_OPEN_LINK` so a planted symbolic link leads nowhere, reads `REG_SZ` values of at most
+256 bytes, and deletes every value it reads. More than 256 markers (or values) waiting: the run
+reads none and decides nothing, so a flood can keep a release, never revert one. The formats are
+canonical and fuzzed (`updater_first_paint`).
+
+**What each party can do.** The app's markers only choose keep or revert: a marker names a
+release only to be compared with the pending one, and the only release a revert installs is the
+one the helper kept, verified when it kept it. A local user can therefore withhold or forge
+markers: forging a paint keeps a release (as no probation would); forging launches can revert a
+release on probation to exactly the signed release before it, once, while that probation lasts.
+The administrator turns that off with the switch. The helper's version floor still refuses every
+other older release; the MSI of a probation product allows a downgrade (so the revert can
+install), which only that product's MSI does.
+
+The probation's directory on Linux sits beside a service's state directory under `/var/lib`, so
+probation is for a desktop product (`kind = "desktop"`), which has none. macOS isn't supported yet
+(a desktop app there ships a disk image without a helper).
+
 ## The security boundary
 
 The helper installs only a release the product's server named, signed by a key compiled into
@@ -243,6 +321,8 @@ its first download.
 - **Whether updates install:** `auto`, `notify` or `off`, through Group Policy or an MDM
   (Windows), the MSI's `UPDATES=` property, the policy file (`/etc/<vendor>/<id>/policy.toml`),
   or a package hold.
+- **Whether a release that never painted goes back** (a product with first-paint probation):
+  `probation = "off"` in the policy file, or Group Policy's `Probation`.
 - **Which server the helper asks:** Group Policy's or the MSI's `Server`, or `server` in the
   policy file.
 - **When:** the helper runs only when asked and at most every 30 seconds; it can be stopped

@@ -130,6 +130,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "updater_first_paint"
+path = "fuzz_targets/updater_first_paint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "updater_installed_release"
+path = "fuzz_targets/updater_installed_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "updater_manifest"
 path = "fuzz_targets/updater_manifest.rs"
 test = false

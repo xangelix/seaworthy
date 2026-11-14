@@ -67,6 +67,21 @@
 //!    anyone's update. `seaworthy verify` on its own treats the artifacts
 //!    as a release's.
 //!
+//! 8. **Bundled runtimes** (`[[product.<id>.runtime]]`): each runtime's
+//!    directory holds exactly the files its pin list names, each a regular
+//!    file of at most the runtime's cap with exactly the pinned SHA-256, and
+//!    each native image is the platform's (ELF64 x86-64 on Linux, PE32+ AMD64
+//!    on Windows; anything else is refused) and passes the checks of check
+//!    6 as the product's own binaries do: on Linux the glibc floor,
+//!    `DF_STATIC_TLS` for a shared library, and its `DT_NEEDED` entries; on
+//!    Windows the static C runtime. A `4755` file is an ELF executable.
+//!    A `DT_NEEDED` entry beyond the base system and `linux.needed` (any
+//!    binary's, the product's own or a runtime's) passes only when a
+//!    runtime library of that name and `DT_SONAME` installs in a directory
+//!    the binary's `DT_RUNPATH` reaches, and every `DT_RUNPATH` entry is
+//!    `$ORIGIN`-relative inside the install root
+//!    ([`crate::runtime::resolve_origin`]); a `DT_RPATH` never reaches one.
+//!
 //! [`Verified`] can only come from [`verify`]. It carries the SHA-256 of
 //! every file it read, and `layout` refuses a file that changed since.
 //! It also carries **warnings**: a core every CPU it runs on would skip
@@ -158,6 +173,45 @@ pub struct VerifiedPlatform {
     pub inputs: PlatformInputs,
     /// Windows: the sidecar files (one copy, from the first core build).
     pub sidecars: Vec<PathBuf>,
+    /// The bundled runtimes for this platform, every file checked.
+    pub runtimes: Vec<VerifiedRuntime>,
+}
+
+/// One bundled runtime that passed ([`crate::config::Runtime`]).
+#[derive(Debug, Clone)]
+pub struct VerifiedRuntime {
+    /// Its name.
+    pub name: String,
+    /// The distribution it is.
+    pub distribution: String,
+    /// Whether layout strips its ELF files (Linux).
+    pub strip: bool,
+    /// Its files, by path.
+    pub files: Vec<VerifiedRuntimeFile>,
+}
+
+/// One file of a bundled runtime.
+#[derive(Debug, Clone)]
+pub struct VerifiedRuntimeFile {
+    /// The artifact `verify` read.
+    pub source: PathBuf,
+    /// Its path in the runtime, as pinned.
+    pub path: String,
+    /// Where it installs, relative to the install root, `/`-separated.
+    pub install: String,
+    /// Its mode.
+    pub mode: u32,
+    /// What it is.
+    pub image: crate::runtime::Image,
+}
+
+/// A bundled library a product binary's `DT_NEEDED` may reach.
+#[derive(Debug, Clone)]
+struct Bundled {
+    /// Where it installs, relative to the install root.
+    install: String,
+    /// Its `DT_SONAME`.
+    soname: Option<String>,
 }
 
 /// Runs every check for product `id`.
@@ -175,8 +229,12 @@ pub fn verify(config: &Config, id: &str, artifacts: &Path) -> Result<Verified, c
     };
     let mut platforms = Vec::new();
     for inputs in expected(config, product, artifacts) {
-        let sidecars = run.platform(config, product, &inputs);
-        platforms.push(VerifiedPlatform { inputs, sidecars });
+        let (sidecars, runtimes) = run.platform(config, id, product, &inputs);
+        platforms.push(VerifiedPlatform {
+            inputs,
+            sidecars,
+            runtimes,
+        });
     }
     if run.findings.is_empty() {
         Ok(Verified {
@@ -197,6 +255,8 @@ struct Run {
     digests: BTreeMap<PathBuf, String>,
     /// What no binary of a release may carry ([`ci_test_needles`]).
     test_keys: Vec<Needle>,
+    /// The platform's bundled libraries ([`Bundled`]).
+    bundled: Vec<Bundled>,
 }
 
 /// A byte string a binary must not carry, and what it means.
@@ -350,7 +410,10 @@ impl Run {
         }
     }
 
-    /// Format, then runtime dependencies.
+    /// Format, then runtime dependencies. `place` is the binary's directory
+    /// relative to the install root (Linux: where its `$ORIGIN` is), which
+    /// decides which bundled libraries its `DT_RUNPATH` reaches.
+    #[allow(clippy::too_many_arguments)]
     fn binary(
         &mut self,
         path: &Path,
@@ -359,6 +422,7 @@ impl Run {
         kind: BinaryKind,
         config: &Config,
         product: &Product,
+        place: Option<&str>,
     ) -> bool {
         let format = binary_format_findings(bytes, os, kind);
         let ok = format.is_empty();
@@ -399,11 +463,21 @@ impl Run {
                                 && !product.linux.needed.contains(lib)
                         })
                         .collect();
+                    let (bundled, notes) = self.bundled_reach(bytes, place, &extra);
+                    let extra: Vec<String> = extra
+                        .into_iter()
+                        .filter(|lib| !bundled.contains(lib))
+                        .collect();
                     if !extra.is_empty() {
+                        let notes = if notes.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; {}", notes.join("; "))
+                        };
                         self.finding(
                             path,
                             format!(
-                                "needs {} beyond the base system — declare it in linux.needed (and its package in linux.depends)",
+                                "needs {} beyond the base system — declare it in linux.needed (and its package in linux.depends){notes}",
                                 extra.join(", ")
                             ),
                         );
@@ -562,15 +636,16 @@ impl Run {
     fn platform(
         &mut self,
         config: &Config,
+        id: &str,
         product: &Product,
         inputs: &PlatformInputs,
-    ) -> Vec<PathBuf> {
+    ) -> (Vec<PathBuf>, Vec<VerifiedRuntime>) {
         let os = inputs.os();
-        let targets = if os == Os::Macos {
-            &config.defaults.macos_targets
-        } else {
-            &config.defaults.targets
-        };
+        let targets = config.targets(product, os);
+        // The bundled runtimes first: their libraries are what the
+        // product's own binaries may need beside the base system.
+        self.bundled.clear();
+        let runtimes = self.runtimes(config, id, product, inputs);
 
         // Each program's launcher and its CPU list.
         for program in &inputs.programs {
@@ -585,6 +660,7 @@ impl Run {
                 BinaryKind::Executable,
                 config,
                 product,
+                (os == Os::Linux).then_some(""),
             ) {
                 continue;
             }
@@ -599,13 +675,19 @@ impl Run {
                             ),
                         );
                     }
-                    if &list.cpus != targets {
+                    if list.cpus != targets {
                         self.finding(
                             launcher,
                             format!(
                                 "its .cpulist lists {:?}, seaworthy.toml's {} are {:?} (same CPUs, same order)",
                                 list.cpus,
-                                if os == Os::Macos { "macos-targets" } else { "targets" },
+                                if os == Os::Macos {
+                                    "macos-targets"
+                                } else if product.targets.is_some() {
+                                    "product's own targets"
+                                } else {
+                                    "targets"
+                                },
                                 targets
                             ),
                         );
@@ -617,7 +699,16 @@ impl Run {
         if let Some(helper) = &inputs.helper
             && let Some(bytes) = self.read(helper)
         {
-            self.binary(helper, &bytes, os, BinaryKind::Executable, config, product);
+            let place = (os == Os::Linux).then_some("libexec");
+            self.binary(
+                helper,
+                &bytes,
+                os,
+                BinaryKind::Executable,
+                config,
+                product,
+                place,
+            );
         }
 
         // Each program's cores and their records.
@@ -628,11 +719,302 @@ impl Run {
             self.cores(config, product, inputs, program, &mut module_imports);
         }
 
-        if os == Os::Linux {
+        let sidecars = if os == Os::Linux {
             Vec::new()
         } else {
             self.sidecars(config, product, inputs, &module_imports)
+        };
+        (sidecars, runtimes)
+    }
+
+    /// Which of `extra` (`DT_NEEDED` entries beyond the base system and
+    /// `linux.needed`) a binary installed in `place` reaches among the
+    /// platform's bundled libraries, and notes on why a bundled library of
+    /// that name isn't reached. Only through `DT_RUNPATH` entries that are
+    /// all `$ORIGIN`-relative inside the install root; a library must carry
+    /// the needed name as its `DT_SONAME`.
+    fn bundled_reach(
+        &self,
+        bytes: &[u8],
+        place: Option<&str>,
+        extra: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let Some(place) = place else {
+            return (Vec::new(), Vec::new());
+        };
+        let named: Vec<&String> = extra
+            .iter()
+            .filter(|lib| {
+                self.bundled
+                    .iter()
+                    .any(|b| crate::runtime::name_of(&b.install) == lib.as_str())
+            })
+            .collect();
+        if named.is_empty() {
+            return (Vec::new(), Vec::new());
         }
+        let list = named
+            .iter()
+            .map(|lib| lib.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut notes = Vec::new();
+        match elf_dynamic_strings(bytes, object::elf::DT_RPATH) {
+            Ok(rpath) if !rpath.is_empty() => {
+                notes.push(format!(
+                    "{list} is bundled, but this binary carries DT_RPATH {:?}, which reaches a bundled library never (link with -Wl,--enable-new-dtags so the search path is a DT_RUNPATH)",
+                    rpath.join(":")
+                ));
+                return (Vec::new(), notes);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                notes.push(format!("its DT_RPATH doesn't parse: {e}"));
+                return (Vec::new(), notes);
+            }
+        }
+        let entries: Vec<String> = match elf_dynamic_strings(bytes, object::elf::DT_RUNPATH) {
+            Ok(runpath) => runpath
+                .iter()
+                .flat_map(|value| value.split(':'))
+                .map(str::to_owned)
+                .collect(),
+            Err(e) => {
+                notes.push(format!("its DT_RUNPATH doesn't parse: {e}"));
+                return (Vec::new(), notes);
+            }
+        };
+        if entries.is_empty() {
+            notes.push(format!(
+                "{list} is bundled, but this binary has no DT_RUNPATH to find it by (link with -Wl,--enable-new-dtags,-rpath,$ORIGIN/<directory>)"
+            ));
+            return (Vec::new(), notes);
+        }
+        let mut dirs = Vec::new();
+        for entry in &entries {
+            match crate::runtime::resolve_origin(place, entry) {
+                Ok(dir) => dirs.push(dir),
+                Err(why) => {
+                    notes.push(format!(
+                        "{list} is bundled, but DT_RUNPATH entry {why}: a bundled library is reached only when every entry is $ORIGIN-relative inside the install root"
+                    ));
+                    return (Vec::new(), notes);
+                }
+            }
+        }
+        let mut reached = Vec::new();
+        for lib in named {
+            let found = self.bundled.iter().find(|b| {
+                crate::runtime::name_of(&b.install) == lib.as_str()
+                    && dirs
+                        .iter()
+                        .any(|d| d == crate::runtime::parent_of(&b.install))
+            });
+            match found {
+                Some(b) if b.soname.as_deref() == Some(lib.as_str()) => reached.push(lib.clone()),
+                Some(b) => notes.push(format!(
+                    "the bundled {} names itself {:?} (DT_SONAME), not {lib:?}",
+                    b.install,
+                    b.soname.as_deref().unwrap_or("nothing")
+                )),
+                None => notes.push(format!(
+                    "{lib} is bundled, but not in a directory this binary's DT_RUNPATH reaches ({} from {})",
+                    entries.join(":"),
+                    if place.is_empty() { "the install root" } else { place }
+                )),
+            }
+        }
+        (reached, notes)
+    }
+
+    /// Each bundled runtime for this platform: exactly its pinned files,
+    /// each checked; its libraries join [`Run::bundled`] before any binary
+    /// is checked, its own included.
+    fn runtimes(
+        &mut self,
+        config: &Config,
+        id: &str,
+        product: &Product,
+        inputs: &PlatformInputs,
+    ) -> Vec<VerifiedRuntime> {
+        use crate::runtime::Image;
+        let os = inputs.os();
+        let mut verified = Vec::new();
+        for entry in &inputs.runtimes {
+            let Some(runtime) = product.runtime.get(entry.index) else {
+                continue;
+            };
+            let pins = match crate::runtime::read_pins(&config.dir, id, runtime) {
+                Ok(pins) => pins,
+                Err(e) => {
+                    self.finding(&entry.dir, e);
+                    continue;
+                }
+            };
+            let found = match crate::runtime::walk(&entry.dir) {
+                Ok(found) => found,
+                Err(e) => {
+                    self.finding(&entry.dir, e);
+                    continue;
+                }
+            };
+            let pinned: BTreeSet<&str> = pins.iter().map(|p| p.path.as_str()).collect();
+            for (path, _) in &found {
+                if !pinned.contains(path.as_str()) {
+                    self.finding(
+                        &entry.dir.join(path),
+                        format!(
+                            "isn't in runtime {:?}'s pins ({}): a runtime ships exactly its pinned files",
+                            runtime.name,
+                            runtime.pins.display()
+                        ),
+                    );
+                }
+            }
+            let cap = runtime.max_file_bytes();
+            let mut files = Vec::new();
+            let mut ok = true;
+            for pin in &pins {
+                let Some((_, source)) = found.iter().find(|(path, _)| *path == pin.path) else {
+                    self.finding(
+                        &entry.dir.join(&pin.path),
+                        format!("is pinned in runtime {:?}, but missing", runtime.name),
+                    );
+                    ok = false;
+                    continue;
+                };
+                match std::fs::symlink_metadata(source) {
+                    Ok(meta) if meta.len() > cap => {
+                        self.finding(
+                            source,
+                            format!(
+                                "{} bytes, past runtime {:?}'s max-file-mib ({} MiB)",
+                                meta.len(),
+                                runtime.name,
+                                cap / (1024 * 1024)
+                            ),
+                        );
+                        ok = false;
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.finding(source, e);
+                        ok = false;
+                        continue;
+                    }
+                }
+                let Some(bytes) = self.read(source) else {
+                    ok = false;
+                    continue;
+                };
+                let digest = seaworthy_crypto::digest::sha256_hex(&bytes);
+                if digest != pin.sha256 {
+                    self.finding(
+                        source,
+                        format!(
+                            "SHA-256 {digest}, but runtime {:?} pins {} ({})",
+                            runtime.name, pin.sha256, runtime.distribution
+                        ),
+                    );
+                    ok = false;
+                    continue;
+                }
+                let image = Image::of(&bytes);
+                let install = runtime.install_path(&pin.path);
+                let settings = runtime.file(&pin.path);
+                let mode = settings
+                    .and_then(crate::config::RuntimeFile::mode_bits)
+                    .unwrap_or(if image.is_code() { 0o755 } else { 0o644 });
+                match (os, image) {
+                    (Os::Linux, Image::Elf) => {
+                        let soname = elf_dynamic_strings(&bytes, object::elf::DT_SONAME)
+                            .ok()
+                            .and_then(|names| names.into_iter().next());
+                        if elf_kind(&bytes) == Some(BinaryKind::Library) {
+                            self.bundled.push(Bundled {
+                                install: install.clone(),
+                                soname,
+                            });
+                        }
+                    }
+                    (Os::Windows, Image::Pe) | (_, Image::Data) => {}
+                    (_, other) => {
+                        self.finding(
+                            source,
+                            format!(
+                                "a {other:?} image in a {} runtime: native code for another platform",
+                                runtime.platform.name()
+                            ),
+                        );
+                        ok = false;
+                        continue;
+                    }
+                }
+                if mode == 0o4755
+                    && !(image == Image::Elf && elf_kind(&bytes) == Some(BinaryKind::Executable))
+                {
+                    self.finding(
+                        source,
+                        "mode 4755 (setuid root) for a file that isn't an ELF executable",
+                    );
+                    ok = false;
+                }
+                files.push(VerifiedRuntimeFile {
+                    source: source.clone(),
+                    path: pin.path.clone(),
+                    install,
+                    mode,
+                    image,
+                });
+            }
+            // Every native image, as the product's own binaries are checked,
+            // now that every bundled library is known.
+            for file in &files {
+                if !file.image.is_code() {
+                    continue;
+                }
+                let Some(bytes) = self.read(&file.source) else {
+                    ok = false;
+                    continue;
+                };
+                let kind = match (os, file.image) {
+                    (Os::Linux, _) => elf_kind(&bytes),
+                    (_, _) => pe_kind(&bytes),
+                };
+                let Some(kind) = kind else {
+                    self.finding(
+                        &file.source,
+                        "neither an executable nor a shared library (Linux: ET_EXEC, or ET_DYN; Windows: a PE32+ image)",
+                    );
+                    ok = false;
+                    continue;
+                };
+                let place = crate::runtime::parent_of(&file.install).to_owned();
+                if !self.binary(
+                    &file.source,
+                    &bytes,
+                    os,
+                    kind,
+                    config,
+                    product,
+                    (os == Os::Linux).then_some(place.as_str()),
+                ) {
+                    ok = false;
+                }
+            }
+            if ok {
+                // By path, whatever the pin list's order.
+                files.sort_by(|a, b| a.path.cmp(&b.path));
+                verified.push(VerifiedRuntime {
+                    name: runtime.name.clone(),
+                    distribution: runtime.distribution.clone(),
+                    strip: runtime.strip,
+                    files,
+                });
+            }
+        }
+        verified
     }
 
     /// One program's cores: each one's format, runtime dependencies,
@@ -655,7 +1037,16 @@ impl Run {
             let Some(bytes) = self.read(core) else {
                 continue;
             };
-            if !self.binary(core, &bytes, os, BinaryKind::Library, config, product) {
+            let place = (os == Os::Linux).then_some("lib");
+            if !self.binary(
+                core,
+                &bytes,
+                os,
+                BinaryKind::Library,
+                config,
+                product,
+                place,
+            ) {
                 continue;
             }
             match seaworthy_levels::requirement_from_bytes(&bytes) {
@@ -834,7 +1225,15 @@ impl Run {
                 let digest = seaworthy_crypto::digest::sha256_hex(&bytes);
                 match &first {
                     None => {
-                        if self.binary(&path, &bytes, os, BinaryKind::Library, config, product)
+                        if self.binary(
+                            &path,
+                            &bytes,
+                            os,
+                            BinaryKind::Library,
+                            config,
+                            product,
+                            None,
+                        )
                             && os == Os::Macos
                             && config.fips(product)
                             && name.starts_with(&format!("lib{}", config.fips_symbol_prefix()))
@@ -1442,6 +1841,71 @@ pub fn elf_static_tls(image: &[u8]) -> Result<bool, String> {
         d.tag(endian) == object::elf::DT_FLAGS
             && object::elf::DynamicFlags(d.val(endian)).contains(object::elf::DF_STATIC_TLS)
     }))
+}
+
+/// An ELF image's dynamic string entries tagged `tag` (`DT_RUNPATH`,
+/// `DT_RPATH`, `DT_SONAME`, …), in order; none without a dynamic section.
+///
+/// # Errors
+/// The parse error, for an image or dynamic section `object` can't read.
+pub fn elf_dynamic_strings(
+    image: &[u8],
+    tag: object::elf::DynamicTag,
+) -> Result<Vec<String>, String> {
+    let file = ElfFile64::<object::Endianness>::parse(image).map_err(|e| e.to_string())?;
+    let endian = file.endian();
+    let sections = file.elf_section_table();
+    let Some((entries, link)) = sections.dynamic(endian, image).map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let strings = sections
+        .strings(endian, image, link)
+        .map_err(|e| e.to_string())?;
+    entries
+        .iter()
+        .filter(|d| d.tag(endian) == tag)
+        .map(|d| {
+            d.string(endian, strings)
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
+/// What an ELF64 image is: an executable (`ET_EXEC`, or `ET_DYN` with an
+/// interpreter: a position-independent one) or a shared library (`ET_DYN`
+/// without one); `None` for anything else.
+#[must_use]
+pub fn elf_kind(image: &[u8]) -> Option<BinaryKind> {
+    let file = ElfFile64::<object::Endianness>::parse(image).ok()?;
+    let endian = file.endian();
+    let interpreter = file
+        .elf_program_headers()
+        .iter()
+        .any(|ph| ph.p_type(endian) == object::elf::PT_INTERP);
+    match file.elf_header().e_type(endian) {
+        object::elf::ET_EXEC => Some(BinaryKind::Executable),
+        object::elf::ET_DYN if interpreter => Some(BinaryKind::Executable),
+        object::elf::ET_DYN => Some(BinaryKind::Library),
+        _ => None,
+    }
+}
+
+/// What a PE32+ image is: a DLL or an executable; `None` for anything else.
+#[must_use]
+pub fn pe_kind(image: &[u8]) -> Option<BinaryKind> {
+    let file = PeFile64::parse(image).ok()?;
+    let dll = file
+        .nt_headers()
+        .file_header()
+        .characteristics
+        .get(LE)
+        .contains(object::pe::IMAGE_FILE_DLL);
+    Some(if dll {
+        BinaryKind::Library
+    } else {
+        BinaryKind::Executable
+    })
 }
 
 /// An ELF image's `DT_NEEDED` entries (none for a static binary).

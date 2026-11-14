@@ -980,6 +980,8 @@ fn the_helper_reads_the_same_names_from_config() {
                outputs = [\"dmg\"]\nupdates.default = \"off\"\n\
                sidecars.macos = [\"libaws_lc_fips_*_crypto.dylib\"]\n\n\
                [product.viewer.macos]\nbundle-id = \"com.acme.viewer\"\n",
+        // First-paint probation reaches the helper.
+        format!("{EXAMPLE}updates.probation = {{ launches = 2, window = \"90m\" }}\n"),
     ];
     for text in variants {
         let config = Config::parse(&text).expect("valid");
@@ -999,6 +1001,14 @@ fn the_helper_reads_the_same_names_from_config() {
             assert_eq!(packaged.windows_directory(), product.windows_directory());
             assert_eq!(packaged.default_policy(), product.updates.default);
             assert_eq!(packaged.release_trust(), config.defaults.release_trust);
+            assert_eq!(
+                packaged.probation().map(|p| (p.launches, p.window)),
+                product
+                    .updates
+                    .probation
+                    .as_ref()
+                    .map(|p| (p.launches, p.window().unwrap()))
+            );
             // The Group Policy template writes the key the helper reads.
             let template = seaworthy::admx::template(
                 &config.defaults.vendor,
@@ -1185,5 +1195,376 @@ fn the_repository_settings_are_validated() {
             1,
         ),
         "unknown field `mirror`",
+    );
+}
+
+/// A product's own `targets` replace `defaults.targets` for its Linux and
+/// Windows cores alone; another product keeps the defaults, and macOS
+/// cores keep `defaults.macos-targets`.
+#[test]
+fn a_products_targets_override_the_defaults_for_it_alone() {
+    use seaworthy::inputs::Os;
+    let text = edit(
+        "kind = \"desktop\"\n",
+        "kind = \"desktop\"\ntargets = [\"x86-64-v2\"]\n",
+    );
+    let config = Config::parse(&text).unwrap();
+    let console = &config.products["console"];
+    let collector = &config.products["collector"];
+    assert_eq!(config.targets(console, Os::Linux), ["x86-64-v2"]);
+    assert_eq!(config.targets(console, Os::Windows), ["x86-64-v2"]);
+    assert_eq!(config.targets(console, Os::Macos), ["apple-m1"]);
+    assert_eq!(
+        config.targets(collector, Os::Linux),
+        ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+    );
+    // Without it, the defaults (the file as it was).
+    let config = Config::parse(EXAMPLE).unwrap();
+    assert_eq!(
+        config.targets(&config.products["console"], Os::Windows),
+        ["x86-64-v4", "x86-64-v3", "x86-64-v2"]
+    );
+}
+
+#[test]
+fn a_products_targets_are_validated_naming_the_key() {
+    for bad in [
+        "targets = []",
+        "targets = [\"x86-64-v2\", \"x86-64-v2\"]",
+        "targets = [\"x86 64\"]",
+        "targets = [\"\"]",
+    ] {
+        refused(
+            &edit(
+                "kind = \"desktop\"\n",
+                &format!("kind = \"desktop\"\n{bad}\n"),
+            ),
+            "product.console.targets",
+        );
+    }
+    refused(
+        &edit(
+            "kind = \"desktop\"\n",
+            "kind = \"desktop\"\ntargets = \"x86-64-v2\"\n",
+        ),
+        "targets",
+    );
+}
+
+/// The console of the example with a bundled runtime per platform and
+/// first-paint probation: every new key in one place.
+fn with_runtime(extra: &str) -> String {
+    format!(
+        "{EXAMPLE}updates.probation = {{ launches = 3, window = \"24h\" }}\n\n\
+         [[product.console.runtime]]\n\
+         name = \"cef\"\n\
+         distribution = \"cef_binary_154.0.34_linux64_minimal\"\n\
+         platform = \"linux\"\n\
+         pins = \"runtime/cef-linux64.sha256\"\n\
+         destination = \"lib\"\n\
+         max-file-mib = 1536\n\
+         strip = true\n\n\
+         [[product.console.runtime.files]]\n\
+         path = \"chrome-sandbox\"\n\
+         destination = \"chrome-sandbox\"\n\
+         mode = \"4755\"\n\n\
+         [[product.console.runtime]]\n\
+         name = \"cef\"\n\
+         distribution = \"cef_binary_154.0.34_windows64_minimal\"\n\
+         platform = \"windows\"\n\
+         pins = \"runtime/cef-windows64.sha256\"\n\n\
+         [[product.console.runtime.publishers]]\n\
+         subject = \"CN=Microsoft Corporation,O=Microsoft Corporation,L=Redmond,ST=Washington,C=US\"\n\
+         trust = \"keys/microsoft-roots.pem\"\n\
+         {extra}"
+    )
+}
+
+#[test]
+fn bundled_runtimes_and_probation_parse() {
+    use seaworthy::config::Platform;
+    let config = Config::parse(&with_runtime("")).unwrap();
+    let console = &config.products["console"];
+    let probation = console.updates.probation.as_ref().unwrap();
+    assert_eq!(probation.launches, 3);
+    assert_eq!(probation.window().unwrap(), Duration::from_secs(86_400));
+    let [linux, windows] = console.runtime.as_slice() else {
+        panic!("two runtimes: {:?}", console.runtime);
+    };
+    assert_eq!(
+        (linux.platform, windows.platform),
+        (Platform::Linux, Platform::Windows)
+    );
+    assert_eq!(linux.max_file_bytes(), 1536 * 1024 * 1024);
+    assert_eq!(windows.max_file_bytes(), 256 * 1024 * 1024);
+    assert_eq!(linux.install_path("chrome-sandbox"), "chrome-sandbox");
+    assert_eq!(
+        linux.install_path("locales/en-US.pak"),
+        "lib/locales/en-US.pak"
+    );
+    assert_eq!(windows.install_path("libcef.dll"), "libcef.dll");
+    assert_eq!(
+        linux.file("chrome-sandbox").unwrap().mode_bits(),
+        Some(0o4755)
+    );
+    assert_eq!(windows.publishers.len(), 1);
+    // The collector, without any of it, is unchanged.
+    let collector = &config.products["collector"];
+    assert!(collector.runtime.is_empty() && collector.updates.probation.is_none());
+}
+
+/// Every bad runtime value is refused, naming the key.
+#[test]
+fn bundled_runtimes_are_validated_naming_the_key() {
+    let base = with_runtime("");
+    let swap = |from: &str, to: &str| {
+        assert!(base.contains(from), "{from:?}");
+        base.replacen(from, to, 1)
+    };
+    for (from, to, key) in [
+        ("name = \"cef\"", "name = \"CEF\"", "runtime[0].name"),
+        ("name = \"cef\"", "name = \"\"", "runtime[0].name"),
+        (
+            "distribution = \"cef_binary_154.0.34_linux64_minimal\"",
+            "distribution = \"cef $HOME\"",
+            "runtime[0].distribution",
+        ),
+        (
+            "platform = \"linux\"",
+            "platform = \"macos\"",
+            "runtime[0].platform",
+        ),
+        (
+            "pins = \"runtime/cef-linux64.sha256\"",
+            "pins = \"../outside.sha256\"",
+            "runtime[0].pins",
+        ),
+        (
+            "pins = \"runtime/cef-linux64.sha256\"",
+            "pins = \"/etc/cef.sha256\"",
+            "runtime[0].pins",
+        ),
+        (
+            "destination = \"lib\"",
+            "destination = \"../lib\"",
+            "runtime[0].destination",
+        ),
+        (
+            "destination = \"lib\"",
+            "destination = \"/opt\"",
+            "runtime[0].destination",
+        ),
+        (
+            "max-file-mib = 1536",
+            "max-file-mib = 0",
+            "runtime[0].max-file-mib",
+        ),
+        (
+            "max-file-mib = 1536",
+            "max-file-mib = 2049",
+            "runtime[0].max-file-mib",
+        ),
+        (
+            "path = \"chrome-sandbox\"",
+            "path = \"../chrome-sandbox\"",
+            "runtime[0].files.path",
+        ),
+        (
+            "path = \"chrome-sandbox\"",
+            "path = \"a\\\\b\"",
+            "runtime[0].files.path",
+        ),
+        (
+            "destination = \"chrome-sandbox\"",
+            "destination = \"../chrome-sandbox\"",
+            "runtime[0].files.destination",
+        ),
+        (
+            "mode = \"4755\"",
+            "mode = \"0777\"",
+            "runtime[0].files.mode",
+        ),
+        (
+            "mode = \"4755\"",
+            "mode = \"6755\"",
+            "runtime[0].files.mode",
+        ),
+        ("mode = \"4755\"", "mode = \"755\"", "runtime[0].files.mode"),
+        (
+            "subject = \"CN=Microsoft Corporation,O=Microsoft Corporation,L=Redmond,ST=Washington,C=US\"",
+            "subject = \" \"",
+            "runtime[1].publishers.subject",
+        ),
+        (
+            "trust = \"keys/microsoft-roots.pem\"",
+            "trust = \"../roots.pem\"",
+            "runtime[1].publishers.trust",
+        ),
+    ] {
+        refused(&swap(from, to), &format!("product.console.{key}"));
+    }
+    // Strip and setuid are Linux's; publishers are Windows'.
+    refused(
+        &swap(
+            "pins = \"runtime/cef-windows64.sha256\"\n",
+            "pins = \"runtime/cef-windows64.sha256\"\nstrip = true\n",
+        ),
+        "product.console.runtime[1].strip",
+    );
+    refused(
+        &with_runtime("[[product.console.runtime.files]]\npath = \"x.dll\"\nmode = \"4755\"\n"),
+        "product.console.runtime[1].files.mode",
+    );
+    refused(
+        &swap(
+            "strip = true\n",
+            "strip = true\n[[product.console.runtime.publishers]]\nsubject = \"CN=X\"\ntrust = \"x.pem\"\n",
+        ),
+        "product.console.runtime[0].publishers",
+    );
+    // One name per platform; a platform the product doesn't ship for.
+    refused(
+        &swap("platform = \"windows\"", "platform = \"linux\""),
+        "product.console.runtime[1].name",
+    );
+    refused(
+        &with_runtime("").replace("outputs = [\"msi\", \"deb\"]", "outputs = [\"deb\"]"),
+        "product.console.runtime[1].platform",
+    );
+    // A file named twice.
+    refused(
+        &swap(
+            "[[product.console.runtime]]\nname = \"cef\"\ndistribution = \"cef_binary_154.0.34_windows64_minimal\"",
+            "[[product.console.runtime.files]]\npath = \"chrome-sandbox\"\n\n[[product.console.runtime]]\nname = \"cef\"\ndistribution = \"cef_binary_154.0.34_windows64_minimal\"",
+        ),
+        "product.console.runtime[0].files.path",
+    );
+    // Unknown keys, at every level.
+    refused(&with_runtime("strip-all = true\n"), "strip-all");
+    refused(
+        &with_runtime("[[product.console.runtime.files]]\npath = \"x.dll\"\nowner = \"root\"\n"),
+        "owner",
+    );
+}
+
+/// Probation: a desktop product with its helper, not on macOS, within its
+/// bounds; every refusal names the key.
+#[test]
+fn probation_is_validated_naming_the_key() {
+    let base = with_runtime("");
+    let swap = |from: &str, to: &str| {
+        assert!(base.contains(from), "{from:?}");
+        base.replacen(from, to, 1)
+    };
+    for (to, key) in [
+        (
+            "{ launches = 0, window = \"24h\" }",
+            "updates.probation.launches",
+        ),
+        (
+            "{ launches = 21, window = \"24h\" }",
+            "updates.probation.launches",
+        ),
+        (
+            "{ launches = 3, window = \"59s\" }",
+            "updates.probation.window",
+        ),
+        (
+            "{ launches = 3, window = \"31d\" }",
+            "updates.probation.window",
+        ),
+        (
+            "{ launches = 3, window = \"a day\" }",
+            "updates.probation.window",
+        ),
+    ] {
+        refused(
+            &swap("{ launches = 3, window = \"24h\" }", to),
+            &format!("product.console.{key}"),
+        );
+    }
+    refused(
+        &swap("{ launches = 3, window = \"24h\" }", "{ launches = 3 }"),
+        "window",
+    );
+    refused(
+        &swap(
+            "{ launches = 3, window = \"24h\" }",
+            "{ launches = 3, window = \"24h\", revert = false }",
+        ),
+        "revert",
+    );
+    // A service, a product without its helper, a pkg output.
+    let service = edit(
+        "updates.default = \"auto\"\n",
+        "updates.default = \"auto\"\nupdates.probation = { launches = 3, window = \"1h\" }\n",
+    );
+    refused(&service, "product.collector.updates.probation");
+    refused(
+        &swap(
+            "helper = \"AcmeConsoleUpdate\"\n",
+            "updates.default = \"off\"\n",
+        ),
+        "product.console.updates.probation",
+    );
+    // The bounds themselves pass.
+    for ok in [
+        "{ launches = 1, window = \"1m\" }",
+        "{ launches = 20, window = \"30d\" }",
+    ] {
+        Config::parse(&swap("{ launches = 3, window = \"24h\" }", ok)).unwrap();
+    }
+}
+
+/// `load` reads each runtime's pin list (and its publishers' trust
+/// anchors), so `check` refuses a bad one before a build.
+#[test]
+fn load_reads_each_runtimes_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |relative: &str, text: &str| {
+        let path = dir.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("seaworthy.toml", &with_runtime(""));
+    let digest = "a".repeat(64);
+    write(
+        "runtime/cef-linux64.sha256",
+        &format!("{digest}  libcef.so\n{digest}  chrome-sandbox\n{digest}  locales/en-US.pak\n"),
+    );
+    write(
+        "runtime/cef-windows64.sha256",
+        &format!("{digest}  libcef.dll\n"),
+    );
+    write("keys/microsoft-roots.pem", "-----BEGIN CERTIFICATE-----\n");
+    let path = dir.path().join("seaworthy.toml");
+    let config = Config::load(&path).unwrap();
+    let runtime = &config.products["console"].runtime[0];
+    let pins = seaworthy::runtime::read_pins(&config.dir, "console", runtime).unwrap();
+    assert_eq!(pins.len(), 3);
+    // A per-file setting for a file the pins don't name.
+    write(
+        "runtime/cef-linux64.sha256",
+        &format!("{digest}  libcef.so\n"),
+    );
+    let err = Config::load(&path).unwrap_err().to_string();
+    assert!(
+        err.contains("runtime \"cef\" (linux)") && err.contains("chrome-sandbox"),
+        "{err}"
+    );
+    // A missing pin list, a missing trust file.
+    std::fs::remove_file(dir.path().join("runtime/cef-linux64.sha256")).unwrap();
+    assert!(Config::load(&path).is_err());
+    write(
+        "runtime/cef-linux64.sha256",
+        &format!("{digest}  libcef.so\n{digest}  chrome-sandbox\n"),
+    );
+    Config::load(&path).unwrap();
+    std::fs::remove_file(dir.path().join("keys/microsoft-roots.pem")).unwrap();
+    assert!(
+        Config::load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("microsoft-roots.pem")
     );
 }

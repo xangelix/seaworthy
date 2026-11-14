@@ -365,6 +365,16 @@ pub fn package(
     let base = out.join(id);
     remove_listing(&base)?;
     let mut layouts = layouts.to_vec();
+    // A probation product's trees name the release they are, for its
+    // update helper and its app; nothing changes for any other product.
+    if product.updates.probation.is_some() {
+        for layout in layouts
+            .iter_mut()
+            .filter(|l| l.product == id && (l.triple == LINUX || l.triple == WINDOWS))
+        {
+            add_release_record(&options.release, &options.build.metadata, layout)?;
+        }
+    }
     if product.outputs.iter().any(|o| o.is_windows())
         && let Some(windows) = layouts
             .iter_mut()
@@ -532,10 +542,11 @@ pub fn package(
                     artifacts.push(artifact(Kind::Msi, msi)?);
                 }
                 if layout.helper().is_some() {
-                    let template = crate::admx::template(
+                    let template = crate::admx::template_with(
                         &config.defaults.vendor,
                         &product.windows_directory(),
                         &product.display_name,
+                        product.updates.probation.is_some(),
                     );
                     let entries = vec![
                         Entry {
@@ -1556,6 +1567,56 @@ fn write_listing(
     write(&base.join("packages.json"), format!("{json}\n").as_bytes())
 }
 
+/// Writes the installed release record
+/// ([`seaworthy_updater::InstalledRelease`]) into `layout`'s install root,
+/// beside the launcher, lists it ([`crate::layout::Role::ReleaseRecord`],
+/// mode 0644) and rewrites `layout.json`.
+fn add_release_record(
+    release: &Release,
+    build: &str,
+    layout: &mut Layout,
+) -> Result<(), DistError> {
+    let record = seaworthy_updater::InstalledRelease::new(release.clone(), build)
+        .map_err(|e| DistError::Config(format!("the installed release record: {e}")))?;
+    let launcher = layout.launcher().ok_or_else(|| {
+        DistError::Layout(format!(
+            "{}'s {} tree has no launcher to put the release record beside",
+            layout.product, layout.triple
+        ))
+    })?;
+    let staged_root = launcher
+        .staged
+        .parent()
+        .ok_or_else(|| DistError::Layout(format!("{} has no parent", launcher.staged.display())))?;
+    let name = seaworthy_updater::INSTALLED_RELEASE_FILE;
+    let install_path = if layout.triple == WINDOWS {
+        format!("{}\\{name}", layout.install_root)
+    } else {
+        format!("{}/{name}", layout.install_root)
+    };
+    if layout
+        .files
+        .iter()
+        .any(|f| f.install_path.eq_ignore_ascii_case(&install_path))
+    {
+        return Err(DistError::Layout(format!(
+            "{install_path}: another file installs where the release record goes (updates.probation)"
+        )));
+    }
+    let staged = staged_root.join(name);
+    let text = record.encode();
+    write(&staged, text.as_bytes())?;
+    layout.files.push(crate::layout::File {
+        install_path,
+        staged,
+        role: crate::layout::Role::ReleaseRecord,
+        program: None,
+        mode: 0o644,
+        sha256: seaworthy_crypto::digest::sha256_hex(text.as_bytes()),
+    });
+    crate::layout::write_manifest(layout)
+}
+
 /// Stamps the version resource into the Windows tree's launcher, cores and
 /// helper, reads every record back, Authenticode-signs every binary when a
 /// signer is given (checking each signature against the pins), checks that
@@ -1582,7 +1643,10 @@ fn prepare_windows(
     for file in &mut layout.files {
         // Data files are shipped as read: never stamped or signed (layout
         // refused any carrying code).
-        if matches!(file.role, Role::Asset | Role::Icon | Role::DocumentIcon) {
+        if matches!(
+            file.role,
+            Role::Asset | Role::Icon | Role::DocumentIcon | Role::ReleaseRecord
+        ) {
             continue;
         }
         let name = file
@@ -1607,7 +1671,12 @@ fn prepare_windows(
                 | Role::CodeSignature
                 | Role::Uninstaller
                 | Role::License
-                | Role::DocumentIcon,
+                | Role::DocumentIcon
+                | Role::ReleaseRecord
+                // A bundled runtime's files are the distribution's own:
+                // never stamped (a signed one keeps its signature only as
+                // it arrived; an unsigned one is signed below).
+                | Role::Runtime { .. },
                 _,
             ) => None,
         };
@@ -1629,6 +1698,23 @@ fn prepare_windows(
         }
         if let Some(signer) = authenticode {
             let bytes = std::fs::read(&file.staged).map_err(|e| DistError::io(&file.staged, e))?;
+            // A bundled runtime's file: its data is shipped as pinned; a PE
+            // image that arrives signed keeps that signature only when it
+            // verifies to one of the runtime's publishers, and is refused
+            // otherwise; an unsigned one is signed as the product's own.
+            if let Role::Runtime { runtime } = &file.role {
+                if crate::runtime::Image::of(&bytes) != crate::runtime::Image::Pe {
+                    file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
+                    continue;
+                }
+                let signed = crate::pe_version::is_signed(&bytes)
+                    .map_err(|e| DistError::Layout(format!("{}: {e}", file.staged.display())))?;
+                if signed {
+                    check_runtime_publisher(config, product, runtime, &file.staged, pins)?;
+                    file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
+                    continue;
+                }
+            }
             let signed_already = matches!(file.role, Role::Sidecar)
                 && crate::pe_version::is_signed(&bytes)
                     .map_err(|e| DistError::Layout(format!("{}: {e}", file.staged.display())))?;
@@ -1655,6 +1741,43 @@ fn prepare_windows(
         file.sha256 = seaworthy_crypto::digest::sha256_hex(&bytes);
     }
     crate::layout::write_manifest_with(layout, &post_link)
+}
+
+/// A bundled runtime's file that arrives Authenticode-signed: kept only when
+/// its signature verifies to one of the runtime's `publishers` (subject and
+/// trust anchors); refused naming the file and the runtime otherwise.
+fn check_runtime_publisher(
+    config: &Config,
+    product: &crate::config::Product,
+    runtime: &str,
+    file: &Path,
+    pins: &crate::codesign::Pins,
+) -> Result<(), DistError> {
+    let publishers = product
+        .runtime
+        .iter()
+        .filter(|r| r.name == runtime && r.platform == crate::config::Platform::Windows)
+        .flat_map(|r| r.publishers.iter());
+    let mut refusals = Vec::new();
+    for publisher in publishers {
+        match pins.check_authenticode_as(
+            file,
+            &publisher.subject,
+            &config.dir.join(&publisher.trust),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(e) => refusals.push(e.to_string()),
+        }
+    }
+    Err(DistError::Sign(format!(
+        "{}: arrives Authenticode-signed, but not by a publisher runtime {runtime:?} allows (runtime.publishers): {}",
+        file.display(),
+        if refusals.is_empty() {
+            "it lists none".to_owned()
+        } else {
+            refusals.join("; ")
+        }
+    )))
 }
 
 /// The macOS signer: the Developer ID with its pinned team (and the main

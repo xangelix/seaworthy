@@ -13,6 +13,10 @@
 //!   release manifest ([`ManifestTrust`]) and the package, applies the
 //!   version floor ([`release`]), and hands the exact file to the OS
 //!   package manager (`installer`, feature `installers`).
+//! - **First-paint probation** ([`first_paint`], always available; the
+//!   helper's side with feature `helper`): a desktop app reports its first
+//!   paint, and the helper puts back exactly the release it replaced when a
+//!   new one never paints (`updates.probation`).
 //! - **A desktop app around its own update** (`relaunch`, feature
 //!   `relaunch`): the release installed now, and the app back once the
 //!   helper has installed another (a watcher that restarts it on Windows,
@@ -56,7 +60,7 @@
 //!
 //! | Feature | Adds |
 //! |---|---|
-//! | (none) | the request API, the policy readers, the helper's [`status`] record, [`process`], [`openpgp`] |
+//! | (none) | the request API, the policy readers, the helper's [`status`] record, first-paint probation's app side ([`first_paint`]), [`process`], [`openpgp`] |
 //! | `installers` | `installer`: apt, dnf, pacman, macOS's installer, msiexec |
 //! | `helper` | `helper` and its download path, staging, failure memo (implies `installers`) |
 //! | `relaunch` | `relaunch` (implies `installers`) |
@@ -67,6 +71,7 @@
 // allowed on its own with its invariant.
 #![deny(clippy::indexing_slicing, clippy::unreachable)]
 
+pub mod first_paint;
 #[cfg(feature = "helper")]
 pub mod helper;
 #[cfg(feature = "installers")]
@@ -89,8 +94,9 @@ mod staging;
 pub mod status;
 
 pub use policy::{
-    AdminServer, PolicyDecision, PolicyFile, PolicySource, dpkg_holds, is_machine_server,
-    parse_policy_file, parse_policy_settings, read_admin_server, read_policy, versionlock_holds,
+    AdminServer, PolicyDecision, PolicyFile, PolicySource, ProbationSwitch, dpkg_holds,
+    is_machine_server, parse_policy_file, parse_policy_settings, read_admin_server, read_policy,
+    read_probation_switch, versionlock_holds,
 };
 pub use request::{
     DEFAULT_REQUEST_INTERVAL, RequestError, RequestOutcome, UpdateRequester, request_update,
@@ -101,11 +107,12 @@ pub use status::{
 };
 // The contract, re-exported so a caller can use one crate.
 pub use seaworthy_formats::{
-    ArtifactFormat, DigestAlgorithm, FormatError, KEY_ID_LEN, MAX_ARTIFACT_BYTES,
-    MAX_METADATA_BYTES, MAX_SERVER_BYTES, MAX_VERSION_LEN, MSI_RELEASE_VALUE, ManifestSignature,
-    ManifestTrust, Product, ProductError, RELEASE_MANIFEST_DOMAIN, ReleaseKey, ReleaseManifest,
-    ReleaseTrust, ServiceNames, SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE,
-    UpdatePolicy, ci_test, ci_test_keys, format_check, release, release_key_id, validate_version,
+    ArtifactFormat, DigestAlgorithm, FormatError, INSTALLED_RELEASE_FILE, InstalledRelease,
+    KEY_ID_LEN, MAX_ARTIFACT_BYTES, MAX_METADATA_BYTES, MAX_SERVER_BYTES, MAX_VERSION_LEN,
+    MSI_RELEASE_VALUE, ManifestSignature, ManifestTrust, ProbationSettings, Product, ProductError,
+    RELEASE_MANIFEST_DOMAIN, ReleaseKey, ReleaseManifest, ReleaseTrust, ServiceNames,
+    SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE, UpdatePolicy, ci_test, ci_test_keys,
+    format_check, installed_release, release, release_key_id, validate_version,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -252,6 +259,19 @@ pub mod __fuzz {
     /// The derivation's refusal, as text.
     pub fn metadata_url(artifact_url: &str, extension: &str) -> Result<String, String> {
         crate::net::metadata_url(artifact_url, extension).map_err(|e| e.to_string())
+    }
+
+    /// The helper's first-paint probation record: its text, re-encoded,
+    /// when it parses.
+    #[must_use]
+    pub fn probation_record(text: &str) -> Option<String> {
+        crate::helper::probation_record_round_trip(text)
+    }
+
+    /// The helper's rejected tokens: their text, re-encoded, when it parses.
+    #[must_use]
+    pub fn rejected_tokens(text: &str) -> Option<String> {
+        crate::helper::rejected_round_trip(text)
     }
 
     /// `helper::expand_package_url` for a fixed product (`Fuzz`, id

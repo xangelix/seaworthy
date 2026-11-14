@@ -57,6 +57,15 @@
 //!    ([`Installer::hands_off`]): msiexec starts detached, the helper exits
 //!    ([`HelperOutcome::HandedOff`]), and the next run confirms it.
 //!
+//! A product with first-paint probation (`updates.probation`,
+//! [`crate::first_paint`]) adds two things: before step 4 each run
+//! evaluates the release on probation (and may put back exactly the
+//! release it replaced, ending the run with [`HelperOutcome::Reverted`]),
+//! and before step 9 the helper keeps the installed release to go back to
+//! (its signed manifest and package, verified) and publishes the new
+//! release's probation. A server token that failed its probation here is
+//! refused before anything is fetched ([`HelperError::Rejected`]).
+//!
 //! Only a confirmed install clears the memo. [`main`] bounds the whole run
 //! with [`RUN_TIMEOUT`], under the helper unit's `TimeoutStartSec=1800`.
 //! On Windows [`main`] runs under the Service Control Manager (`Running`
@@ -185,6 +194,12 @@ pub struct HelperConfig {
     staging: Option<PathBuf>,
     installer: Option<Arc<dyn Installer>>,
     require_root: bool,
+    /// First-paint probation's locations, for this crate's tests (the
+    /// system's otherwise).
+    probation_at: Option<crate::first_paint::Locations>,
+    /// The administrator's probation switch, for this crate's tests (read
+    /// from the machine otherwise).
+    probation_switch: Option<crate::policy::ProbationSwitch>,
 }
 
 impl fmt::Debug for HelperConfig {
@@ -369,6 +384,8 @@ impl HelperConfig {
             staging: None,
             installer: None,
             require_root: true,
+            probation_at: None,
+            probation_switch: None,
         })
     }
 
@@ -463,6 +480,19 @@ impl HelperConfig {
         self
     }
 
+    /// First-paint probation's install root and public directory, and the
+    /// administrator's switch: this crate's tests only.
+    #[cfg(all(test, unix))]
+    pub(crate) fn probation_for_tests(
+        mut self,
+        at: crate::first_paint::Locations,
+        switch: crate::policy::ProbationSwitch,
+    ) -> Self {
+        self.probation_at = Some(at);
+        self.probation_switch = Some(switch);
+        self
+    }
+
     /// The product.
     #[must_use]
     pub fn product(&self) -> &Product {
@@ -516,6 +546,18 @@ pub enum HelperOutcome {
         from: Release,
         /// The release handed to the installer.
         to: Release,
+    },
+    /// First-paint probation: a release that never painted was replaced by
+    /// exactly the release it had replaced (`updates.probation`), and is
+    /// never installed again.
+    Reverted {
+        /// The release that never painted.
+        from: Release,
+        /// The release installed again.
+        to: Release,
+        /// Handed to an installer that finishes after the helper (Windows'
+        /// msiexec); the next run confirms it.
+        handed_off: bool,
     },
 }
 
@@ -594,6 +636,20 @@ pub enum HelperError {
         /// What the package manager reports now.
         now: String,
     },
+    /// First-paint probation couldn't go back to the release it kept: the
+    /// release on probation stays (the reason says why).
+    #[error("first-paint probation: {0}")]
+    Probation(String),
+    /// The server's release failed its first-paint probation on this machine
+    /// and was reverted: the helper never installs it again (a newer one
+    /// installs as usual).
+    #[error(
+        "release {token} failed its first-paint probation on this machine and was reverted; waiting for a newer release"
+    )]
+    Rejected {
+        /// The server's token.
+        token: String,
+    },
     /// The installer reported success, but the package manager doesn't
     /// report the new release.
     #[error("the install didn't take: expected {expected}, the package manager reports {found}")]
@@ -607,13 +663,17 @@ pub enum HelperError {
 
 impl HelperError {
     /// Whether this is an expected state rather than a failure: another
-    /// run in progress, a backoff, or a run too soon after the last.
+    /// run in progress, a backoff, a run too soon after the last, or a
+    /// server release this machine rejected after its probation.
     /// `main` exits 0 for these.
     #[must_use]
     pub fn is_expected(&self) -> bool {
         matches!(
             self,
-            Self::InProgress | Self::Backoff { .. } | Self::Throttled { .. }
+            Self::InProgress
+                | Self::Backoff { .. }
+                | Self::Throttled { .. }
+                | Self::Rejected { .. }
         )
     }
 }
@@ -658,7 +718,25 @@ pub async fn run(config: &HelperConfig) -> Result<HelperOutcome, HelperError> {
                 installer.name()
             ))
         })?;
+    // First-paint probation, before anything asks the network: a release
+    // that never painted goes back here, and the run ends.
+    match probation::evaluate(config, &staging, &installer, &installed).await {
+        Ok(Some(outcome)) => {
+            report_outcome(&staging, &outcome);
+            return Ok(outcome);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            report(&staging, UpdateStage::Failed, None, &error.to_string());
+            return Err(error);
+        }
+    }
     let token = server_token(config).await?;
+    if probation::is_rejected(&staging, &token) {
+        let error = HelperError::Rejected { token };
+        report(&staging, UpdateStage::Failed, None, &error.to_string());
+        return Err(error);
+    }
     let memo = FailureMemo::new(staging.join("failure-memo"));
     if let Some(retry_after) = memo.backoff_for(&token) {
         return Err(HelperError::Backoff {
@@ -680,31 +758,7 @@ pub async fn run(config: &HelperConfig) -> Result<HelperOutcome, HelperError> {
         memo.clear();
     }
     match &result {
-        Ok(HelperOutcome::Installed { to, .. }) => {
-            report(
-                &staging,
-                UpdateStage::Installed,
-                Some(&to.version.to_string()),
-                "",
-            );
-        }
-        Ok(HelperOutcome::HandedOff { to, .. }) => {
-            report(
-                &staging,
-                UpdateStage::HandedOff,
-                Some(&to.version.to_string()),
-                "",
-            );
-        }
-        Ok(HelperOutcome::UpToDate { installed }) => {
-            report(
-                &staging,
-                UpdateStage::UpToDate,
-                Some(&installed.version.to_string()),
-                "",
-            );
-        }
-        Ok(HelperOutcome::PolicyNotAuto(_)) => {}
+        Ok(outcome) => report_outcome(&staging, outcome),
         Err(error) => report(
             &staging,
             UpdateStage::Failed,
@@ -713,6 +767,56 @@ pub async fn run(config: &HelperConfig) -> Result<HelperOutcome, HelperError> {
         ),
     }
     result
+}
+
+/// The status record of how a run ended.
+fn report_outcome(staging: &Path, outcome: &HelperOutcome) {
+    match outcome {
+        HelperOutcome::Installed { to, .. } => {
+            report(
+                staging,
+                UpdateStage::Installed,
+                Some(&to.version.to_string()),
+                "",
+            );
+        }
+        HelperOutcome::HandedOff { to, .. } => {
+            report(
+                staging,
+                UpdateStage::HandedOff,
+                Some(&to.version.to_string()),
+                "",
+            );
+        }
+        HelperOutcome::Reverted {
+            from,
+            to,
+            handed_off,
+        } => {
+            report(
+                staging,
+                if *handed_off {
+                    UpdateStage::HandedOff
+                } else {
+                    UpdateStage::Installed
+                },
+                Some(&to.version.to_string()),
+                &format!(
+                    "first-paint probation: {} never painted; {} is back",
+                    from.version, to.version
+                ),
+            );
+        }
+        HelperOutcome::UpToDate { installed } => {
+            report(
+                staging,
+                UpdateStage::UpToDate,
+                Some(&installed.version.to_string()),
+                "",
+            );
+        }
+        HelperOutcome::PolicyNotAuto(_) => {}
+    }
 }
 
 /// Tell the app where the run stands ([`crate::status`]): best effort, a
@@ -733,7 +837,9 @@ fn sweep_staging(staging: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if STAGING_KEEPS.iter().any(|keep| name == *keep) {
+        if STAGING_KEEPS.iter().any(|keep| name == *keep)
+            || name.to_str().is_some_and(probation::keeps)
+        {
             continue;
         }
         let path = entry.path();
@@ -845,6 +951,20 @@ fn run_once(config: &HelperConfig, stop: impl Future<Output = ()>) -> bool {
         Ok(HelperOutcome::HandedOff { from, to }) => {
             tracing::info!(
                 "handed {package} {to} to its installer (was {from}); the next run confirms it"
+            );
+        }
+        Ok(HelperOutcome::Reverted {
+            from,
+            to,
+            handed_off,
+        }) => {
+            tracing::warn!(
+                "first-paint probation: {package} {from} never painted; {to} {}",
+                if *handed_off {
+                    "was handed to its installer; the next run confirms it"
+                } else {
+                    "is installed again"
+                }
             );
         }
         Ok(HelperOutcome::UpToDate { installed }) => {
@@ -1157,96 +1277,21 @@ async fn update(
         _ => {}
     }
 
-    // The download: exclusive, private, never through a symlink, bounded
-    // to the manifest's exact size.
+    // The download, its checks and the package's own signature.
     let final_path = staging.join(staged_name(&package, &offered, format));
     let signature_path = PathBuf::from(format!("{}.download-sig", final_path.display()));
     let mut cleanup = Cleanup(vec![final_path.clone(), signature_path.clone()]);
-    let mut staged = StagedFile::create(staging, std::ffi::OsStr::new(&package), "download")
-        .map_err(UpdateError::Io)?;
-    let mut file = tokio::fs::File::from_std(
-        staged
-            .file_mut()
-            .map_err(UpdateError::Io)?
-            .try_clone()
-            .map_err(UpdateError::Io)?,
-    );
-    report(
+    let signature = download_verified(
+        config,
         staging,
-        UpdateStage::Downloading,
+        &url,
+        &manifest,
+        format,
+        &final_path,
+        &signature_path,
         Some(&offered.version.to_string()),
-        "",
-    );
-    tracing::info!("downloading {package} {offered}");
-    net::download_to(&url, &mut file, &config.limits, Some(manifest.size)).await?;
-    drop(file);
-    report(
-        staging,
-        UpdateStage::Verifying,
-        Some(&offered.version.to_string()),
-        "",
-    );
-    let expected = Expected {
-        algorithm: manifest.digest_algorithm,
-        hex: hex::encode(&manifest.digest),
-    };
-    let (actual, header) = {
-        let file = staged.file_mut().map_err(UpdateError::Io)?;
-        crate::staging::hash_staged(file, expected.algorithm).map_err(UpdateError::Io)?
-    };
-    if !seaworthy_crypto::ct_eq(actual.as_bytes(), expected.hex.as_bytes()) {
-        return Err(UpdateError::HashMismatch {
-            expected: expected.hex,
-            actual,
-        }
-        .into());
-    }
-    crate::format_check::check_package(&header, format).map_err(UpdateError::from)?;
-    let _ = std::fs::remove_file(&final_path);
-    staged.persist_over(&final_path).map_err(UpdateError::Io)?;
-    tracing::info!(
-        "{package} {offered} downloaded and verified ({}: {actual})",
-        expected.algorithm
-    );
-
-    // The package's own signature, a second layer.
-    let signature = match (&config.signatures, format) {
-        (PackageSignatures::Pinned(keys), ArtifactFormat::Rpm) => {
-            let (keys, rpm, scratch) = (keys.clone(), final_path.clone(), staging.to_owned());
-            blocking(move || openpgp::check_rpm(&keys, &rpm, &scratch, &openpgp::Tools::system()))
-                .await?
-                .map_err(|e| HelperError::Signature(e.to_string()))?;
-            None
-        }
-        (PackageSignatures::Pinned(keys), ArtifactFormat::Pacman) => {
-            let sig_url = net::metadata_url(&url, ".sig")?;
-            let bytes = net::fetch_metadata(&sig_url, "package signature", &config.limits).await?;
-            write_private(&signature_path, &bytes)?;
-            let (keys, sig, pkg, scratch) = (
-                keys.clone(),
-                signature_path.clone(),
-                final_path.clone(),
-                staging.to_owned(),
-            );
-            blocking(move || {
-                openpgp::check_detached(&keys, &sig, &pkg, &scratch, &openpgp::Tools::system())
-            })
-            .await?
-            .map_err(|e| HelperError::Signature(e.to_string()))?;
-            Some(signature_path.clone())
-        }
-        (PackageSignatures::Pinned(_), _) | (PackageSignatures::ManifestOnly, _) => None,
-    };
-    if signature.is_some()
-        || matches!(
-            (&config.signatures, format),
-            (PackageSignatures::Pinned(_), ArtifactFormat::Rpm)
-        )
-    {
-        tracing::info!(
-            "{package} {offered}: the package's signature verified against the pinned keys"
-        );
-    }
+    )
+    .await?;
 
     // The install, then its confirmation. The floor compared against the
     // release installed when the run began; the download can take minutes,
@@ -1260,11 +1305,15 @@ async fn update(
             now: now.map_or_else(|| "not installed".to_owned(), |r| r.to_string()),
         });
     }
+    // First-paint probation: the release installed now is kept to go back
+    // to before anything changes.
+    let (probation, without) =
+        probation::begin(config, staging, format, installed, &offered, token).await;
     report(
         staging,
         UpdateStage::Installing,
         Some(&offered.version.to_string()),
-        "",
+        without.as_deref().unwrap_or_default(),
     );
     let install_installer = Arc::clone(&installer);
     let (install_package, install_file, install_release, install_replaces) = (
@@ -1273,16 +1322,24 @@ async fn update(
         offered.clone(),
         installed.clone(),
     );
-    blocking(move || {
+    let install_signature = signature.clone();
+    let installed_now = blocking(move || {
         install_installer.install(&Install {
             package: &install_package,
             file: &install_file,
-            signature: signature.as_deref(),
+            signature: install_signature.as_deref(),
             release: &install_release,
             replaces: &install_replaces,
         })
     })
-    .await??;
+    .await
+    .and_then(|result| result.map_err(HelperError::from));
+    if let Err(error) = installed_now {
+        if let Some(started) = probation {
+            probation::abandon(config, staging, started);
+        }
+        return Err(error);
+    }
     if installer.hands_off() {
         // The installer reads the file after the helper exits: it stays,
         // and the next run's sweep removes it.
@@ -1305,6 +1362,155 @@ async fn update(
         from: installed.clone(),
         to: offered,
     })
+}
+
+/// Downloads the package `manifest` describes from `url` into
+/// `final_path`, exclusively and privately, to its exact size; checks its
+/// digest and format magic, then (rpm, pacman, with pinned keys) its own
+/// OpenPGP signature, a pacman one fetched into `signature_path`. Reports
+/// its stages for `version` when given. The pacman signature's path, when
+/// there is one.
+#[allow(clippy::too_many_arguments, reason = "one download's every input")]
+async fn download_verified(
+    config: &HelperConfig,
+    staging: &Path,
+    url: &str,
+    manifest: &crate::ReleaseManifest,
+    format: ArtifactFormat,
+    final_path: &Path,
+    signature_path: &Path,
+    version: Option<&str>,
+) -> Result<Option<PathBuf>, HelperError> {
+    let package = config.product.package();
+    let mut staged = StagedFile::create(staging, std::ffi::OsStr::new(&package), "download")
+        .map_err(UpdateError::Io)?;
+    let mut file = tokio::fs::File::from_std(
+        staged
+            .file_mut()
+            .map_err(UpdateError::Io)?
+            .try_clone()
+            .map_err(UpdateError::Io)?,
+    );
+    if let Some(version) = version {
+        report(staging, UpdateStage::Downloading, Some(version), "");
+    }
+    tracing::info!("downloading {package} {}", manifest.token());
+    net::download_to(url, &mut file, &config.limits, Some(manifest.size)).await?;
+    drop(file);
+    if let Some(version) = version {
+        report(staging, UpdateStage::Verifying, Some(version), "");
+    }
+    let expected = Expected {
+        algorithm: manifest.digest_algorithm,
+        hex: hex::encode(&manifest.digest),
+    };
+    let (actual, header) = {
+        let file = staged.file_mut().map_err(UpdateError::Io)?;
+        crate::staging::hash_staged(file, expected.algorithm).map_err(UpdateError::Io)?
+    };
+    if !seaworthy_crypto::ct_eq(actual.as_bytes(), expected.hex.as_bytes()) {
+        return Err(UpdateError::HashMismatch {
+            expected: expected.hex,
+            actual,
+        }
+        .into());
+    }
+    crate::format_check::check_package(&header, format).map_err(UpdateError::from)?;
+    let _ = std::fs::remove_file(final_path);
+    staged.persist_over(final_path).map_err(UpdateError::Io)?;
+    tracing::info!(
+        "{package} {} downloaded and verified ({}: {actual})",
+        manifest.token(),
+        expected.algorithm
+    );
+
+    // The package's own signature, a second layer.
+    let signature = match (&config.signatures, format) {
+        (PackageSignatures::Pinned(keys), ArtifactFormat::Rpm) => {
+            let (keys, rpm, scratch) = (keys.clone(), final_path.to_owned(), staging.to_owned());
+            blocking(move || openpgp::check_rpm(&keys, &rpm, &scratch, &openpgp::Tools::system()))
+                .await?
+                .map_err(|e| HelperError::Signature(e.to_string()))?;
+            None
+        }
+        (PackageSignatures::Pinned(keys), ArtifactFormat::Pacman) => {
+            let sig_url = net::metadata_url(url, ".sig")?;
+            let bytes = net::fetch_metadata(&sig_url, "package signature", &config.limits).await?;
+            write_private(signature_path, &bytes)?;
+            let (keys, sig, pkg, scratch) = (
+                keys.clone(),
+                signature_path.to_owned(),
+                final_path.to_owned(),
+                staging.to_owned(),
+            );
+            blocking(move || {
+                openpgp::check_detached(&keys, &sig, &pkg, &scratch, &openpgp::Tools::system())
+            })
+            .await?
+            .map_err(|e| HelperError::Signature(e.to_string()))?;
+            Some(signature_path.to_owned())
+        }
+        (PackageSignatures::Pinned(_), _) | (PackageSignatures::ManifestOnly, _) => None,
+    };
+    if signature.is_some()
+        || matches!(
+            (&config.signatures, format),
+            (PackageSignatures::Pinned(_), ArtifactFormat::Rpm)
+        )
+    {
+        tracing::info!(
+            "{package} {}: the package's signature verified against the pinned keys",
+            manifest.token()
+        );
+    }
+    Ok(signature)
+}
+
+/// First-paint probation: fetches the manifest of the release `token` names
+/// and verifies it as an update's (it must name exactly `expected`), then
+/// downloads and verifies its package into `path` (a pacman signature into
+/// `signature_path`), where the probation keeps it. The verified manifest.
+pub(crate) async fn fetch_and_keep(
+    config: &HelperConfig,
+    staging: &Path,
+    token: &str,
+    format: ArtifactFormat,
+    expected: &Release,
+    path: &Path,
+    signature_path: &Path,
+) -> Result<crate::ReleaseManifest, HelperError> {
+    let url = expand_package_url(&config.url_template, token, &config.product, format)?;
+    net::ensure_tls_url(&url)?;
+    let manifest_url = net::metadata_url(&url, ".manifest")?;
+    let bytes = net::fetch_metadata(&manifest_url, "release manifest", &config.limits).await?;
+    let manifest = config
+        .trust
+        .verify_with_limit(&bytes, token, format, config.limits.max_artifact_bytes)
+        .map_err(UpdateError::from)?;
+    let named = Release::new(&manifest.version, manifest.sequence)
+        .map_err(|e| HelperError::Version(format!("the manifest's version: {e}")))?;
+    if named != *expected {
+        return Err(HelperError::Version(format!(
+            "the manifest for {token} names {named}, not the installed {expected}"
+        )));
+    }
+    let downloaded = download_verified(
+        config,
+        staging,
+        &url,
+        &manifest,
+        format,
+        path,
+        signature_path,
+        None,
+    )
+    .await;
+    if let Err(error) = downloaded {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(signature_path);
+        return Err(error);
+    }
+    Ok(manifest)
 }
 
 /// Writes `bytes` to a new private file at `path` (never through a
@@ -1330,6 +1536,22 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), HelperError> {
 #[cfg(windows)]
 #[path = "helper_windows.rs"]
 mod windows;
+
+#[path = "helper_probation.rs"]
+mod probation;
+
+/// The probation record's text re-encoded, when it parses (the fuzz
+/// crate's view, `__fuzz`).
+#[cfg(feature = "fuzzing")]
+pub(crate) fn probation_record_round_trip(text: &str) -> Option<String> {
+    probation::ProbationRecord::parse(text).map(|record| record.encode())
+}
+
+/// The rejected tokens' text re-encoded, when it parses (`__fuzz`).
+#[cfg(feature = "fuzzing")]
+pub(crate) fn rejected_round_trip(text: &str) -> Option<String> {
+    probation::parse_rejected(text).map(|tokens| probation::encode_rejected(&tokens))
+}
 
 #[cfg(test)]
 #[cfg(unix)]

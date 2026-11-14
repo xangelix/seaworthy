@@ -50,6 +50,23 @@ pub fn msiexec_arguments(file: &Path, log: &Path) -> Vec<OsString> {
     ]
 }
 
+/// msiexec's arguments for installing `file` as a downgrade (first-paint
+/// probation's revert to the release it replaced, which only a probation
+/// product's `AllowDowngrades` MSI accepts): [`msiexec_arguments`] and
+/// `REINSTALLMODE=amus`. Windows Installer costs the install while the newer
+/// release's files are still in place, and its file versioning rules mark
+/// every older-versioned file "not to install"; the major upgrade then
+/// removes the newer release, the older one's files never arrive, and its
+/// first custom action naming one fails (error 2753, seen on Windows Server
+/// 2022). `a` reinstalls every file whatever its version (`m`, `u` and `s`
+/// are the default's machine and user registry and shortcuts).
+#[must_use]
+pub fn msiexec_downgrade_arguments(file: &Path, log: &Path) -> Vec<OsString> {
+    let mut args = msiexec_arguments(file, log);
+    args.push("REINSTALLMODE=amus".into());
+    args
+}
+
 #[cfg(windows)]
 pub use windows::Msi;
 
@@ -59,7 +76,7 @@ mod windows {
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
-    use super::{MSI_RELEASE_VALUE, MSIEXEC_LOG, msiexec_arguments};
+    use super::{MSI_RELEASE_VALUE, MSIEXEC_LOG, msiexec_arguments, msiexec_downgrade_arguments};
     use crate::ArtifactFormat;
     use crate::installer::{Install, InstallError, Installer};
     use crate::release::Release;
@@ -151,9 +168,14 @@ mod windows {
             let log = staging.join(MSIEXEC_LOG);
             let _ = std::fs::remove_file(&log);
             let program = msiexec()?;
+            let arguments = if install.is_downgrade() {
+                msiexec_downgrade_arguments(install.file, &log)
+            } else {
+                msiexec_arguments(install.file, &log)
+            };
             let start = |flags: u32| {
                 Command::new(&program)
-                    .args(msiexec_arguments(install.file, &log))
+                    .args(&arguments)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -205,5 +227,23 @@ mod tests {
                 r"C:\ProgramData\Acme\Agent\updates\msiexec-last.log",
             ]
         );
+    }
+
+    /// A downgrade (probation's revert) forces every file in: the same
+    /// arguments, then `REINSTALLMODE=amus`; an upgrade's are unchanged.
+    #[test]
+    fn a_downgrade_reinstalls_every_file_whatever_its_version() {
+        let (file, log) = (
+            Path::new(r"C:\ProgramData\Acme\Agent\updates\probation-previous.msi"),
+            Path::new(r"C:\ProgramData\Acme\Agent\updates\msiexec-last.log"),
+        );
+        let mut expected = msiexec_arguments(file, log);
+        assert!(
+            !expected
+                .iter()
+                .any(|a| a.to_string_lossy().contains("REINSTALLMODE"))
+        );
+        expected.push("REINSTALLMODE=amus".into());
+        assert_eq!(msiexec_downgrade_arguments(file, log), expected);
     }
 }

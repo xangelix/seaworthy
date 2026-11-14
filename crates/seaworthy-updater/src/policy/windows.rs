@@ -79,6 +79,25 @@ pub(super) fn read_server(product: &Product) -> Result<Option<AdminServer>, Stri
     Ok(None)
 }
 
+/// The Group Policy value of the first-paint probation switch.
+const PROBATION_VALUE: &str = "Probation";
+
+/// The probation switch Group Policy sets (`on` or `off`), under the
+/// policy's writer check; `On` when the value isn't set. Only the Group
+/// Policy key counts: the MSI sets no default for it.
+pub(super) fn read_probation(product: &Product) -> Result<super::ProbationSwitch, String> {
+    let key = product.policy_key();
+    match read_value(&key, PROBATION_VALUE, MAX_VALUE_BYTES)? {
+        None => Ok(super::ProbationSwitch::On),
+        Some(value) => super::ProbationSwitch::parse(&value).ok_or_else(|| {
+            format!(
+                "HKLM\\{key}\\{PROBATION_VALUE} is {:?}, not on or off",
+                crate::log::line_safe(&value)
+            )
+        }),
+    }
+}
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }

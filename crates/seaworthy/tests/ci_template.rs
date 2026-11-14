@@ -5039,3 +5039,487 @@ fn credentials_reach_the_seaworthy_call_alone() {
     assert!(git.contains("ACME_PLAIN=not-a-secret"), "{git}");
     assert!(!said(&out).contains("s3-secret"), "never printed");
 }
+
+/// The bundled-runtime fixture: DESKTOP with a Linux runtime of data files
+/// and a Windows one, their pins, an archive of a distribution holding
+/// them over two roots (and more that doesn't ship), and a curl stub that
+/// serves it and logs each call. Returns the archive's SHA-256.
+fn runtime_fixture(dir: &Path) -> String {
+    std::fs::write(
+        dir.join("seaworthy.toml"),
+        format!(
+            "{}\n[[product.console.runtime]]\nname = \"engine\"\ndistribution = \"engine-1\"\nplatform = \"linux\"\npins = \"engine-linux.sha256\"\ndestination = \"lib\"\n",
+            DESKTOP.replace("outputs = [\"deb\", \"tar\"]", "outputs = [\"deb\", \"tar\", \"zip\"]\nwindows-directory = \"Console\"")
+        ) + "\n[[product.console.runtime]]\nname = \"engine\"\ndistribution = \"engine-1-win\"\nplatform = \"windows\"\npins = \"engine-windows.sha256\"\n",
+    )
+    .unwrap();
+    let sha = |bytes: &[u8]| seaworthy_crypto::digest::sha256_hex(bytes);
+    std::fs::write(
+        dir.join("engine-linux.sha256"),
+        format!(
+            "{}  resources.pak\n{}  locales/en-US.pak\n",
+            sha(b"PAK resources"),
+            sha(b"PAK en-US")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("engine-windows.sha256"),
+        format!("{}  resources.pak\n", sha(b"PAK resources")),
+    )
+    .unwrap();
+    let source = dir.join("dist-source");
+    for (path, bytes) in [
+        ("engine-1/Release/resources.pak", &b"PAK resources"[..]),
+        ("engine-1/Resources/locales/en-US.pak", b"PAK en-US"),
+        ("engine-1/include/engine.h", b"/* not shipped */"),
+    ] {
+        let at = source.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, bytes).unwrap();
+    }
+    let archive = dir.join("engine-1.tar.gz");
+    let made = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&source)
+        .arg("engine-1")
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{}", said(&made));
+    let bin = dir.join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script_at(
+        &bin.join("curl"),
+        &format!(
+            "#!/bin/bash\n{{ printf '%s ' \"$@\"; echo; }} >> '{log}'\nout=\"\"\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = --output ] && out=\"$2\"; shift; done\n\
+             cp '{archive}' \"$out\"\n",
+            log = dir.join("curl.log").display(),
+            archive = archive.display()
+        ),
+    );
+    sha(&std::fs::read(&archive).unwrap())
+}
+
+const ENGINE_URL: &str = "https://downloads.example.com/engine/engine-1.tar.gz";
+
+/// `runtime-archives` in the package step: every entry checked, and each
+/// runtime against seaworthy.toml, before anything is downloaded; an archive
+/// whose SHA-256 isn't the pinned one stops the step before it is unpacked;
+/// a good one is downloaded https-only, unpacked outside the checkout, and
+/// its runtime staged by its pins (Windows beside each core) and packaged.
+#[test]
+fn the_package_step_stages_each_runtime_from_its_checked_archive() {
+    let Some(nfpm) = common::nfpm() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let digest = runtime_fixture(dir.path());
+    common::acme_artifacts(&dir.path().join("seaworthy/artifacts"));
+    tool_into(dir.path());
+    let path = path_with(&dir.path().join("stub-bin"));
+    let curl_log = dir.path().join("curl.log");
+    let package = |archives: &str| {
+        let _ = std::fs::remove_file(&curl_log);
+        let _ = std::fs::remove_dir_all(dir.path().join("seaworthy/dist"));
+        step(
+            dir.path(),
+            &["package"],
+            &[
+                ("PATH", path.as_str()),
+                ("NFPM", nfpm.to_str().unwrap()),
+                ("SOURCE_DATE_EPOCH", "1700000000"),
+                ("CI_PIPELINE_IID", "41"),
+                ("CI_COMMIT_SHORT_SHA", "0a1b2c3"),
+                ("TMPDIR", dir.path().join("tmp").to_str().unwrap()),
+                ("SEAWORTHY_RUNTIME_ARCHIVES", archives),
+            ],
+        )
+    };
+    std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+    let linux = format!(
+        "console engine x86_64-unknown-linux-gnu {ENGINE_URL} {digest} engine-1/Release,engine-1/Resources"
+    );
+    let windows =
+        format!("console engine x86_64-pc-windows-msvc {ENGINE_URL} {digest} engine-1/Release");
+    // Refused before any download.
+    for (archives, why) in [
+        (linux.replace("https://", "http://"), "isn't an https URL"),
+        (linux.replace(&digest, "ABC"), "isn't a SHA-256"),
+        (
+            linux.replace(" engine-1/Release,engine-1/Resources", ""),
+            "not <product>",
+        ),
+        (
+            linux.replace("engine-1/Release,", "engine-1/../Release,"),
+            "isn't a plain path",
+        ),
+        (
+            linux.replace("x86_64-unknown-linux-gnu", "aarch64-apple-darwin"),
+            "ships for",
+        ),
+        (linux.replace(".tar.gz", ".exe"), "doesn't name a .tar.bz2"),
+        (format!("{linux};{linux}"), "is named twice"),
+        (
+            linux.replace("console engine", "console other"),
+            "which seaworthy.toml refuses",
+        ),
+        (
+            linux.replace("console engine", "viewer engine"),
+            "which seaworthy.toml refuses",
+        ),
+    ] {
+        let out = package(&archives);
+        assert!(!out.status.success(), "{archives}");
+        assert!(said(&out).contains(why), "{archives}: {}", said(&out));
+        assert!(!curl_log.exists(), "{archives}: downloaded anyway");
+    }
+    // Another archive than the pinned one: refused before it is unpacked,
+    // nothing staged.
+    let other = "0".repeat(64);
+    let out = package(&linux.replace(&digest, &other));
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains(&format!("but runtime-archives pins {other}")),
+        "{}",
+        said(&out)
+    );
+    assert!(
+        !dir.path()
+            .join("seaworthy/artifacts/x86_64-unknown-linux-gnu/runtime")
+            .exists()
+    );
+    // Both runtimes, one entry per line, a comment and a blank line between.
+    let out = package(&format!("{linux}\n# the Windows one\n\n{windows}\n"));
+    assert!(out.status.success(), "{}", said(&out));
+    let calls = std::fs::read_to_string(&curl_log).unwrap();
+    assert_eq!(calls.lines().count(), 2, "{calls}");
+    assert!(
+        calls.contains("--proto =https --proto-redir =https --tlsv1.2")
+            && calls.contains(ENGINE_URL),
+        "{calls}"
+    );
+    let staged = dir
+        .path()
+        .join("seaworthy/artifacts/x86_64-unknown-linux-gnu/runtime/engine");
+    assert_eq!(
+        std::fs::read(staged.join("locales/en-US.pak")).unwrap(),
+        b"PAK en-US"
+    );
+    assert!(!staged.join("engine.h").exists() && !staged.join("include").exists());
+    for cpu in ["x86-64-v3", "x86-64-v2"] {
+        assert!(
+            dir.path()
+                .join("seaworthy/artifacts/x86_64-pc-windows-msvc/cores")
+                .join(cpu)
+                .join("resources.pak")
+                .is_file(),
+            "beside the {cpu} core"
+        );
+    }
+    let layout: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            dir.path()
+                .join("seaworthy/dist/console/x86_64-unknown-linux-gnu/layout.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(layout["runtimes"][0]["distribution"], "engine-1");
+    // The scratch directories (TMPDIR, outside the checkout) are gone.
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0,
+        "the unpacked archives are removed when the step ends"
+    );
+}
+
+/// The Linux build downloads and checks its own triple's archives, and
+/// names each unpacked one to the product's build as
+/// SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>, before cargo runs.
+#[test]
+fn the_build_step_names_each_checked_runtime_archive_to_the_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest = runtime_fixture(dir.path());
+    let work = dir.path().join("seaworthy");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        work.join("plan-x86_64-unknown-linux-gnu.tsv"),
+        "build\tbase\t-\t--bin tool\ncopy\tbase/x86_64-unknown-linux-gnu/release/tool\tx86_64-unknown-linux-gnu/launcher/tool\n",
+    )
+    .unwrap();
+    let bin = dir.path().join("stub-bin");
+    let seen = dir.path().join("seen");
+    script_at(&bin.join("rustc"), RUSTC_STUB);
+    script_at(
+        &bin.join("cargo"),
+        &format!(
+            "#!/bin/bash\n{METADATA_STUB}env | grep '^SEAWORTHY_RUNTIME_[A-Z]' | grep -v '^SEAWORTHY_RUNTIME_ARCHIVES=' | sed 's/=.*//' | sort > '{seen}'\n\
+             [ -f \"$SEAWORTHY_RUNTIME_CONSOLE_ENGINE/engine-1/Release/resources.pak\" ] && echo unpacked >> '{seen}'\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && dir=\"$2\"; shift; done\n\
+             mkdir -p \"$dir/x86_64-unknown-linux-gnu/release\" && echo bin > \"$dir/x86_64-unknown-linux-gnu/release/tool\"\n",
+            seen = seen.display()
+        ),
+    );
+    let out = step(
+        dir.path(),
+        &["build", "x86_64-unknown-linux-gnu"],
+        &[
+            ("PATH", path_with(&bin).as_str()),
+            ("SEAWORTHY_VERSION", "1.4.0"),
+            ("CI_COMMIT_SHORT_SHA", "0a1b2c3"),
+            (
+                "SEAWORTHY_RUNTIME_ARCHIVES",
+                &format!(
+                    "console engine x86_64-unknown-linux-gnu {ENGINE_URL} {digest} engine-1/Release;\
+                     console engine x86_64-pc-windows-msvc {ENGINE_URL} {digest} engine-1/Release"
+                ),
+            ),
+        ],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        "SEAWORTHY_RUNTIME_CONSOLE_ENGINE\nunpacked\n"
+    );
+    // The Windows entry is the Windows build's: one download here.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("curl.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    // A bad entry stops the build before any download or build.
+    std::fs::remove_file(dir.path().join("curl.log")).unwrap();
+    let out = step(
+        dir.path(),
+        &["build", "x86_64-unknown-linux-gnu"],
+        &[
+            ("PATH", path_with(&bin).as_str()),
+            ("SEAWORTHY_VERSION", "1.4.0"),
+            (
+                "SEAWORTHY_RUNTIME_ARCHIVES",
+                &format!("console engine x86_64-unknown-linux-gnu {ENGINE_URL} {digest}"),
+            ),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(said(&out).contains("not <product>"), "{}", said(&out));
+    assert!(!dir.path().join("curl.log").exists());
+}
+
+/// The Windows build does the same for its own triple, in PowerShell 5.1's
+/// language (pwsh standing in), refusing a bad entry before any download.
+#[test]
+fn the_windows_build_names_each_checked_runtime_archive_to_the_build() {
+    let have_pwsh = pwsh()
+        .args(["-NoProfile", "-Command", "exit 0"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !have_pwsh {
+        eprintln!(
+            "SKIPPED: pwsh is not installed (Windows PowerShell 5.1 runs this script on the runner)"
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let digest = runtime_fixture(dir.path());
+    std::fs::write(dir.path().join("seaworthy.toml"), WINDOWS_PRODUCT).unwrap();
+    tool_into(dir.path());
+    let plan = Command::new(env!("CARGO_BIN_EXE_seaworthy"))
+        .current_dir(dir.path())
+        .args(["build-plan", "--triple", "x86_64-pc-windows-msvc"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{}", said(&plan));
+    std::fs::write(
+        dir.path().join("seaworthy/plan-x86_64-pc-windows-msvc.tsv"),
+        &plan.stdout,
+    )
+    .unwrap();
+    let bin = dir.path().join("stub-bin");
+    script_at(&bin.join("rustc"), RUSTC_STUB);
+    let log = dir.path().join("cargo-log");
+    std::fs::create_dir_all(&log).unwrap();
+    script_at(
+        &bin.join("cargo"),
+        &windows_cargo_stub(&log).replacen(
+            "#!/bin/bash\n",
+            &format!(
+                "#!/bin/bash\nenv | grep '^SEAWORTHY_RUNTIME_[A-Z]' | grep -v '^SEAWORTHY_RUNTIME_ARCHIVES=' | sed 's/=.*//' | sort > '{seen}'\n\
+                 [ -f \"$SEAWORTHY_RUNTIME_CONSOLE_ENGINE/engine-1/Release/resources.pak\" ] && echo unpacked >> '{seen}'\n",
+                seen = dir.path().join("seen").display()
+            ),
+            1,
+        ),
+    );
+    let script = repo_root().join("scripts/ci/seaworthy-build.ps1");
+    let run = |archives: &str| {
+        let _ = std::fs::remove_file(dir.path().join("curl.log"));
+        pwsh()
+            .current_dir(dir.path())
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!("& '{}'; exit $LASTEXITCODE", script.display()))
+            .env("PATH", path_with(&bin))
+            .env("SEAWORTHY_RUNTIME_ARCHIVES", archives)
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
+            .output()
+            .unwrap()
+    };
+    let windows = format!(
+        "console engine x86_64-pc-windows-msvc {ENGINE_URL} {digest} engine-1/Release,engine-1/Resources"
+    );
+    let linux = windows.replace("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu");
+    let out = run(&format!("{linux}\n{windows}\n"));
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("seen")).unwrap(),
+        "SEAWORTHY_RUNTIME_CONSOLE_ENGINE\nunpacked\n"
+    );
+    let calls = std::fs::read_to_string(dir.path().join("curl.log")).unwrap();
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert!(
+        calls.contains("--proto =https --proto-redir =https"),
+        "{calls}"
+    );
+    // pwsh's error view wraps and colors a failure: read it as one line.
+    let flat = |out: &std::process::Output| {
+        let text = said(out);
+        let mut plain = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(c);
+            }
+        }
+        plain
+            .lines()
+            .map(|l| l.split_once("| ").map_or(l, |(_, rest)| rest).trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (archives, why, downloads) in [
+        (
+            windows.replace("https://", "http://"),
+            "isn't an https URL",
+            false,
+        ),
+        (
+            windows.replace(&digest, &"0".repeat(64)),
+            "but runtime-archives pins",
+            true,
+        ),
+        (format!("{windows};{windows}"), "is named twice", false),
+        (
+            windows.replace("engine-1/Release,", "../Release,"),
+            "isn't a plain path",
+            false,
+        ),
+    ] {
+        let out = run(&archives);
+        assert!(!out.status.success(), "{archives}");
+        assert!(flat(&out).contains(why), "{archives}: {}", flat(&out));
+        assert_eq!(
+            dir.path().join("curl.log").exists(),
+            downloads,
+            "{archives}: only an entry that passes its checks is downloaded"
+        );
+    }
+}
+
+/// prepare checks every `runtime-archives` entry, and each runtime against
+/// seaworthy.toml, so a bad one fails the pipeline before any build job
+/// downloads anything; prepare itself downloads nothing.
+#[test]
+fn prepare_refuses_a_runtime_entry_before_any_job_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest = runtime_fixture(dir.path());
+    let checkout = dir.path().join(".seaworthy");
+    for file in [
+        "scripts/ci/seaworthy.sh",
+        "scripts/ci/seaworthy-build.ps1",
+        "scripts/ci/seaworthy-msi.ps1",
+        "scripts/ci/azure-sign.sh",
+        "scripts/ci/install-nfpm.sh",
+        "scripts/ci/install-osslsigncode.sh",
+        "ci/gitlab/seaworthy.yml",
+    ] {
+        let to = checkout.join(file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(repo_root().join(file), &to).unwrap();
+    }
+    std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let bin = dir.path().join("stub-bin");
+    script_at(
+        &bin.join("cargo"),
+        &format!(
+            "#!/bin/bash\nwhile [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && dir=\"$2\"; shift; done\n\
+             mkdir -p \"$dir/release\" && cp {} \"$dir/release/seaworthy\"\n",
+            env!("CARGO_BIN_EXE_seaworthy")
+        ),
+    );
+    std::fs::write(
+        dir.path().join(".gitlab-ci.yml"),
+        "include: [{project: acme/seaworthy, file: ci/gitlab/seaworthy.yml}]\n",
+    )
+    .unwrap();
+    let raw = std::fs::read_to_string(repo_root().join("ci/gitlab/seaworthy.yml")).unwrap();
+    let marker = raw
+        .lines()
+        .find(|l| l.contains("SEAWORTHY_TEMPLATE:"))
+        .unwrap()
+        .split('"')
+        .nth(1)
+        .unwrap()
+        .to_owned();
+    let path = path_with(&bin);
+    let project = dir.path().to_str().unwrap().to_owned();
+    let prepare = |archives: &str| {
+        step(
+            dir.path(),
+            &["prepare"],
+            &[
+                ("PATH", path.as_str()),
+                ("SEAWORTHY_TEMPLATE", marker.as_str()),
+                ("CI_PROJECT_DIR", project.as_str()),
+                ("SEAWORTHY_RUNTIME_ARCHIVES", archives),
+            ],
+        )
+    };
+    let good = format!(
+        "console engine x86_64-unknown-linux-gnu {ENGINE_URL} {digest} engine-1/Release,engine-1/Resources"
+    );
+    let out = prepare(&good);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(
+        said(&out).contains(
+            "console: runtime engine for x86_64-unknown-linux-gnu: 2 pinned file(s) (engine-1)"
+        ),
+        "{}",
+        said(&out)
+    );
+    for (archives, why) in [
+        (
+            good.replace("console engine", "console renderer"),
+            "which seaworthy.toml refuses",
+        ),
+        (good.replace("https://", "ftp://"), "isn't an https URL"),
+        (format!("{good}\nconsole"), "not <product>"),
+    ] {
+        let out = prepare(&archives);
+        assert!(!out.status.success(), "{archives}");
+        assert!(said(&out).contains(why), "{archives}: {}", said(&out));
+    }
+    assert!(
+        !dir.path().join("curl.log").exists(),
+        "prepare downloads nothing"
+    );
+}

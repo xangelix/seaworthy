@@ -151,6 +151,10 @@ on:
         description: More cargo arguments for every build (--features fips).
         type: string
         default: ""
+      runtime-archives:
+        description: The bundled runtimes' distribution archives ([[product.<id>.runtime]]), one line (or ;-separated entry) per runtime and triple - <product> <runtime> <triple> <https url> <sha256> <root>[,<root>...], the roots relative to the unpacked archive. prepare checks every line and runtime before any download; the build jobs download their triple's archives, check each SHA-256 before anything reads it and name the unpacked archive to the build as SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>; package stages each runtime into the artifacts by its pins (seaworthy runtime-stage). Never cached. Empty, none.
+        type: string
+        default: ""
       rustflags:
         description: More rustflags for every build (SEAWORTHY_RUSTFLAGS; {workspace}, {triple} and {cpu} expand).
         type: string
@@ -301,6 +305,10 @@ env:
   SEAWORTHY_ALLOW_CI_TEST_KEYS: ${{ inputs.ci-test-keys && '1' || '' }}
   # The caller's data artifact and where it lands (github.sh data-path checks
   # both before the packaging jobs download it).
+  # The bundled runtimes' distribution archives: prepare checks every entry,
+  # the build jobs download their triple's and package stages them all
+  # (scripts/ci/seaworthy.sh, seaworthy-build.ps1).
+  SEAWORTHY_RUNTIME_ARCHIVES: ${{ inputs.runtime-archives }}
   SEAWORTHY_DATA_ARTIFACT: ${{ inputs.data-artifact }}
   SEAWORTHY_DATA_PATH: ${{ inputs.data-path }}
 
@@ -437,7 +445,8 @@ jobs:
             -e SEAWORTHY_WORK -e SEAWORTHY_MANIFEST -e SEAWORTHY_CARGO_ARGS
             -e SEAWORTHY_RUSTFLAGS -e SEAWORTHY_CORE_RUSTFLAGS -e SEAWORTHY_REMAP_PATHS
             -e SEAWORTHY_RELEASE -e SEAWORTHY_VERSION -e SEAWORTHY_VERSION_FILE -e SEAWORTHY_TAG
-            -e SEAWORTHY_SEQUENCE -e SEAWORTHY_BUILD_COMMAND -e SEAWORTHY_ALLOW_CI_TEST_KEYS -e GITHUB_SHA)
+            -e SEAWORTHY_SEQUENCE -e SEAWORTHY_BUILD_COMMAND -e SEAWORTHY_ALLOW_CI_TEST_KEYS -e GITHUB_SHA
+            -e SEAWORTHY_RUNTIME_ARCHIVES -e SEAWORTHY_PRODUCTS)
           [ -z "$TOOLCHAIN" ] || args+=(-e "RUSTUP_TOOLCHAIN=$TOOLCHAIN")
           docker run "${args[@]}" "$IMAGE" bash -c \
             'status=0; bash "$SEAWORTHY_WORK/scripts/seaworthy.sh" build x86_64-unknown-linux-gnu "$1" || status=$?; chown -R "$2" "$SEAWORTHY_WORK"; exit "$status"' \

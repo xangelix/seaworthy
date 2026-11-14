@@ -82,6 +82,12 @@ pub(crate) struct Elf {
     pub(crate) imports: Vec<(String, String)>,
     /// `DT_FLAGS` = `DF_STATIC_TLS` (initial-exec TLS somewhere inside).
     pub(crate) static_tls: bool,
+    /// A `DT_RUNPATH` entry (`$ORIGIN`, `$ORIGIN/../lib`, …).
+    pub(crate) runpath: Option<String>,
+    /// A `DT_RPATH` entry.
+    pub(crate) rpath: Option<String>,
+    /// A `DT_SONAME`.
+    pub(crate) soname: Option<String>,
 }
 
 /// The SysV ELF hash of a version name (`vna_hash`).
@@ -236,6 +242,12 @@ impl Elf {
         for lib in &self.needed {
             put64(&mut dynamic, 1); // DT_NEEDED
             put64(&mut dynamic, u64::from(dynstr.add(lib)));
+        }
+        for (tag, value) in [(29, &self.runpath), (15, &self.rpath), (14, &self.soname)] {
+            if let Some(value) = value {
+                put64(&mut dynamic, tag); // DT_RUNPATH, DT_RPATH, DT_SONAME
+                put64(&mut dynamic, u64::from(dynstr.add(value)));
+            }
         }
         if self.static_tls {
             put64(&mut dynamic, 30); // DT_FLAGS

@@ -250,13 +250,49 @@ pub fn desktop_update_service_unit(
     helper: &Path,
     cache_directory: &str,
 ) -> Result<String, ServiceError> {
+    desktop_update_service_unit_with_state(display_name, helper, cache_directory, None)
+}
+
+/// [`desktop_update_service_unit`], and with `state_directory` (relative to
+/// `/var/lib`, [`ServiceSpec::state_directory`]'s grammar) the helper's own
+/// public directory: `StateDirectory=` with `StateDirectoryMode=0755`, the
+/// one place outside its cache the unit's `ProtectSystem=strict` lets it
+/// write (first-paint probation's notice and drop box, root-owned and
+/// readable by everyone). Without it the unit is
+/// [`desktop_update_service_unit`]'s, byte for byte.
+///
+/// # Errors
+/// As [`desktop_update_service_unit`], and for a `state_directory` outside
+/// the grammar.
+pub fn desktop_update_service_unit_with_state(
+    display_name: &str,
+    helper: &Path,
+    cache_directory: &str,
+    state_directory: Option<&str>,
+) -> Result<String, ServiceError> {
     if display_name.is_empty() {
         return Err(ServiceError::InvalidSpec(
             "a desktop product's update unit needs its display name".to_owned(),
         ));
     }
     validate_description(display_name)?;
-    helper_unit(&display_name.replace('%', "%%"), helper, cache_directory)
+    let mut unit = helper_unit(&display_name.replace('%', "%%"), helper, cache_directory)?;
+    if let Some(state) = state_directory {
+        validate_state_directory(Some(state)).map_err(|_| {
+            ServiceError::InvalidSpec(format!(
+                "state directory {state:?} must be relative segments over [A-Za-z0-9._@+-] (resolved under /var/lib)"
+            ))
+        })?;
+        unit.push_str(&format!(
+            "StateDirectory={state}
+"
+        ));
+        unit.push_str(
+            "StateDirectoryMode=0755
+",
+        );
+    }
+    Ok(unit)
 }
 
 /// A desktop product's update helper unit name, `<name>.service`, where
@@ -1808,6 +1844,40 @@ console.log(JSON.stringify([
             String::from_utf8_lossy(&output.stdout).trim(),
             r#"["yes","next","next","next","next","next","next","next"]"#
         );
+    }
+
+    /// A first-paint probation product's helper unit: its public state
+    /// directory, `/var/lib/<vendor>/<id>`, root's and readable by every
+    /// user, the one place outside its cache `ProtectSystem=strict` lets it
+    /// write; without one, the unit as before, byte for byte.
+    #[test]
+    fn a_probation_helper_unit_writes_its_public_state_directory_alone() {
+        let helper = Path::new("/opt/acme/console/libexec/acme-console-update");
+        let plain =
+            desktop_update_service_unit("Acme Console", helper, "acme/console").expect("renders");
+        assert_eq!(
+            desktop_update_service_unit_with_state("Acme Console", helper, "acme/console", None)
+                .expect("renders"),
+            plain
+        );
+        let unit = desktop_update_service_unit_with_state(
+            "Acme Console",
+            helper,
+            "acme/console",
+            Some("acme/console"),
+        )
+        .expect("renders");
+        assert_eq!(
+            unit,
+            format!("{plain}StateDirectory=acme/console\nStateDirectoryMode=0755\n")
+        );
+        assert!(unit.contains("ProtectSystem=strict\n"), "{unit}");
+        for bad in ["../etc", "/var/lib/x", "a b", ""] {
+            assert!(
+                desktop_update_service_unit_with_state("A", helper, "a/b", Some(bad)).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

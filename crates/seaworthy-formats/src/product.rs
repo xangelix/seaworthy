@@ -38,6 +38,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::manifest::ReleaseTrust;
 use crate::policy::UpdatePolicy;
@@ -58,6 +59,74 @@ pub struct ServiceNames {
     pub state_directory: Option<String>,
 }
 
+/// First-paint probation (`seaworthy.toml`'s `updates.probation`): how long
+/// a release the update helper installed may go without the app's first
+/// paint before the helper replaces it with exactly the release it
+/// replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbationSettings {
+    /// Launches of the new release without a first paint that revert it
+    /// (1 to [`MAX_PROBATION_LAUNCHES`]).
+    pub launches: u32,
+    /// How long after its first launch a release that never painted is
+    /// reverted ([`MIN_PROBATION_WINDOW`] to [`MAX_PROBATION_WINDOW`]).
+    pub window: Duration,
+}
+
+/// The most launches a probation may count before it reverts.
+pub const MAX_PROBATION_LAUNCHES: u32 = 20;
+
+/// The shortest probation window.
+pub const MIN_PROBATION_WINDOW: Duration = Duration::from_secs(60);
+
+/// The longest probation window (30 days).
+pub const MAX_PROBATION_WINDOW: Duration = Duration::from_secs(30 * 86_400);
+
+impl ProbationSettings {
+    /// The settings, within their bounds.
+    ///
+    /// # Errors
+    /// [`ProductError`] for launches outside 1 to
+    /// [`MAX_PROBATION_LAUNCHES`] or a window outside
+    /// [`MIN_PROBATION_WINDOW`] to [`MAX_PROBATION_WINDOW`].
+    pub fn new(launches: u32, window: Duration) -> Result<Self, ProductError> {
+        if launches == 0 || launches > MAX_PROBATION_LAUNCHES {
+            return Err(ProductError(format!(
+                "probation launches {launches} must be 1 to {MAX_PROBATION_LAUNCHES}"
+            )));
+        }
+        if window < MIN_PROBATION_WINDOW || window > MAX_PROBATION_WINDOW {
+            return Err(ProductError(format!(
+                "probation window {} s must be one minute to 30 days",
+                window.as_secs()
+            )));
+        }
+        Ok(Self { launches, window })
+    }
+}
+
+/// A duration as `seaworthy.toml` spells one: a whole number without a
+/// leading zero, then `ms`, `s`, `m`, `h` or `d` (the seaworthy CLI's
+/// grammar).
+#[must_use]
+pub fn parse_duration(text: &str) -> Option<Duration> {
+    let split = text.find(|c: char| !c.is_ascii_digit())?;
+    let (digits, unit) = text.split_at(split);
+    if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    let secs = |factor: u64| n.checked_mul(factor).map(Duration::from_secs);
+    match unit {
+        "ms" => Some(Duration::from_millis(n)),
+        "s" => secs(1),
+        "m" => secs(60),
+        "h" => secs(3600),
+        "d" => secs(86_400),
+        _ => None,
+    }
+}
+
 /// A product's names (see the module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Product {
@@ -69,6 +138,7 @@ pub struct Product {
     default_policy: UpdatePolicy,
     macos_bundle_id: Option<String>,
     release_trust: ReleaseTrust,
+    probation: Option<ProbationSettings>,
 }
 
 /// A reverse-DNS bundle identifier: at least two dot-separated labels of
@@ -162,6 +232,7 @@ impl Product {
             default_policy: UpdatePolicy::Auto,
             macos_bundle_id: None,
             release_trust: ReleaseTrust::AnyKey,
+            probation: None,
         })
     }
 
@@ -214,6 +285,30 @@ impl Product {
         self.release_trust
     }
 
+    /// First-paint probation for the releases the product's helper installs
+    /// (`seaworthy.toml`'s `updates.probation`; none by default).
+    #[must_use]
+    pub fn with_probation(mut self, probation: ProbationSettings) -> Self {
+        self.probation = Some(probation);
+        self
+    }
+
+    /// The product's first-paint probation, if it has one.
+    #[must_use]
+    pub fn probation(&self) -> Option<ProbationSettings> {
+        self.probation
+    }
+
+    /// Linux: the directory of a probation's public files,
+    /// `/var/lib/<vendor>/<id>` (vendor in lowercase), which the update
+    /// helper makes (root's, 0755).
+    #[must_use]
+    pub fn probation_directory(&self) -> PathBuf {
+        PathBuf::from("/var/lib")
+            .join(self.vendor.to_ascii_lowercase())
+            .join(&self.id)
+    }
+
     /// Reads product `id`'s names from a `seaworthy.toml` (see the module
     /// docs). Only the settings that name things are read, and anything
     /// else in the file is ignored; the seaworthy CLI validates the whole
@@ -226,7 +321,8 @@ impl Product {
     ///   (required), and `windows-directory` (else the display name's last
     ///   word, else that executable);
     /// - `[product.<id>]` `updates.default` (`auto`, `notify` or `off`;
-    ///   else `auto`);
+    ///   else `auto`) and `updates.probation` (`launches` and `window`;
+    ///   else none);
     /// - `[product.<id>.service]` `name` (required in the table) and
     ///   `state-directory`;
     /// - `[product.<id>.macos]` `bundle-id` (required in the table).
@@ -274,6 +370,15 @@ impl Product {
         }
         if let Some(macos) = &entry.macos {
             product = product.with_macos_bundle_id(&macos.bundle_id)?;
+        }
+        if let Some(probation) = &entry.updates.probation {
+            let window = parse_duration(&probation.window).ok_or_else(|| {
+                ProductError(format!(
+                    "updates.probation.window {:?} is not a duration (s, m, h, d)",
+                    probation.window
+                ))
+            })?;
+            product = product.with_probation(ProbationSettings::new(probation.launches, window)?);
         }
         Ok(product)
     }
@@ -598,6 +703,14 @@ struct ServiceTable {
 struct UpdatesTable {
     #[serde(default)]
     default: UpdatePolicy,
+    #[serde(default)]
+    probation: Option<ProbationTable>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProbationTable {
+    launches: u32,
+    window: String,
 }
 
 #[cfg(test)]
@@ -837,5 +950,58 @@ windows-directory = "Desk"
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn probation_follows_the_config() {
+        let config = format!(
+            "{CONFIG}updates.probation = {{ launches = 3, window = \"24h\" }}\nhelper = \"AcmeConsoleUpdate\"\n"
+        );
+        let console = Product::from_config(&config, "console").unwrap();
+        assert_eq!(
+            console.probation(),
+            Some(ProbationSettings {
+                launches: 3,
+                window: Duration::from_secs(86_400)
+            })
+        );
+        assert_eq!(
+            console.probation_directory(),
+            PathBuf::from("/var/lib/acme/console")
+        );
+        assert_eq!(
+            Product::from_config(CONFIG, "agent").unwrap().probation(),
+            None
+        );
+        for bad in [
+            "{ launches = 0, window = \"1h\" }",
+            "{ launches = 21, window = \"1h\" }",
+            "{ launches = 3, window = \"59s\" }",
+            "{ launches = 3, window = \"31d\" }",
+            "{ launches = 3, window = \"1 day\" }",
+            "{ launches = 3 }",
+        ] {
+            let config = format!("{CONFIG}updates.probation = {bad}\n");
+            assert!(Product::from_config(&config, "console").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn durations_parse_as_the_cli_spells_them() {
+        assert_eq!(parse_duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("1500ms"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse_duration("7d"), Some(Duration::from_secs(7 * 86_400)));
+        for bad in [
+            "",
+            "s",
+            "01h",
+            "1",
+            "1w",
+            "-1h",
+            "1.5h",
+            "99999999999999999999d",
+        ] {
+            assert_eq!(parse_duration(bad), None, "{bad:?}");
+        }
     }
 }

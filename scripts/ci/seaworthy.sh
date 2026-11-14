@@ -108,6 +108,23 @@
 #                             git dependency's checkout) to neutral ones;
 #                             0 leaves them (docs/packaging.md, "Source
 #                             paths")
+#   SEAWORTHY_RUNTIME_ARCHIVES
+#                             the bundled runtimes' distribution archives (the
+#                             templates' runtime-archives): one line (or
+#                             `;`-separated entry) per runtime and triple,
+#                             `<product> <runtime> <triple> <https url>
+#                             <sha256> <root>[,<root>…]`, the roots relative
+#                             to the unpacked archive. prepare checks every
+#                             line (and that seaworthy.toml has the runtime)
+#                             before any download; build downloads its
+#                             triple's archives, checks each one's SHA-256
+#                             before anything reads it, unpacks it outside
+#                             the checkout and names it to the product's
+#                             build as SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>;
+#                             package does the same for every line and
+#                             stages each runtime into the artifact directory
+#                             by its pins (seaworthy runtime-stage; on
+#                             Windows beside the cores too). Never cached
 #   SEAWORTHY_SERVER_JOBS     prepare: the server deploy jobs, comma-separated
 #   SEAWORTHY_CLIENT_JOBS     prepare: client jobs beside the publish job
 #                             (the web console's deploy), comma-separated
@@ -353,6 +370,160 @@ need_tools() { # <command:package>…
     else
         fail "missing ${missing[*]} (packages: ${packages[*]}); use an image that has them"
     fi
+}
+
+# The bundled runtimes' distribution archives (SEAWORTHY_RUNTIME_ARCHIVES),
+# every line checked, into `runtime_lines` (each line's six fields
+# space-separated): `<product> <runtime> <triple> <https url> <sha256>
+# <root>[,<root>…]`, one per line or `;`-separated, blank lines and `#`
+# comments skipped. A line that isn't exactly that, a URL that isn't https
+# or doesn't name a .tar.bz2, .tar.gz, .tgz, .tar.xz, .tar.zst or .zip
+# archive, a digest that isn't 64 lowercase hex, a root that isn't a plain
+# relative path, or a runtime named twice for one triple fails the step
+# before anything is downloaded. (Not a command substitution: a refusal
+# must stop the step.)
+runtime_lines=()
+runtime_archive_lines() {
+    local text="${SEAWORTHY_RUNTIME_ARCHIVES:-}" line n=0 fields=() roots=() root key
+    local -A seen=()
+    runtime_lines=()
+    text="${text//;/$'\n'}"
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+        read -r -a fields <<<"$line"
+        local bad="runtime-archives entry $n (${line@Q})"
+        [ "${#fields[@]}" -eq 6 ] ||
+            fail "$bad: not <product> <runtime> <triple> <https url> <sha256> <root>[,<root>…]"
+        [[ "${fields[0]}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "$bad: ${fields[0]@Q} isn't a product id"
+        [[ "${fields[1]}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "$bad: ${fields[1]@Q} isn't a runtime name"
+        case "${fields[2]}" in
+            "$linux" | "$windows") ;;
+            *) fail "$bad: a bundled runtime ships for $linux or $windows, not ${fields[2]@Q}" ;;
+        esac
+        [[ "${fields[3]}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~%/+=-]+$ ]] ||
+            fail "$bad: ${fields[3]@Q} isn't an https URL of plain characters"
+        case "${fields[3]}" in
+            *.tar.bz2 | *.tar.gz | *.tgz | *.tar.xz | *.tar.zst | *.zip) ;;
+            *) fail "$bad: ${fields[3]@Q} doesn't name a .tar.bz2, .tar.gz, .tgz, .tar.xz, .tar.zst or .zip archive" ;;
+        esac
+        [[ "${fields[4]}" =~ ^[0-9a-f]{64}$ ]] || fail "$bad: ${fields[4]@Q} isn't a SHA-256 (64 lowercase hex)"
+        IFS=, read -r -a roots <<<"${fields[5]}"
+        [ "${#roots[@]}" -gt 0 ] || fail "$bad: no root"
+        for root in "${roots[@]}"; do
+            [[ "$root" =~ ^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$ ]] && [[ ! "/$root/" =~ /\.\.?/ ]] ||
+                fail "$bad: the root ${root@Q} isn't a plain path relative to the unpacked archive"
+        done
+        key="${fields[0]} ${fields[1]} ${fields[2]}"
+        [ -z "${seen[$key]:-}" ] || fail "$bad: runtime ${fields[1]} of ${fields[0]} for ${fields[2]} is named twice"
+        seen[$key]=1
+        runtime_lines+=("${fields[*]}")
+    done <<<"$text"
+}
+
+# Every runtime-archives line checked (runtime_archive_lines), and each
+# runtime it names checked against seaworthy.toml (`seaworthy runtime-stage
+# --check`: the product has the runtime for the triple, its pins read),
+# before anything is downloaded.
+runtime_check_all() {
+    local line fields=()
+    runtime_archive_lines
+    for line in "${runtime_lines[@]}"; do
+        read -r -a fields <<<"$line"
+        "$tool" runtime-stage --config "$config" --product "${fields[0]}" --runtime "${fields[1]}" \
+            --triple "${fields[2]}" --check ||
+            fail "runtime-archives names runtime ${fields[1]} of ${fields[0]} for ${fields[2]}, which seaworthy.toml refuses (above)"
+    done
+}
+
+# The variable naming a runtime's unpacked archive to the product's build:
+# SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>, uppercase, `-` as `_`.
+runtime_variable() { # <product> <runtime>
+    local name="SEAWORTHY_RUNTIME_${1}_${2}"
+    name="${name//-/_}"
+    echo "${name^^}"
+}
+
+# Downloads a runtime line's archive into a new private directory (outside
+# the checkout; never cached), checks its SHA-256 before anything reads it,
+# and unpacks it; sets `runtime_dir` to the unpacked archive.
+runtime_dir=""
+runtime_fetch() { # <line>
+    local fields=() archive got
+    read -r -a fields <<<"$1"
+    private_dir
+    archive="$made/archive"
+    say "downloading ${fields[1]} for ${fields[0]} (${fields[2]}): ${fields[3]}"
+    # https only, redirects too; bounded in size and time.
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location \
+        --retry 3 --connect-timeout 30 --max-time 3600 --max-filesize $((4 * 1024 * 1024 * 1024)) \
+        --output "$archive" "${fields[3]}" || fail "downloading ${fields[3]} failed"
+    if command -v sha256sum >/dev/null 2>&1; then
+        got="$(sha256sum "$archive" | cut -d' ' -f1)"
+    else
+        got="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+    fi
+    [ "$got" = "${fields[4]}" ] ||
+        fail "${fields[3]}: SHA-256 $got, but runtime-archives pins ${fields[4]}"
+    mkdir "$made/unpacked"
+    if command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -xf "$archive" -C "$made/unpacked" || fail "unpacking ${fields[3]} failed"
+    else
+        case "${fields[3]}" in
+            *.zip) fail "unpacking ${fields[3]} needs bsdtar (libarchive)" ;;
+        esac
+        tar -xf "$archive" -C "$made/unpacked" || fail "unpacking ${fields[3]} failed"
+    fi
+    rm -f "$archive"
+    runtime_dir="$made/unpacked"
+}
+
+# Each bundled runtime of <triple> (runtime-archives) downloaded, checked
+# and unpacked for the build, and named to it as
+# SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>: the product's build scripts read it
+# (cef-dll-sys's CEF_PATH, say). Products SEAWORTHY_PRODUCTS leaves out are
+# skipped.
+runtime_build_env() { # <triple>
+    local line fields=() variable
+    runtime_archive_lines
+    selected_products
+    for line in "${runtime_lines[@]}"; do
+        read -r -a fields <<<"$line"
+        [ "${fields[2]}" = "$1" ] || continue
+        if [ "${#products[@]}" -gt 0 ] && [[ " ${products[*]} " != *" ${fields[0]} "* ]]; then
+            continue
+        fi
+        runtime_fetch "$line"
+        variable="$(runtime_variable "${fields[0]}" "${fields[1]}")"
+        export "$variable=$runtime_dir"
+        say "$variable=$runtime_dir"
+    done
+}
+
+# Every bundled runtime (runtime-archives) of the selected products staged
+# into the artifact directory by its pins (seaworthy runtime-stage), from
+# its archive downloaded and checked afresh here; a Windows runtime beside
+# each core too.
+runtime_stage_all() {
+    local line fields=() roots=() root from beside
+    runtime_check_all
+    selected_products
+    for line in "${runtime_lines[@]}"; do
+        read -r -a fields <<<"$line"
+        if [ "${#products[@]}" -gt 0 ] && [[ " ${products[*]} " != *" ${fields[0]} "* ]]; then
+            continue
+        fi
+        runtime_fetch "$line"
+        [[ "$runtime_dir" != *,* ]] || fail "the scratch directory $runtime_dir holds a comma (RUNNER_TEMP, TMPDIR)"
+        IFS=, read -r -a roots <<<"${fields[5]}"
+        from=""
+        for root in "${roots[@]}"; do from="$from${from:+,}$runtime_dir/$root"; done
+        beside=()
+        [ "${fields[2]}" != "$windows" ] || beside=(--beside-cores)
+        "$tool" runtime-stage --config "$config" --product "${fields[0]}" --runtime "${fields[1]}" \
+            --triple "${fields[2]}" --from "$from" --artifacts "$work/artifacts" "${beside[@]}"
+    done
 }
 
 need_file() { # <path> <what>
@@ -766,6 +937,9 @@ prepare() {
     done
     install -m 0644 "$checkout/ci/gitlab/seaworthy.yml" "$staging/scripts/"
     "$tool" check --config "$config"
+    # The bundled runtimes' archives: every line, and that seaworthy.toml
+    # has each runtime, checked before any job downloads one.
+    runtime_check_all
     local release_version release_build
     release_version="$(version)"
     release_build="$(build_metadata)"
@@ -870,6 +1044,8 @@ build() { # <triple> [<target dir>]
     SEAWORTHY_RELEASE_BUILD="${identity#* }"
     export SEAWORTHY_RELEASE_VERSION SEAWORTHY_RELEASE_BUILD
     say "building release $SEAWORTHY_RELEASE_VERSION${SEAWORTHY_RELEASE_BUILD:++$SEAWORTHY_RELEASE_BUILD}"
+    # The bundled runtimes' distributions this triple's builds read.
+    runtime_build_env "$triple"
     local target_root="${SEAWORTHY_TARGET_DIR:-$work/target}" artifacts="$work/artifacts"
     local manifest="${SEAWORTHY_MANIFEST:-Cargo.toml}"
     local kind a b c line=0 extra=()
@@ -1123,6 +1299,8 @@ package() {
     NFPM="$(nfpm_path)"
     export NFPM
     source_date_epoch
+    # The bundled runtimes, staged from their checked archives by their pins.
+    runtime_stage_all
     local signing=()
     if [ "$no_signer" = 1 ] && { release || dev_sign; }; then
         say "no signer was given: unsigned packages, version $release_version (the repositories refuse them)"

@@ -194,6 +194,23 @@ pub(crate) fn read_server(
     }
 }
 
+/// The administrator's probation switch for `product` on `machine`: the
+/// policy file's `probation`, under the policy's trust rules; `On` without
+/// a file or the setting. Holds don't apply (a held package installs
+/// nothing anyway).
+pub(crate) fn read_probation(
+    product: &Product,
+    machine: &Machine,
+) -> Result<super::ProbationSwitch, String> {
+    match load(product, machine) {
+        Loaded::Missing => Ok(super::ProbationSwitch::On),
+        Loaded::Settings(_, settings) => {
+            Ok(settings.probation.unwrap_or(super::ProbationSwitch::On))
+        }
+        Loaded::Untrusted(why) | Loaded::Unreadable(why) => Err(why),
+    }
+}
+
 /// The administrator's policy file, as this process may read it.
 enum Loaded {
     /// No file, under directories only root can write.
@@ -517,6 +534,35 @@ mod tests {
         );
         assert_eq!(read(&product(), &m).policy, UpdatePolicy::Off);
         assert!(read_server(&product(), &m).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_probation_switch_comes_from_the_policy_file_under_the_same_trust() {
+        use crate::policy::ProbationSwitch;
+        let root = tempfile::tempdir().unwrap();
+        let m = machine(root.path(), Some(""));
+        let file = "etc/acme/agent/policy.toml";
+        // No file, or a file without it: on.
+        assert_eq!(read_probation(&product(), &m), Ok(ProbationSwitch::On));
+        write(root.path(), file, "updates = \"auto\"\n", 0o644);
+        assert_eq!(read_probation(&product(), &m), Ok(ProbationSwitch::On));
+        // Set, alone or beside the policy, which it leaves as it is.
+        write(root.path(), file, "probation = \"off\"\n", 0o644);
+        assert_eq!(read_probation(&product(), &m), Ok(ProbationSwitch::Off));
+        assert_eq!(read(&product(), &m).policy, UpdatePolicy::Auto);
+        write(
+            root.path(),
+            file,
+            "updates = \"notify\"\nprobation = \"on\"\n",
+            0o644,
+        );
+        assert_eq!(read_probation(&product(), &m), Ok(ProbationSwitch::On));
+        // A file someone else could write, or one that doesn't parse: an
+        // error, which read_probation_switch turns into off.
+        write(root.path(), file, "probation = \"on\"\n", 0o666);
+        assert!(read_probation(&product(), &m).is_err());
+        write(root.path(), file, "probation = \"maybe\"\n", 0o644);
+        assert!(read_probation(&product(), &m).is_err());
     }
 
     #[test]

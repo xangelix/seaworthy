@@ -31,6 +31,15 @@
     directory) expanded; a flag choosing the CPU or its features, a quote, or another
     {placeholder} is refused.
 
+    SEAWORTHY_RUNTIME_ARCHIVES (the templates' runtime-archives) names the bundled
+    runtimes' distribution archives, one line (or ;-separated entry) per runtime and
+    triple: <product> <runtime> <triple> <https url> <sha256> <root>[,<root>...]. Every
+    line is checked first; then each of this triple's archives is downloaded (https only,
+    bounded), its SHA-256 checked before anything reads it, unpacked outside the checkout,
+    and named to the builds as SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME> (uppercase, - as _),
+    as scripts/ci/seaworthy.sh build does on Linux. The package job stages each runtime
+    into the artifact directory by its pins (seaworthy runtime-stage), beside the cores.
+
     SEAWORTHY_REMAP_PATHS (1, the default) remaps the source paths rustc writes into the
     binaries, as scripts/ci/seaworthy.sh build does: the workspace to /workspace, the
     target root to /target, the toolchain's own sources to /rustc/<commit>, each cargo
@@ -161,6 +170,78 @@ if (Test-Path -LiteralPath $ReleaseEnv) {
 if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS -or $env:CARGO_BUILD_RUSTFLAGS) {
     Fail "RUSTFLAGS (or CARGO_BUILD_RUSTFLAGS) is set: it would replace or drop the per-CPU flags (put product flags in .cargo/config.toml's target.<triple>.rustflags, or in SEAWORTHY_RUSTFLAGS / SEAWORTHY_CORE_RUSTFLAGS)"
 }
+
+# The bundled runtimes' distribution archives (SEAWORTHY_RUNTIME_ARCHIVES), every
+# entry checked as scripts/ci/seaworthy.sh checks them, before any download: each
+# as @(product, runtime, triple, url, sha256, roots).
+function Get-RuntimeLines {
+    $Lines = @()
+    $Seen = @{}
+    $N = 0
+    foreach ($Line in ("$($env:SEAWORTHY_RUNTIME_ARCHIVES)" -split "[;`n]")) {
+        $N++
+        $Line = $Line.TrimEnd("`r")
+        if ($Line -match '^\s*(#.*)?$') { continue }
+        $Bad = "runtime-archives entry $N ('$Line')"
+        $F = @($Line.Trim() -split '\s+')
+        if ($F.Count -ne 6) { Fail "${Bad}: not <product> <runtime> <triple> <https url> <sha256> <root>[,<root>...]" }
+        if ($F[0] -cnotmatch '^[a-z0-9][a-z0-9-]*$') { Fail "${Bad}: '$($F[0])' isn't a product id" }
+        if ($F[1] -cnotmatch '^[a-z0-9][a-z0-9-]*$') { Fail "${Bad}: '$($F[1])' isn't a runtime name" }
+        if ($F[2] -cne 'x86_64-unknown-linux-gnu' -and $F[2] -cne 'x86_64-pc-windows-msvc') {
+            Fail "${Bad}: a bundled runtime ships for x86_64-unknown-linux-gnu or x86_64-pc-windows-msvc, not '$($F[2])'"
+        }
+        if ($F[3] -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._~%/+=-]+$') { Fail "${Bad}: '$($F[3])' isn't an https URL of plain characters" }
+        if ($F[3] -cnotmatch '\.(tar\.bz2|tar\.gz|tgz|tar\.xz|tar\.zst|zip)$') {
+            Fail "${Bad}: '$($F[3])' doesn't name a .tar.bz2, .tar.gz, .tgz, .tar.xz, .tar.zst or .zip archive"
+        }
+        if ($F[4] -cnotmatch '^[0-9a-f]{64}$') { Fail "${Bad}: '$($F[4])' isn't a SHA-256 (64 lowercase hex)" }
+        foreach ($Root in ($F[5] -split ',')) {
+            if ($Root -cnotmatch '^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$' -or "/$Root/" -match '/\.\.?/') {
+                Fail "${Bad}: the root '$Root' isn't a plain path relative to the unpacked archive"
+            }
+        }
+        $Key = "$($F[0]) $($F[1]) $($F[2])"
+        if ($Seen.ContainsKey($Key)) { Fail "${Bad}: runtime $($F[1]) of $($F[0]) for $($F[2]) is named twice" }
+        $Seen[$Key] = $true
+        $Lines += ,$F
+    }
+    return ,$Lines
+}
+
+# Each of this triple's runtime archives downloaded (https only, redirects too,
+# bounded in time and size, through Windows' own curl.exe), its SHA-256 checked
+# before anything reads it, unpacked (tar.exe) into a new directory outside the
+# checkout, and named to the builds as SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>.
+# Never cached.
+function Use-RuntimeArchives {
+    $Curl = 'curl'
+    $Tar = 'tar'
+    if ($env:SystemRoot -and (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\curl.exe') -PathType Leaf)) {
+        $Curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+        $Tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    }
+    foreach ($F in (Get-RuntimeLines)) {
+        if ($F[2] -cne $Triple) { continue }
+        $Dir = Join-Path ([System.IO.Path]::GetTempPath()) ("seaworthy-runtime-" + [Guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $Dir
+        $Archive = Join-Path $Dir 'archive'
+        Say "downloading $($F[1]) for $($F[0]) ($($F[2])): $($F[3])"
+        & $Curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 `
+            --connect-timeout 30 --max-time 3600 --max-filesize 4294967296 --output $Archive $F[3]
+        if ($LASTEXITCODE -ne 0) { Fail "downloading $($F[3]) failed (curl exit $LASTEXITCODE)" }
+        $Hash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($Hash -cne $F[4]) { Fail "$($F[3]): SHA-256 $Hash, but runtime-archives pins $($F[4])" }
+        $Unpacked = Join-Path $Dir 'unpacked'
+        $null = New-Item -ItemType Directory -Path $Unpacked
+        & $Tar -xf $Archive -C $Unpacked
+        if ($LASTEXITCODE -ne 0) { Fail "unpacking $($F[3]) failed (tar exit $LASTEXITCODE)" }
+        Remove-Item -LiteralPath $Archive -Force
+        $Name = ("SEAWORTHY_RUNTIME_$($F[0])_$($F[1])" -replace '-', '_').ToUpperInvariant()
+        [Environment]::SetEnvironmentVariable($Name, $Unpacked, 'Process')
+        Say "$Name=$Unpacked"
+    }
+}
+Use-RuntimeArchives
 
 # {workspace} in the caller's flags: the workspace root, absolute (cargo runs
 # a dependency's rustc in that dependency's own directory). Resolved against

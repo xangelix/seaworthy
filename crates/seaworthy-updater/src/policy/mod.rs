@@ -45,6 +45,14 @@
 //! ```
 //!
 //! A file with only `server` leaves the policy at the product's default.
+//!
+//! **First-paint probation** (a product with `updates.probation`) has its own
+//! switch, read by the update helper alone ([`read_probation_switch`]):
+//! `probation = "off"` in the Linux file, or `Probation` = `off` under the
+//! Group Policy key on Windows, stops the helper from starting a probation
+//! and from reverting a release; `on`, or nothing, leaves it on. A source
+//! the update policy would refuse (untrusted, unreadable, unparsable) turns
+//! it off: a revert is an install, so failing safe means not reverting.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -60,6 +68,65 @@ pub(crate) mod unix;
 pub(crate) mod windows;
 
 pub use server::{AdminServer, is_machine_server, read_admin_server};
+
+/// The administrator's first-paint probation switch
+/// ([`read_probation_switch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbationSwitch {
+    /// Probation runs (the default).
+    On,
+    /// No probation starts and none reverts.
+    Off,
+}
+
+impl ProbationSwitch {
+    /// Its spelling (`on`, `off`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// The switch spelled `text`, if any.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+/// The administrator's first-paint probation switch for `product` (see the
+/// module docs): [`ProbationSwitch::Off`] when the policy file or the Group
+/// Policy key says `off`, or can't be trusted or read or parsed (with a
+/// warning); else [`ProbationSwitch::On`]. Blocking; never the network.
+#[must_use]
+pub fn read_probation_switch(product: &Product) -> ProbationSwitch {
+    let read = {
+        #[cfg(windows)]
+        {
+            windows::read_probation(product)
+        }
+        #[cfg(not(windows))]
+        {
+            unix::read_probation(product, &unix::Machine::system())
+        }
+    };
+    match read {
+        Ok(switch) => switch,
+        Err(why) => {
+            tracing::warn!(
+                "first-paint probation: {}; treating it as off (failing safe: nothing is reverted)",
+                crate::log::line_safe(&why)
+            );
+            ProbationSwitch::Off
+        }
+    }
+}
 
 /// Where a decision came from, for logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,12 +236,15 @@ pub struct PolicyFile {
     /// `server = "https://…"`, checked as [`read_admin_server`]
     /// checks it.
     pub server: Option<String>,
+    /// `probation = "on"` or `"off"` ([`read_probation_switch`]).
+    pub probation: Option<ProbationSwitch>,
 }
 
 /// Parses the Linux policy file: comments, blank lines, and at most one
-/// each of `updates = "<policy>"` and `server = "https://…"`, at least one
-/// of them (a strict subset of TOML; nothing else is accepted, so a typo
-/// can't silently leave a different policy or server in force).
+/// each of `updates = "<policy>"`, `server = "https://…"` and `probation =
+/// "on"|"off"`, at least one of them (a strict subset of TOML; nothing else
+/// is accepted, so a typo can't silently leave a different policy or server
+/// in force).
 ///
 /// # Errors
 /// What's wrong, for the warning.
@@ -216,9 +286,17 @@ pub fn parse_policy_settings(text: &str) -> Result<PolicyFile, String> {
                     return Err(format!("line {}: `server` is set twice", number + 1));
                 }
             }
+            "probation" => {
+                let switch = quoted.and_then(ProbationSwitch::parse).ok_or_else(|| {
+                    format!("line {}: `probation` must be \"on\" or \"off\"", number + 1)
+                })?;
+                if settings.probation.replace(switch).is_some() {
+                    return Err(format!("line {}: `probation` is set twice", number + 1));
+                }
+            }
             other => {
                 return Err(format!(
-                    "line {}: unknown setting {:?} (only `updates` and `server`)",
+                    "line {}: unknown setting {:?} (only `updates`, `server` and `probation`)",
                     number + 1,
                     crate::log::line_safe(other)
                 ));
@@ -226,7 +304,7 @@ pub fn parse_policy_settings(text: &str) -> Result<PolicyFile, String> {
         }
     }
     if settings == PolicyFile::default() {
-        return Err("no `updates` or `server` setting".to_owned());
+        return Err("no `updates`, `server` or `probation` setting".to_owned());
     }
     Ok(settings)
 }
@@ -354,6 +432,7 @@ mod tests {
             Ok(PolicyFile {
                 updates: Some(UpdatePolicy::Auto),
                 server: Some("https://updates.acme.example:8443/t".to_owned()),
+                probation: None,
             })
         );
         assert_eq!(
@@ -365,6 +444,7 @@ mod tests {
             Ok(PolicyFile {
                 updates: None,
                 server: Some("https://a.example".to_owned()),
+                probation: None,
             })
         );
         for bad in [
@@ -377,6 +457,36 @@ mod tests {
             "servers = \"https://a.example\"\n",
             // `#` starts a comment, so the value's quote never closes.
             "server = \"https://a.example/#x\"\n",
+        ] {
+            assert!(parse_policy_settings(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_policy_file_may_turn_first_paint_probation_off() {
+        assert_eq!(
+            parse_policy_settings("probation = \"off\"  # no reverts here\n"),
+            Ok(PolicyFile {
+                updates: None,
+                server: None,
+                probation: Some(ProbationSwitch::Off),
+            })
+        );
+        assert_eq!(
+            parse_policy_settings("updates = \"auto\"\nprobation = \"on\"\n")
+                .unwrap()
+                .probation,
+            Some(ProbationSwitch::On)
+        );
+        // Probation alone sets no update policy.
+        assert!(parse_policy_file("probation = \"off\"\n").is_err());
+        for bad in [
+            "probation = off\n",
+            "probation = \"Off\"\n",
+            "probation = \"no\"\n",
+            "probation = \"\"\n",
+            "probation = \"off\"\nprobation = \"on\"\n",
+            "probations = \"off\"\n",
         ] {
             assert!(parse_policy_settings(bad).is_err(), "{bad:?}");
         }

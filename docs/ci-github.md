@@ -154,6 +154,7 @@ cap them too):
 | `data-artifact`, `data-path` | (none) | an artifact of this run a job of yours built (a web build), unpacked at `data-path` (relative to the repository's root) in the packaging jobs before they read `[[files]]` ([below](#data-built-by-your-own-jobs)) |
 | `toolchain` | the product's `rust-toolchain.toml` | a toolchain for the product's builds |
 | `cargo-args` | (none) | more cargo arguments for every build (`--features fips`); products built in several crypto builds give each program its own `features` in `seaworthy.toml` instead |
+| `runtime-archives` | (none) | the bundled runtimes' distribution archives, each pinned by its SHA-256: one entry per runtime and triple, `<product> <runtime> <triple> <https url> <sha256> <root>[,<root>…]`, as the GitLab templates' ([ci-gitlab.md](ci-gitlab.md#bundled-runtimes-archives)): prepare checks every entry, the build jobs download their triple's and name it to the build as `SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>`, the package job stages each runtime by its pins |
 | `rustflags`, `core-rustflags` | (none) | more rustflags for every build, and for the cores alone ([packaging.md](packaging.md#extra-build-flags); `{workspace}`, `{triple}` and `{cpu}` expand) |
 | `remap-paths` | `true` | remap the source paths rustc writes into the binaries to neutral ones: no build machine path or private repository name ([packaging.md](packaging.md#source-paths)) |
 | `build-env` | (none) | the builds' environment, JSON: `{"*": {"CC": "clang"}, "x86_64-pc-windows-msvc": {...}}` (a triple's entries win; the runner's, loader's and cargo's own variables are refused) |
@@ -163,6 +164,23 @@ cap them too):
 | `artifact-prefix`, `retention-days` | `seaworthy`, `14` | the uploaded artifacts' names and lifetime (on a public repository, who can read them: [below](#deleting-the-artifacts)) |
 
 Outputs: `version` (the release version) and `packages-artifact` (the packages artifact's name).
+
+## Bundled runtimes' archives
+
+`runtime-archives` works as the GitLab templates' input does, through the same scripts
+([ci-gitlab.md](ci-gitlab.md#bundled-runtimes-archives) has the format, the CEF 154 example and what
+each job does): a multi-line string, one entry per line.
+
+```yaml
+    with:
+      runtime-archives: |
+        console cef x86_64-unknown-linux-gnu https://cef-builds.spotifycdn.com/cef_binary_154.0.34%2Bg14c5a08%2Bchromium-154.0.8037.98_linux64_minimal.tar.bz2 e87e2c76304372dd28b899ceb6efa4b353f52700594ddc358a8237ec07ec6492 cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal/Release,cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal/Resources
+        console cef x86_64-pc-windows-msvc https://cef-builds.spotifycdn.com/cef_binary_154.0.34%2Bg14c5a08%2Bchromium-154.0.8037.98_windows64_minimal.tar.bz2 c81c34d048d87276f4a18f0b000206710a1709bb67dd658948b87100e1a538da cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_windows64_minimal/Release,cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_windows64_minimal/Resources
+```
+
+The Linux build passes `SEAWORTHY_RUNTIME_ARCHIVES` (and `SEAWORTHY_PRODUCTS`) into its build image,
+which needs curl and tar (the default Rust image has both). The URLs are an example of a third-party
+source, never a default: point them at a mirror you control, keeping the digests.
 
 ## Data built by your own jobs
 

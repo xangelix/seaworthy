@@ -425,6 +425,42 @@ pub struct Updates {
     /// The install-time default policy.
     #[serde(default)]
     pub default: UpdatePolicy,
+    /// First-paint probation (a desktop product with the update helper,
+    /// Linux and Windows): a release the helper installs stays on probation
+    /// until the app reports its first paint; one that never paints within
+    /// `launches` launches, or within `window` of its first launch, is
+    /// replaced by exactly the release it replaced. Off without it.
+    #[serde(default)]
+    pub probation: Option<Probation>,
+}
+
+/// `[product.<id>.updates] probation = { launches = 3, window = "24h" }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Probation {
+    /// Launches of the new release without a first paint that revert it
+    /// (1 to [`MAX_PROBATION_LAUNCHES`]).
+    pub launches: u32,
+    /// How long after its first launch a release that never painted is
+    /// reverted ([`parse_duration`]: `30m`, `24h`, `7d`; one minute to
+    /// [`MAX_PROBATION_WINDOW_DAYS`] days).
+    pub window: String,
+}
+
+/// The most launches a probation may count before it reverts.
+pub const MAX_PROBATION_LAUNCHES: u32 = 20;
+
+/// The longest probation window, in days.
+pub const MAX_PROBATION_WINDOW_DAYS: u64 = 30;
+
+impl Probation {
+    /// The window as a duration.
+    ///
+    /// # Errors
+    /// [`DistError::Config`] for a window that isn't a duration.
+    pub fn window(&self) -> Result<Duration, DistError> {
+        parse_duration(&self.window)
+    }
 }
 
 /// `[product.<id>.sidecars]`: files shipped beside the cores, per platform.
@@ -620,6 +656,14 @@ pub struct Product {
     /// The program kind.
     #[serde(default)]
     pub kind: Kind,
+    /// This product's Linux and Windows CPU targets, most preferred first,
+    /// instead of `defaults.targets` ([`Config::targets`]): a product whose
+    /// time is spent outside its own code (a UI process over a bundled
+    /// browser runtime) ships one core (`["x86-64-v2"]`) while the others
+    /// keep theirs. Each target needs a core; each program's launcher lists
+    /// exactly these, in this order. macOS cores keep `defaults.macos-targets`.
+    #[serde(default)]
+    pub targets: Option<Vec<String>>,
     /// Sidecar files.
     #[serde(default)]
     pub sidecars: Sidecars,
@@ -663,6 +707,12 @@ pub struct Product {
     /// root beside the launcher (fonts, images, documents, licenses).
     #[serde(default)]
     pub files: Vec<ExtraFiles>,
+    /// `[[product.<id>.runtime]]`: bundled runtimes, third-party native
+    /// code with its data (a browser engine's distribution), each pinned
+    /// file by file to a named distribution and installed under the
+    /// install root ([`Runtime`]).
+    #[serde(default)]
+    pub runtime: Vec<Runtime>,
     /// `[product.<id>.macos]`: the app bundle's identity, required
     /// with a macOS output.
     #[serde(default)]
@@ -1312,6 +1362,135 @@ pub struct ExtraFiles {
     /// control directories (`.git`, `.hg`, `.svn`, `.bzr`) never ship.
     #[serde(default)]
     pub hidden: bool,
+}
+
+/// `[[product.<id>.runtime]]`: a bundled runtime, third-party native code
+/// and its data shipped beside the product's own binaries (a browser
+/// engine's distribution, its libraries, resources and helpers). Unlike a
+/// data file it may hold native code; unlike a sidecar it is a tree, pinned
+/// file by file: `verify` refuses a runtime directory that holds anything
+/// but exactly the files `pins` lists, with exactly those SHA-256 digests.
+///
+/// ```toml
+/// [[product.console.runtime]]
+/// name = "cef"
+/// distribution = "cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal"
+/// platform = "linux"
+/// pins = "runtime/cef-linux64.sha256"
+/// destination = "lib"
+/// max-file-mib = 1536
+/// strip = true
+///
+/// [[product.console.runtime.files]]
+/// path = "chrome-sandbox"
+/// destination = "chrome-sandbox"
+/// mode = "4755"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Runtime {
+    /// Its name: `[a-z0-9][a-z0-9-]*`, at most 64 bytes; its files are in
+    /// `<artifacts>/<triple>/runtime/<name>/`.
+    pub name: String,
+    /// The distribution it is (a release archive's name): recorded in
+    /// `layout.json` (the SBOMs list each of its files with its SHA-256).
+    pub distribution: String,
+    /// The one platform it ships on (`linux` or `windows`).
+    pub platform: Platform,
+    /// The pin list, relative to `seaworthy.toml`: `sha256sum`'s format,
+    /// one `<64 lowercase hex>  <path>` line per file, paths relative to
+    /// the runtime directory and `/`-separated, every file of the runtime
+    /// and nothing else ([`crate::runtime::read_pins`]).
+    pub pins: PathBuf,
+    /// Where its tree installs, relative to the install root (default:
+    /// the install root itself).
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// The largest file it may hold, in MiB (default 256, the data files'
+    /// limit; at most 2048).
+    #[serde(default)]
+    pub max_file_mib: Option<u64>,
+    /// Linux: strip its ELF files' symbols (`strip --strip-all`), each
+    /// stripped copy checked to map exactly what the original maps
+    /// ([`crate::post_link::check_strip`]). Default `false`: shipped as pinned.
+    #[serde(default)]
+    pub strip: bool,
+    /// `[[product.<id>.runtime.files]]`: settings for single files.
+    #[serde(default)]
+    pub files: Vec<RuntimeFile>,
+    /// `[[product.<id>.runtime.publishers]]` (Windows): who may have
+    /// Authenticode-signed a file that arrives signed. Such a file keeps its
+    /// signature only when it verifies to one of them; every unsigned PE
+    /// file is signed with the product's own identity.
+    #[serde(default)]
+    pub publishers: Vec<AuthenticodeIdentity>,
+}
+
+/// `[[product.<id>.runtime.files]]`: one runtime file's settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct RuntimeFile {
+    /// The file, as `pins` names it.
+    pub path: String,
+    /// Where it installs, relative to the install root, instead of under the
+    /// runtime's `destination` (a helper that must sit beside the launcher).
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Its mode: `"0644"`, `"0755"` or, on Linux for an ELF executable,
+    /// `"4755"` (setuid root: the packages install every file root-owned).
+    /// Default: 0755 for an ELF or PE image, 0644 otherwise.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// The modes a runtime file may be given.
+pub const RUNTIME_MODES: [(&str, u32); 3] = [("0644", 0o644), ("0755", 0o755), ("4755", 0o4755)];
+
+/// The default and the most a runtime file may hold, in MiB.
+pub const DEFAULT_RUNTIME_FILE_MIB: u64 = 256;
+
+/// The largest runtime file cap, in MiB (`verify` reads at most 2 GiB).
+pub const MAX_RUNTIME_FILE_MIB: u64 = 2048;
+
+impl Runtime {
+    /// The largest file it may hold, in bytes.
+    #[must_use]
+    pub fn max_file_bytes(&self) -> u64 {
+        self.max_file_mib
+            .unwrap_or(DEFAULT_RUNTIME_FILE_MIB)
+            .saturating_mul(1024 * 1024)
+    }
+
+    /// The settings of `path`, when `files` names it.
+    #[must_use]
+    pub fn file(&self, path: &str) -> Option<&RuntimeFile> {
+        self.files.iter().find(|f| f.path == path)
+    }
+
+    /// Where `path` installs, relative to the install root: its own
+    /// `destination`, else `<destination>/<path>`.
+    #[must_use]
+    pub fn install_path(&self, path: &str) -> String {
+        if let Some(own) = self.file(path).and_then(|f| f.destination.clone()) {
+            return own;
+        }
+        match self.destination.as_deref() {
+            Some(dir) if !dir.is_empty() => format!("{dir}/{path}"),
+            _ => path.to_owned(),
+        }
+    }
+}
+
+impl RuntimeFile {
+    /// Its mode as a number, when set and valid.
+    #[must_use]
+    pub fn mode_bits(&self) -> Option<u32> {
+        let mode = self.mode.as_deref()?;
+        RUNTIME_MODES
+            .iter()
+            .find(|(text, _)| *text == mode)
+            .map(|(_, bits)| *bits)
+    }
 }
 
 /// Version control directories: never shipped (a `.git/config` can hold a
@@ -2083,6 +2262,16 @@ impl Config {
             seaworthy_updater::openpgp::OpenPgpKeys::new(openpgp)
                 .map_err(|e| DistError::Config(format!("defaults.openpgp-keys: {e}")))?;
         }
+        // Each bundled runtime's pin list, and its publishers' trust anchors.
+        for (id, product) in &config.products {
+            for runtime in &product.runtime {
+                crate::runtime::read_pins(&config.dir, id, runtime)?;
+                for publisher in &runtime.publishers {
+                    let trust = config.dir.join(&publisher.trust);
+                    std::fs::metadata(&trust).map_err(|e| DistError::io(&trust, e))?;
+                }
+            }
+        }
         // The CI test keys are checked at load too, and against the real
         // ones (a copy would let a test signature verify as a release's).
         if config.defaults.ci_test_keys.is_some() {
@@ -2433,6 +2622,19 @@ impl Config {
         self.fips_module().symbol_prefix()
     }
 
+    /// The CPU targets `product`'s cores build for on `os`, most preferred
+    /// first: on Linux and Windows the product's own `targets`, else
+    /// `defaults.targets`; on macOS `defaults.macos-targets`.
+    #[must_use]
+    pub fn targets<'a>(&'a self, product: &'a Product, os: crate::inputs::Os) -> &'a [String] {
+        match os {
+            crate::inputs::Os::Macos => &self.defaults.macos_targets,
+            crate::inputs::Os::Linux | crate::inputs::Os::Windows => {
+                product.targets.as_deref().unwrap_or(&self.defaults.targets)
+            }
+        }
+    }
+
     /// Whether `product`'s cores carry the AWS-LC FIPS module: its own
     /// `fips`, else `defaults.fips`. `verify` applies the FIPS binary
     /// checks to the cores (and on Windows and macOS to the sidecars) of
@@ -2670,6 +2872,22 @@ impl Config {
                 "windows-directory",
                 "a directory name ([A-Za-z0-9][A-Za-z0-9._-]*); the default is the display name's last word",
             ));
+        }
+        if let Some(targets) = &p.targets {
+            if targets.is_empty() {
+                return Err(at(
+                    "targets",
+                    "lists no CPU target: leave it out to build the cores for defaults.targets",
+                ));
+            }
+            for (i, target) in targets.iter().enumerate() {
+                if !is_file_stem(target) || targets[..i].contains(target) {
+                    return Err(at(
+                        "targets",
+                        &format!("{target:?} is not a CPU name, or is listed twice"),
+                    ));
+                }
+            }
         }
         if let Some(glibc) = &p.linux.glibc
             && parse_glibc_version(glibc).is_none_or(|(major, _)| major != 2)
@@ -3024,7 +3242,218 @@ impl Config {
             }
         }
         self.validate_desktop_and_files(id, p)?;
+        self.validate_runtimes(id, p)?;
+        self.validate_probation(id, p)?;
         self.validate_file_types(id, p)
+    }
+
+    /// `[[product.<id>.runtime]]`: names, platforms, paths and per-file
+    /// settings (the pin lists themselves are read by [`Config::load`]).
+    fn validate_runtimes(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        let at = |i: usize, key: &str, why: &str| {
+            DistError::Config(format!("product.{id}.runtime[{i}].{key}: {why}"))
+        };
+        for (i, runtime) in p.runtime.iter().enumerate() {
+            if !is_identifier(&runtime.name) || runtime.name.len() > 64 {
+                return Err(at(
+                    i,
+                    "name",
+                    "[a-z0-9][a-z0-9-]*, at most 64 bytes (its artifacts are in <triple>/runtime/<name>/)",
+                ));
+            }
+            if p.runtime[..i]
+                .iter()
+                .any(|other| other.name == runtime.name && other.platform == runtime.platform)
+            {
+                return Err(at(
+                    i,
+                    "name",
+                    &format!(
+                        "{:?} is named twice for {}",
+                        runtime.name,
+                        runtime.platform.name()
+                    ),
+                ));
+            }
+            if !is_plain_text(&runtime.distribution) || runtime.distribution.len() > 200 {
+                return Err(at(
+                    i,
+                    "distribution",
+                    "the distribution's name: 1 to 200 bytes of text without control characters or `$`",
+                ));
+            }
+            match runtime.platform {
+                Platform::Macos => {
+                    return Err(at(
+                        i,
+                        "platform",
+                        "macOS isn't supported yet (a framework and helper apps inside the bundle): linux or windows",
+                    ));
+                }
+                platform if !p.outputs.iter().any(|o| o.platform() == platform) => {
+                    return Err(at(
+                        i,
+                        "platform",
+                        &format!("no output of this product ships for {}", platform.name()),
+                    ));
+                }
+                _ => {}
+            }
+            if !is_relative_path(&runtime.pins) {
+                return Err(at(
+                    i,
+                    "pins",
+                    "a file relative to seaworthy.toml (no `..`, no absolute path)",
+                ));
+            }
+            if let Some(destination) = &runtime.destination
+                && !destination.is_empty()
+                && !is_install_relative(destination)
+            {
+                return Err(at(
+                    i,
+                    "destination",
+                    "a directory relative to the install root, `/`-separated, plain segments",
+                ));
+            }
+            if runtime
+                .max_file_mib
+                .is_some_and(|mib| mib == 0 || mib > MAX_RUNTIME_FILE_MIB)
+            {
+                return Err(at(
+                    i,
+                    "max-file-mib",
+                    &format!("1 to {MAX_RUNTIME_FILE_MIB} (MiB)"),
+                ));
+            }
+            if runtime.strip && runtime.platform != Platform::Linux {
+                return Err(at(i, "strip", "strips ELF files: a linux runtime only"));
+            }
+            for (j, file) in runtime.files.iter().enumerate() {
+                if !crate::runtime::is_runtime_path(&file.path) {
+                    return Err(at(
+                        i,
+                        "files.path",
+                        &format!(
+                            "{:?} isn't a path in the runtime (relative, `/`-separated, plain segments)",
+                            file.path
+                        ),
+                    ));
+                }
+                if runtime.files[..j]
+                    .iter()
+                    .any(|other| other.path == file.path)
+                {
+                    return Err(at(
+                        i,
+                        "files.path",
+                        &format!("{:?} is named twice", file.path),
+                    ));
+                }
+                if let Some(destination) = &file.destination
+                    && !is_install_relative(destination)
+                {
+                    return Err(at(
+                        i,
+                        "files.destination",
+                        &format!(
+                            "{destination:?}: a path relative to the install root, `/`-separated, plain segments"
+                        ),
+                    ));
+                }
+                match (file.mode.as_deref(), file.mode_bits()) {
+                    (Some(mode), None) => {
+                        return Err(at(
+                            i,
+                            "files.mode",
+                            &format!("{mode:?}: one of \"0644\", \"0755\", \"4755\""),
+                        ));
+                    }
+                    (_, Some(0o4755)) if runtime.platform != Platform::Linux => {
+                        return Err(at(
+                            i,
+                            "files.mode",
+                            "\"4755\" (setuid root) is a Linux mode",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if !runtime.publishers.is_empty() && runtime.platform != Platform::Windows {
+                return Err(at(
+                    i,
+                    "publishers",
+                    "Authenticode publishers: a windows runtime only",
+                ));
+            }
+            for publisher in &runtime.publishers {
+                if publisher.subject.trim().is_empty()
+                    || publisher.subject.chars().any(char::is_control)
+                {
+                    return Err(at(
+                        i,
+                        "publishers.subject",
+                        "the publisher certificate's subject, as `osslsigncode verify` prints it",
+                    ));
+                }
+                if !is_relative_path(&publisher.trust) {
+                    return Err(at(
+                        i,
+                        "publishers.trust",
+                        "a PEM file relative to seaworthy.toml (no `..`, no absolute path)",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `updates.probation`: a desktop product whose update helper ships,
+    /// on Linux and Windows.
+    fn validate_probation(&self, id: &str, p: &Product) -> Result<(), DistError> {
+        let Some(probation) = &p.updates.probation else {
+            return Ok(());
+        };
+        let at = |key: &str, why: &str| {
+            DistError::Config(format!("product.{id}.updates.probation.{key}: {why}"))
+        };
+        let whole = |why: &str| DistError::Config(format!("product.{id}.updates.probation: {why}"));
+        if p.kind != Kind::Desktop {
+            return Err(whole(
+                "first-paint probation is for a desktop product (kind = \"desktop\"): its app reports the first paint",
+            ));
+        }
+        if !p.ships_helper() {
+            return Err(whole(
+                "needs the update helper (helper, and updates.default other than \"off\"): the helper reverts a release",
+            ));
+        }
+        if p.outputs.contains(&Output::Pkg) {
+            return Err(whole(
+                "isn't supported on macOS yet: a product with a pkg output can't use it",
+            ));
+        }
+        if probation.launches == 0 || probation.launches > MAX_PROBATION_LAUNCHES {
+            return Err(at("launches", &format!("1 to {MAX_PROBATION_LAUNCHES}")));
+        }
+        let window = probation.window().map_err(|_| {
+            at(
+                "window",
+                &format!(
+                    "{:?} is not a duration (a whole number followed by s, m, h or d)",
+                    probation.window
+                ),
+            )
+        })?;
+        if window < Duration::from_secs(60)
+            || window > Duration::from_secs(MAX_PROBATION_WINDOW_DAYS * 86_400)
+        {
+            return Err(at(
+                "window",
+                &format!("one minute to {MAX_PROBATION_WINDOW_DAYS} days"),
+            ));
+        }
+        Ok(())
     }
 
     /// `[[product.<id>.file-types]]`: each opened by the product's `gui`
@@ -4142,6 +4571,12 @@ impl Config {
             names = names
                 .with_macos_bundle_id(&macos.bundle_id)
                 .map_err(refused)?;
+        }
+        if let Some(probation) = &product.updates.probation {
+            let settings =
+                seaworthy_updater::ProbationSettings::new(probation.launches, probation.window()?)
+                    .map_err(refused)?;
+            names = names.with_probation(settings);
         }
         Ok(names)
     }

@@ -12,6 +12,8 @@
 //!                [--previous publish-plan.json] [--date EPOCH] [--allow-older]
 //! seaworthy publish --repo DIR --target publish.toml [--dry-run] [--no-prune]
 //! seaworthy build-plan [--config seaworthy.toml] --triple TRIPLE [--product ID] [--manifest Cargo.toml]
+//! seaworthy runtime-stage [--config seaworthy.toml] --product ID --runtime NAME --triple TRIPLE
+//!                         (--from DIR[,DIR…] --artifacts DIR [--beside-cores] | --check)
 //! seaworthy ci-order --ci .gitlab-ci.yml [--root DIR] [--include FILE,…] --server JOB,… --client JOB,…  (GitLab CI)
 //! seaworthy version --release VERSION --sequence N [--json]
 //! seaworthy manifest-version --manifest Cargo.toml
@@ -184,6 +186,8 @@ const USAGE: &str = "usage:
                  [--previous publish-plan.json] [--date EPOCH] [--allow-older]
   seaworthy publish --repo DIR --target publish.toml [--dry-run] [--no-prune]
   seaworthy build-plan [--config seaworthy.toml] --triple TRIPLE [--product ID] [--manifest Cargo.toml]
+  seaworthy runtime-stage [--config seaworthy.toml] --product ID --runtime NAME --triple TRIPLE
+                          (--from DIR[,DIR…] --artifacts DIR [--beside-cores] | --check)
   seaworthy ci-order --ci .gitlab-ci.yml [--root DIR] [--include FILE,…] --server JOB,… --client JOB,…  (GitLab CI)
   seaworthy version --release VERSION --sequence N [--json]
   seaworthy manifest-version --manifest Cargo.toml
@@ -228,6 +232,12 @@ struct Args {
     client: Option<String>,
     triple: Option<String>,
     manifest: Option<PathBuf>,
+    /// `runtime-stage --runtime`: the bundled runtime's name.
+    runtime: Option<String>,
+    /// `runtime-stage --from`: the roots to stage from, comma-separated.
+    from: Option<String>,
+    beside_cores: bool,
+    check: bool,
     dry_run: bool,
     no_prune: bool,
     authenticode_only: bool,
@@ -289,6 +299,16 @@ fn accepted(command: &str) -> &'static [&'static str] {
         "publish" => &["--repo", "--target", "--dry-run", "--no-prune"],
         "ci-order" => &["--ci", "--root", "--include", "--server", "--client"],
         "build-plan" => &["--config", "--triple", "--product", "--manifest"],
+        "runtime-stage" => &[
+            "--config",
+            "--product",
+            "--runtime",
+            "--triple",
+            "--from",
+            "--artifacts",
+            "--beside-cores",
+            "--check",
+        ],
         "version" => &["--release", "--sequence", "--json"],
         "manifest-version" => &["--manifest"],
         "apple-team" => &["--config"],
@@ -347,6 +367,10 @@ fn parse(command: &str, args: &[String]) -> Result<Args, Usage> {
             "--client" => parsed.client = Some(value()?),
             "--triple" => parsed.triple = Some(value()?),
             "--manifest" => parsed.manifest = Some(value()?.into()),
+            "--runtime" => parsed.runtime = Some(value()?),
+            "--from" => parsed.from = Some(value()?),
+            "--beside-cores" => parsed.beside_cores = true,
+            "--check" => parsed.check = true,
             "--dry-run" => parsed.dry_run = true,
             "--no-prune" => parsed.no_prune = true,
             "--authenticode-only" => parsed.authenticode_only = true,
@@ -1251,6 +1275,55 @@ fn run(command: &str, args: &Args) -> Result<(), Failure> {
                 println!(
                     "deb     {}\nrpm     {}-{}\npacman  {}-{}\nmsi     {}",
                     v.deb, v.rpm_version, v.rpm_release, v.pacman_pkgver, v.pacman_pkgrel, v.msi
+                );
+            }
+        }
+        "runtime-stage" => {
+            let product = required(&args.product, command, "--product")?;
+            let name = required(&args.runtime, command, "--runtime")?;
+            let triple = required(&args.triple, command, "--triple")?;
+            let config = Config::load(&config_path())?;
+            if args.check {
+                if args.from.is_some() || args.artifacts.is_some() || args.beside_cores {
+                    return Err(Usage(
+                        "runtime-stage --check stages nothing: it takes no --from, --artifacts or --beside-cores".to_owned(),
+                    )
+                    .into());
+                }
+                let (_, runtime, _) = seaworthy::runtime::find(&config, &product, &name, &triple)?;
+                let pins = seaworthy::runtime::read_pins(&config.dir, &product, runtime)?;
+                println!(
+                    "{product}: runtime {name} for {triple}: {} pinned file(s) ({})",
+                    pins.len(),
+                    runtime.distribution
+                );
+                return Ok(());
+            }
+            let from = required(&args.from, command, "--from")?;
+            let artifacts = required(&args.artifacts, command, "--artifacts")?;
+            let roots: Vec<PathBuf> = from.split(',').map(PathBuf::from).collect();
+            if roots.iter().any(|r| r.as_os_str().is_empty()) {
+                return Err(Usage(format!("--from {from:?} names an empty root")).into());
+            }
+            let staged = seaworthy::runtime::stage(
+                &config,
+                &product,
+                &name,
+                &triple,
+                &roots,
+                &artifacts,
+                args.beside_cores,
+            )?;
+            println!(
+                "{product}: runtime {name} for {triple}: {} file(s), {} bytes, in {}",
+                staged.files,
+                staged.bytes,
+                staged.dir.display()
+            );
+            for dir in &staged.beside_cores {
+                println!(
+                    "{product}: runtime {name}: beside the cores in {}",
+                    dir.display()
                 );
             }
         }

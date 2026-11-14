@@ -54,6 +54,9 @@ spec:
     cargo-args:
       description: More cargo arguments for every build, such as --features fips.
       default: ""
+    runtime-archives:
+      description: The bundled runtimes' distribution archives (seaworthy.yml's runtime-archives, the same value); the Windows build downloads its triple's, checks each SHA-256 and names the unpacked archive to the build as SEAWORTHY_RUNTIME_<PRODUCT>_<RUNTIME>. Empty, none.
+      default: ""
     release-if:
       description: The rules expression for a release (as seaworthy.yml's); the adopt job signs a release's MSIs.
       default: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)(\.(0|[1-9][0-9]*))?)?$/
@@ -91,6 +94,10 @@ seaworthy-build-windows:
     SEAWORTHY_CARGO_ARGS:
       value: >-
         $[[ inputs.cargo-args ]]
+      expand: false
+    SEAWORTHY_RUNTIME_ARCHIVES:
+      value: >-
+        $[[ inputs.runtime-archives ]]
       expand: false
   script:
     - powershell -NoProfile -ExecutionPolicy Bypass -File seaworthy\scripts\seaworthy-build.ps1
