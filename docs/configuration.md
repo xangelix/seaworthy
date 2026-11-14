@@ -398,7 +398,7 @@ trust = "keys/microsoft-roots.pem"
 | Key | Default | Meaning |
 |---|---|---|
 | `name` | required | `[a-z0-9][a-z0-9-]*`, at most 64 bytes, once per platform: its files arrive in `<artifacts>/<triple>/runtime/<name>/` ([packaging.md](packaging.md#the-artifact-directory)), laid out as they install under `destination`. |
-| `distribution` | required | The distribution it is (the release archive's name): 1 to 200 bytes of text without control characters or `$`, recorded in `layout.json` and the SBOM. |
+| `distribution` | required | The distribution it is (the release archive's name): 1 to 200 bytes of text without control characters or `$`, recorded in `layout.json` (each artifact's SBOM lists every one of its files with its SHA-256). |
 | `platform` | required | `linux` or `windows`: the one platform it ships on, which an output of the product must target. (macOS, a framework with helper apps inside the bundle, is not supported yet.) |
 | `pins` | required | The pin list, relative to `seaworthy.toml`: `sha256sum`'s output, `<64 lowercase hex>  <path>` per line (blank lines and `#` comments allowed), each path relative to the runtime directory, `/`-separated, plain segments of printable ASCII. It names every file of the runtime once, and nothing else: `verify` refuses a missing file, an extra one and other bytes. `load` (and `check`) read it. |
 | `destination` | the install root | Where its tree installs, relative to the install root, `/`-separated. |

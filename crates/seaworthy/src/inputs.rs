@@ -10,6 +10,7 @@
 //! <artifacts>/<triple>/cores/<build>/<core file>     each program's core, one per CPU target:
 //!                                                    lib<core>.so / <core>.dll / lib<core>.dylib
 //! <artifacts>/<triple>/cores/<build>/<sidecar>       Windows, macOS: the FIPS module DLL(s) / dylib
+//! <artifacts>/<triple>/runtime/<name>/…              a bundled runtime's tree, as it installs
 //! ```
 //!
 //! `<build>` is the core build's name ([`crate::config::Program::build_dir`]):
@@ -95,6 +96,19 @@ pub struct PlatformInputs {
     pub programs: Vec<ProgramInputs>,
     /// The update helper, when shipped.
     pub helper: Option<PathBuf>,
+    /// The bundled runtimes for this platform, in `seaworthy.toml`'s order.
+    pub runtimes: Vec<RuntimeInputs>,
+}
+
+/// One bundled runtime's expected directory on one platform.
+#[derive(Debug, Clone)]
+pub struct RuntimeInputs {
+    /// Its index in the product's `[[runtime]]` entries.
+    pub index: usize,
+    /// Its name.
+    pub name: String,
+    /// `<artifacts>/<triple>/runtime/<name>`.
+    pub dir: PathBuf,
 }
 
 impl PlatformInputs {
@@ -170,6 +184,17 @@ pub fn expected(config: &Config, product: &Product, artifacts: &Path) -> Vec<Pla
                         .map(|h| root.join("helper").join(exe(h)))
                 })
                 .flatten(),
+            runtimes: product
+                .runtime
+                .iter()
+                .enumerate()
+                .filter(|(_, runtime)| runtime.platform == os.platform())
+                .map(|(index, runtime)| RuntimeInputs {
+                    index,
+                    name: runtime.name.clone(),
+                    dir: root.join("runtime").join(&runtime.name),
+                })
+                .collect(),
         });
     }
     platforms

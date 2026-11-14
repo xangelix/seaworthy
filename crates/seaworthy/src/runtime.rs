@@ -143,6 +143,156 @@ pub fn read_pins(
     Ok(pins)
 }
 
+/// The deepest directory a runtime's tree may nest.
+pub const MAX_RUNTIME_DEPTH: usize = 16;
+
+/// Every file below a runtime's directory, sorted by path: `(path relative
+/// to it, /-separated; the file)`. Nothing is followed: a link, a special
+/// file, a name that isn't a [`is_runtime_path`] segment, more than
+/// [`MAX_RUNTIME_FILES`] files or [`MAX_RUNTIME_DEPTH`] levels is refused.
+///
+/// # Errors
+/// Why the directory is refused.
+pub fn walk(dir: &Path) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let meta =
+        std::fs::symlink_metadata(dir).map_err(|e| format!("the runtime's directory: {e}"))?;
+    if !meta.is_dir() {
+        return Err("the runtime's directory isn't a directory (a link or a file?)".to_owned());
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), String::new(), 0_usize)];
+    while let Some((path, prefix, depth)) = stack.pop() {
+        let entries = std::fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", path.display()))?;
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .filter(|n| is_runtime_path(n))
+                .ok_or_else(|| {
+                    format!(
+                        "{}: a name a runtime can't hold (plain printable ASCII)",
+                        entry.path().display()
+                    )
+                })?
+                .to_owned();
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let kind = entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+            if kind.is_dir() {
+                if depth.saturating_add(1) >= MAX_RUNTIME_DEPTH {
+                    return Err(format!(
+                        "{}: deeper than {MAX_RUNTIME_DEPTH} levels",
+                        entry.path().display()
+                    ));
+                }
+                stack.push((entry.path(), relative, depth.saturating_add(1)));
+            } else if kind.is_file() {
+                if out.len() >= MAX_RUNTIME_FILES {
+                    return Err(format!("more than {MAX_RUNTIME_FILES} files"));
+                }
+                out.push((relative, entry.path()));
+            } else {
+                return Err(format!(
+                    "{}: a link or a special file (a runtime holds regular files and directories)",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// What a runtime file is, by its first bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Image {
+    /// An ELF image (`\x7fELF`).
+    Elf,
+    /// A PE image (`MZ`).
+    Pe,
+    /// A Mach-O image (thin or universal).
+    MachO,
+    /// Anything else: data.
+    Data,
+}
+
+impl Image {
+    /// What `bytes` start as.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        match bytes.get(..4) {
+            Some([0x7f, b'E', b'L', b'F']) => Self::Elf,
+            Some([b'M', b'Z', ..]) => Self::Pe,
+            Some([0xfe, 0xed, 0xfa, 0xce | 0xcf] | [0xce | 0xcf, 0xfa, 0xed, 0xfe])
+            | Some([0xca, 0xfe, 0xba, 0xbe]) => Self::MachO,
+            _ => Self::Data,
+        }
+    }
+
+    /// Whether it is native code (the default mode is then 0755).
+    #[must_use]
+    pub fn is_code(self) -> bool {
+        self != Self::Data
+    }
+}
+
+/// Resolves one `DT_RUNPATH` entry of a binary that installs in `place`
+/// (its directory relative to the install root, `/`-separated, `""` for the
+/// root) to a directory relative to the install root: the entry must be
+/// `$ORIGIN` (or `${ORIGIN}`), optionally followed by `/` and plain segments,
+/// `.` and `..`, never leaving the install root. Anything else (an absolute
+/// path, another token, an empty entry) is refused: a bundled library is
+/// found only beside the binary that needs it, never wherever the machine's
+/// own libraries are.
+///
+/// # Errors
+/// Why the entry is refused.
+pub fn resolve_origin(place: &str, entry: &str) -> Result<String, String> {
+    let rest = ["$ORIGIN", "${ORIGIN}"]
+        .iter()
+        .find_map(|origin| {
+            let rest = entry.strip_prefix(origin)?;
+            (rest.is_empty() || rest.starts_with('/')).then_some(rest)
+        })
+        .ok_or_else(|| format!("{entry:?} isn't $ORIGIN-relative"))?;
+    let mut dirs: Vec<&str> = place.split('/').filter(|s| !s.is_empty()).collect();
+    for segment in rest.split('/').filter(|s| !s.is_empty()) {
+        match segment {
+            "." => {}
+            ".." => {
+                if dirs.pop().is_none() {
+                    return Err(format!("{entry:?} leaves the install root"));
+                }
+            }
+            _ if segment.contains('$') => {
+                return Err(format!("{entry:?} names another token ({segment})"));
+            }
+            _ => dirs.push(segment),
+        }
+    }
+    Ok(dirs.join("/"))
+}
+
+/// The directory part of an install path (`lib/libcef.so` → `lib`, a file
+/// at the root → `""`).
+#[must_use]
+pub fn parent_of(install: &str) -> &str {
+    install.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// The file name part of an install path.
+#[must_use]
+pub fn name_of(install: &str) -> &str {
+    install.rsplit_once('/').map_or(install, |(_, name)| name)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -197,6 +347,46 @@ mod tests {
             let err = parse_pins(&text).expect_err(&text);
             assert!(err.contains(mentions), "{text:?}: {err}");
         }
+    }
+
+    #[test]
+    fn origin_entries_resolve_inside_the_install_root_only() {
+        assert_eq!(resolve_origin("lib", "$ORIGIN").unwrap(), "lib");
+        assert_eq!(resolve_origin("lib", "${ORIGIN}").unwrap(), "lib");
+        assert_eq!(resolve_origin("lib", "$ORIGIN/").unwrap(), "lib");
+        assert_eq!(resolve_origin("", "$ORIGIN/lib").unwrap(), "lib");
+        assert_eq!(
+            resolve_origin("lib", "$ORIGIN/../lib/./cef").unwrap(),
+            "lib/cef"
+        );
+        assert_eq!(resolve_origin("libexec", "$ORIGIN/..").unwrap(), "");
+        for (place, bad) in [
+            ("lib", "/usr/lib"),
+            ("lib", "/opt/acme/lib"),
+            ("lib", ""),
+            ("lib", "$ORIGINAL"),
+            ("lib", "$LIB"),
+            ("lib", "$ORIGIN/$PLATFORM"),
+            ("lib", "$ORIGIN/../.."),
+            ("", "$ORIGIN/.."),
+            ("lib", "lib"),
+            ("lib", "./lib"),
+        ] {
+            assert!(resolve_origin(place, bad).is_err(), "{place:?} {bad:?}");
+        }
+    }
+
+    #[test]
+    fn images_are_told_by_their_magic() {
+        assert_eq!(Image::of(b"\x7fELF\x02"), Image::Elf);
+        assert_eq!(Image::of(b"MZ\x90\x00"), Image::Pe);
+        assert_eq!(Image::of(&[0xcf, 0xfa, 0xed, 0xfe]), Image::MachO);
+        assert_eq!(Image::of(&[0xca, 0xfe, 0xba, 0xbe]), Image::MachO);
+        assert_eq!(Image::of(b"{\"file_format_version\""), Image::Data);
+        assert_eq!(Image::of(b""), Image::Data);
+        assert_eq!(parent_of("lib/locales/en-US.pak"), "lib/locales");
+        assert_eq!(parent_of("chrome-sandbox"), "");
+        assert_eq!(name_of("lib/libcef.so"), "libcef.so");
     }
 
     #[test]

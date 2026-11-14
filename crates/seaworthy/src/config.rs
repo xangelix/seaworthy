@@ -1393,7 +1393,7 @@ pub struct Runtime {
     /// `<artifacts>/<triple>/runtime/<name>/`.
     pub name: String,
     /// The distribution it is (a release archive's name): recorded in
-    /// `layout.json` and the SBOM.
+    /// `layout.json` (the SBOMs list each of its files with its SHA-256).
     pub distribution: String,
     /// The one platform it ships on (`linux` or `windows`).
     pub platform: Platform,
