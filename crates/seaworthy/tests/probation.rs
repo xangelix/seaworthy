@@ -227,3 +227,38 @@ fn the_group_policy_template_has_the_probation_switch_only_for_probation_product
         }
     }
 }
+
+/// A probation product's Linux helper unit may write its public directory
+/// (`StateDirectory=acme/console`, 0755: the notice and the drop box live
+/// there, and the unit's `ProtectSystem=strict` makes everything else
+/// read-only); without probation, the unit is as it was.
+#[test]
+fn a_probation_products_helper_unit_writes_its_public_directory() {
+    let unit = |probation: bool| {
+        let config = config(probation);
+        let tmp = tempfile::tempdir().unwrap();
+        let layouts = layouts(&config, "console", tmp.path());
+        let linux = layouts.iter().find(|l| l.triple == LINUX).unwrap();
+        let package = seaworthy::linux::linux_package(&config, "console", linux).unwrap();
+        package
+            .files
+            .iter()
+            .find(|f| f.dst == "/usr/lib/systemd/system/acme-console-update.service")
+            .map(|f| match &f.source {
+                seaworthy::linux::Source::Generated(text) => text.clone(),
+                seaworthy::linux::Source::Staged(path) => std::fs::read_to_string(path).unwrap(),
+            })
+            .unwrap()
+    };
+    let with = unit(true);
+    let without = unit(false);
+    assert!(
+        with.ends_with("StateDirectory=acme/console\nStateDirectoryMode=0755\n"),
+        "{with}"
+    );
+    assert_eq!(
+        with,
+        format!("{without}StateDirectory=acme/console\nStateDirectoryMode=0755\n")
+    );
+    assert!(!without.contains("StateDirectory"), "{without}");
+}
