@@ -461,12 +461,20 @@ directories, and one library far past the data files' 256 MiB. `[[product.<id>.r
 ([configuration.md](configuration.md#productidruntime)) is that class of file, one entry per
 platform: third-party code and data, pinned file by file to a named distribution.
 
-**Where it comes from.** The build (the CI templates' `runtime` input,
-[ci-gitlab.md](ci-gitlab.md), [ci-github.md](ci-github.md)) puts the distribution, as it installs
-under the runtime's `destination`, in `<artifacts>/<triple>/runtime/<name>/`. The pin list in the
-product's repository names every file with its SHA-256 (`sha256sum`'s output over that directory),
-so a different distribution, an added file or a changed byte is a reviewed change to the pins, never
-something a build picks up.
+**Where it comes from.** The runtime's files are in `<artifacts>/<triple>/runtime/<name>/`, laid
+out as they install under the runtime's `destination`. `seaworthy runtime-stage --product <id>
+--runtime <name> --triple <triple> --from <root>[,<root>…] --artifacts <dir>` puts them there from an
+unpacked distribution: each pinned file from the first root holding it (a regular file reached
+through real directories; a link is refused, never followed), checked against its pin as it is
+copied, the finished directory renamed into place so nothing is ever half-staged, and every refusal
+reported together; files the pins don't name stay behind. With `--beside-cores` (Windows) each file
+is also copied into every core build directory, at its install path, where a core finds it as the
+installed product's does. The CI templates do all of this from a distribution archive pinned by its
+SHA-256 (their `runtime-archives` input: [ci-gitlab.md](ci-gitlab.md#bundled-runtimes-archives),
+[ci-github.md](ci-github.md#bundled-runtimes-archives)). The pin list in the product's repository
+names every file with its SHA-256 (`sha256sum`'s output over that directory), so a different
+distribution, an added file or a changed byte is a reviewed change to the pins, never something a
+build picks up.
 
 **What `verify` checks**, every finding reported together:
 
