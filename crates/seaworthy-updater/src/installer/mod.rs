@@ -69,7 +69,7 @@ pub use macos::{MACOS_INSTALL_WAIT, MacPkg, MacTools};
 
 #[cfg(windows)]
 pub use msi::Msi;
-pub use msi::{MSIEXEC_LOG, msiexec_arguments};
+pub use msi::{MSIEXEC_LOG, msiexec_arguments, msiexec_downgrade_arguments};
 pub use seaworthy_formats::MSI_RELEASE_VALUE;
 
 /// Why an installer couldn't answer or install.
