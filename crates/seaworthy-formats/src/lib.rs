@@ -17,6 +17,8 @@
 //! - **The product's names** ([`Product`], read from `seaworthy.toml` with
 //!   [`Product::from_config`]): the package, the channel, the staging and
 //!   request paths, the policy file and registry keys.
+//! - **The installed release record** ([`InstalledRelease`]): which release
+//!   an install tree is, for a product with first-paint probation.
 //! - **Artifact formats** ([`ArtifactFormat`]) and the format check of a
 //!   verified package ([`format_check`]).
 //! - **The CI test-key switch** ([`ci_test`], [`ci_test_keys!`]): only a
@@ -76,18 +78,23 @@
 
 pub mod ci_test;
 pub mod format_check;
+pub mod installed_release;
 mod log;
 mod manifest;
 mod policy;
 mod product;
 pub mod release;
 
+pub use installed_release::{INSTALLED_RELEASE_FILE, INSTALLED_RELEASE_TAG, InstalledRelease};
 pub use manifest::{
     ArtifactFormat, KEY_ID_LEN, ManifestSignature, ManifestTrust, RELEASE_MANIFEST_DOMAIN,
     ReleaseKey, ReleaseManifest, ReleaseTrust, release_key_id,
 };
 pub use policy::UpdatePolicy;
-pub use product::{MSI_RELEASE_VALUE, Product, ProductError, ServiceNames, UPDATE_REQUEST_FILE};
+pub use product::{
+    MAX_PROBATION_LAUNCHES, MAX_PROBATION_WINDOW, MIN_PROBATION_WINDOW, MSI_RELEASE_VALUE,
+    ProbationSettings, Product, ProductError, ServiceNames, UPDATE_REQUEST_FILE, parse_duration,
+};
 
 // ------------------------------------------------------------------------------------------------
 // Errors

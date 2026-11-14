@@ -53,6 +53,7 @@ targets![
     mldsa_public_key,
     s3_xml,
     service_unit,
+    updater_installed_release,
     updater_manifest,
     updater_status,
 ];

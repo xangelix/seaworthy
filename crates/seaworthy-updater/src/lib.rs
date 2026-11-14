@@ -101,11 +101,12 @@ pub use status::{
 };
 // The contract, re-exported so a caller can use one crate.
 pub use seaworthy_formats::{
-    ArtifactFormat, DigestAlgorithm, FormatError, KEY_ID_LEN, MAX_ARTIFACT_BYTES,
-    MAX_METADATA_BYTES, MAX_SERVER_BYTES, MAX_VERSION_LEN, MSI_RELEASE_VALUE, ManifestSignature,
-    ManifestTrust, Product, ProductError, RELEASE_MANIFEST_DOMAIN, ReleaseKey, ReleaseManifest,
-    ReleaseTrust, ServiceNames, SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE,
-    UpdatePolicy, ci_test, ci_test_keys, format_check, release, release_key_id, validate_version,
+    ArtifactFormat, DigestAlgorithm, FormatError, INSTALLED_RELEASE_FILE, InstalledRelease,
+    KEY_ID_LEN, MAX_ARTIFACT_BYTES, MAX_METADATA_BYTES, MAX_SERVER_BYTES, MAX_VERSION_LEN,
+    MSI_RELEASE_VALUE, ManifestSignature, ManifestTrust, ProbationSettings, Product, ProductError,
+    RELEASE_MANIFEST_DOMAIN, ReleaseKey, ReleaseManifest, ReleaseTrust, ServiceNames,
+    SignatureAlgorithm, TARGET_TRIPLE, UPDATE_REQUEST_FILE, UpdatePolicy, ci_test, ci_test_keys,
+    format_check, installed_release, release, release_key_id, validate_version,
 };
 
 // ------------------------------------------------------------------------------------------------
