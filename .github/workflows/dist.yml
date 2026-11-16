@@ -334,7 +334,7 @@ jobs:
       windows: ${{ steps.matrix.outputs.windows }}
       macos: ${{ steps.matrix.outputs.macos }}
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -409,7 +409,7 @@ jobs:
       contents: read
     steps:
       # Containers stay enabled: the build runs in the build image.
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -618,7 +618,7 @@ jobs:
     outputs:
       msi: ${{ steps.msi.outputs.msi }}
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -772,7 +772,7 @@ jobs:
     environment: ${{ (inputs.release || inputs.dev-sign) && inputs.environment || '' }}
     # No permissions of its own: the calling job's grant (see the top).
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -971,7 +971,7 @@ jobs:
     outputs:
       artifact: ${{ steps.name.outputs.artifact }}
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -1038,7 +1038,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
