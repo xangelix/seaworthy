@@ -1,7 +1,7 @@
 //! Pinned image references: public images, latest stable at pin time
-//! (2026-10), as `name:tag@sha256:…` digest pins: a tag alone is mutable
-//! upstream, and a re-tagged image would run with daemon access. The tag
-//! documents what the digest pins (docker pulls by digest either way).
+//! (2026-10, 2026-11), as `name:tag@sha256:…` digest pins: a tag alone is
+//! mutable upstream, and a re-tagged image would run with daemon access. The
+//! tag documents what the digest pins (docker pulls by digest either way).
 //! Bumping is a deliberate one-line change here, and THIS SOURCE DIFF is
 //! the supply-chain evidence: a cargo SBOM does NOT see image pins.
 //!
@@ -29,7 +29,8 @@
 
 /// RustFS standalone S3 (fs layout: a bucket is a directory in the data
 /// root): the S3-compatible store the publisher's suites run against.
-pub const RUSTFS: &str = "rustfs/rustfs:1.0.0-rc.6@sha256:97171b3d72cd47dc81000f92ea84de25608bfc35a94c965501afaeb5d99f6035";
+pub const RUSTFS: &str =
+    "rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2";
 
 // The Linux conformance lane's systemd hosts (`crate::systemd`): each
 // distribution the CLI's packages must install on. Group `SystemdHosts`:
@@ -38,17 +39,17 @@ pub const RUSTFS: &str = "rustfs/rustfs:1.0.0-rc.6@sha256:97171b3d72cd47dc81000f
 
 /// Debian 13 (trixie).
 pub const DEBIAN_13: &str =
-    "debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5";
+    "debian:13@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6";
 /// Ubuntu 24.04 LTS.
 pub const UBUNTU_2404: &str =
     "ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55";
 /// Red Hat UBI 9, init flavour (systemd 252, rpm 4.16: RHEL 9's).
-pub const UBI9_INIT: &str = "registry.access.redhat.com/ubi9/ubi-init:9.8-1791927685@sha256:c892e9655a76c9c44ac27d639b1ccffd5590521bf7858a3b4cacb806688cfb08";
+pub const UBI9_INIT: &str = "registry.access.redhat.com/ubi9/ubi-init:9.8-1794221743@sha256:832747e358174ee06c1c81573cbe22aff41efb94d857acc1bacba111576d2448";
 /// Fedora 43.
 pub const FEDORA_43: &str =
-    "fedora:43@sha256:a651ddf48ea28a06ed4e1e6519f51c9f47e7a5a138722ade87369b8fbb7e5b42";
+    "fedora:43@sha256:f01112b9a1f1d0504ad962d9adfa401425033f8ab067e0a821904ebdde5b8ca5";
 /// Arch Linux (rolling; the dated tag of the pinned image).
-pub const ARCH: &str = "archlinux:base-20261011.0.609700@sha256:3c64b538588416593f69a1aebd2f2ec0f2541b29159f32556fa7def2167147a0";
+pub const ARCH: &str = "archlinux:base-20261101.0.620205@sha256:b1c2fe6e717bfd5673af8fc217e1e1c3ce0dcbb1d53c3414c8425e7ce79fc6d9";
 
 // The Linux conformance lane's builder: the pinned toolchain on Debian 12,
 // whose glibc (2.36) builds binaries needing no symbol past 2.34 (RHEL 9's,
@@ -57,7 +58,7 @@ pub const ARCH: &str = "archlinux:base-20261011.0.609700@sha256:3c64b53858841659
 
 /// Rust (the `rust-toolchain.toml` pin) on Debian 12 (bookworm).
 pub const RUST_BUILDER: &str =
-    "rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8";
+    "rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c";
 
 /// Which pre-pulls take a pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

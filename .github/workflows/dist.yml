@@ -186,7 +186,7 @@ on:
       linux-build-image:
         description: The Linux builds' container image, whose glibc is at or below the products' floor (2.34 by default); digest-pinned.
         type: string
-        default: rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8
+        default: rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
       release-manifest-algorithm:
         description: The RELEASE_MANIFEST_KEY secret's algorithm (ml-dsa-87, ecdsa-p256 or ed25519).
         type: string
@@ -334,7 +334,7 @@ jobs:
       windows: ${{ steps.matrix.outputs.windows }}
       macos: ${{ steps.matrix.outputs.macos }}
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -409,7 +409,7 @@ jobs:
       contents: read
     steps:
       # Containers stay enabled: the build runs in the build image.
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -618,7 +618,7 @@ jobs:
     outputs:
       msi: ${{ steps.msi.outputs.msi }}
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -772,7 +772,7 @@ jobs:
     environment: ${{ (inputs.release || inputs.dev-sign) && inputs.environment || '' }}
     # No permissions of its own: the calling job's grant (see the top).
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -971,7 +971,7 @@ jobs:
     outputs:
       artifact: ${{ steps.name.outputs.artifact }}
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           disable-sudo-and-containers: true
@@ -1038,7 +1038,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
