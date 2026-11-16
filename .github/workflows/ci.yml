@@ -284,8 +284,8 @@ jobs:
       SEAWORTHY_TEST_CONTAINERS_REQUIRED: "0"
       # pwsh for the Windows scripts' tests: Microsoft's release tarball,
       # pinned by the SHA-256 the release publishes (hashes.sha256).
-      PWSH_VERSION: "7.6.7"
-      PWSH_SHA256: 6896f9e3a6b0a354bf470835a96da76d2f801cd50dcf047ad7c4563bf93bf431
+      PWSH_VERSION: "7.6.9"
+      PWSH_SHA256: 1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
       CONTAINER: seaworthy-packaging
     # The tests run in the digest-pinned Arch Linux image the conformance
     # lane uses (seaworthy-test-support's ARCH pin): pacman's repo-add and
