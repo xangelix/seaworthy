@@ -4,8 +4,19 @@
 # ignore list: cargo-deny is the gate, this file only keeps Scorecard from
 # reporting what deny.toml already accepts. scripts/check-advisory-ignores.sh
 # holds the two lists to the same IDs; every entry here also expires.
+#
+# One kind of entry is this file's alone: a crate the lockfile holds that no
+# build compiles (an optional dependency no feature enables). OSV-Scanner
+# reads the lockfile and reports it; cargo-deny resolves the graph, never
+# meets it, and fails an ignore that matches nothing, so deny.toml cannot
+# list it. Such an entry's reason starts with "lockfile only:".
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0440"
 ignoreUntil = 2027-02-01T00:00:00Z
 reason = "astral-tokio-tar is unmaintained (no vulnerability); dev-only via testcontainers 0.28.0 (seaworthy-test-support), nothing it touches ships; review by 2027-02-01"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-02-15T00:00:00Z
+reason = "lockfile only: chrono 0.4.45 is unmaintained (informational, no patched version); locked as serde_with's optional chrono_0_4 support, which no seaworthy build enables, so cargo-deny's graph never contains it; review by 2027-02-15"

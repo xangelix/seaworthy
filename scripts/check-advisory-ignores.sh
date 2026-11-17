@@ -5,7 +5,9 @@
 # (an ignore that matches nothing fails it); osv-scanner.toml only keeps
 # OpenSSF Scorecard's Vulnerabilities check from reporting an advisory
 # deny.toml already accepts, and nothing else would notice it outliving the
-# deny.toml entry it copies.
+# deny.toml entry it copies. An osv-scanner.toml entry whose reason starts
+# with "lockfile only:" is the exception: a crate the lockfile holds that no
+# build compiles, which cargo-deny never meets and so deny.toml cannot list.
 #
 #   scripts/check-advisory-ignores.sh
 set -euo pipefail
@@ -19,8 +21,15 @@ deny_ids="$(awk '
     inside && /^\]/ { inside = 0 }
 ' deny.toml | sed -n 's/.*id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | sort)"
 
-# The IDs of osv-scanner.toml's [[IgnoredVulns]] tables.
-osv_ids="$(sed -n 's/^id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' osv-scanner.toml | sort)"
+# The IDs of osv-scanner.toml's [[IgnoredVulns]] tables, without the
+# "lockfile only:" ones.
+osv_ids="$(awk '
+    /^\[\[IgnoredVulns\]\]/ { if (id != "" && !lockfile_only) print id; id = ""; lockfile_only = 0 }
+    /^id[[:space:]]*=/ { id = $0; sub(/^id[[:space:]]*=[[:space:]]*"/, "", id); sub(/".*/, "", id) }
+    /^reason[[:space:]]*=[[:space:]]*"lockfile only:/ { lockfile_only = 1 }
+    END { if (id != "" && !lockfile_only) print id }
+' osv-scanner.toml | sort)"
+lockfile_only="$(grep -c '^reason[[:space:]]*=[[:space:]]*"lockfile only:' osv-scanner.toml || true)"
 
 status=0
 if [ "$deny_ids" != "$osv_ids" ]; then
@@ -40,6 +49,6 @@ for field in id reason ignoreUntil; do
 done
 
 if [ "$status" = 0 ]; then
-    echo "check-advisory-ignores: deny.toml and osv-scanner.toml except the same $entries advisories"
+    echo "check-advisory-ignores: deny.toml and osv-scanner.toml except the same $((entries - lockfile_only)) advisories; osv-scanner.toml also $lockfile_only lockfile-only"
 fi
 exit "$status"
