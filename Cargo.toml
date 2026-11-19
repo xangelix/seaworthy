@@ -16,7 +16,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xangelix/seaworthy"
 
@@ -27,7 +27,6 @@ repository = "https://github.com/xangelix/seaworthy"
 seaworthy-crypto = { version = "0.1.0", path = "crates/seaworthy-crypto" }
 seaworthy-formats = { version = "0.1.0", path = "crates/seaworthy-formats" }
 seaworthy-fsguard = { version = "0.1.0", path = "crates/seaworthy-fsguard" }
-seaworthy-launcher = { version = "0.1.0", path = "crates/seaworthy-launcher" }
 seaworthy-levels = { version = "0.1.0", path = "crates/seaworthy-levels" }
 seaworthy-service = { version = "0.1.0", path = "crates/seaworthy-service" }
 # The docker test harness: unpublished (`publish = false`), a dev-dependency

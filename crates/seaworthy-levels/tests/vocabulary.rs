@@ -8,7 +8,7 @@
 //! `rustc --print target-cpus`, on both x86-64 targets the launcher supports.
 //!
 //! `--print cfg` is not the whole story: a CPU target can make LLVM emit
-//! instructions that no reported feature covers. On rustc 1.99.1
+//! instructions that no reported feature covers. On rustc 1.100.0
 //! `diamondrapids` and `novalake` enable APX's sub-features (NF, NDD, …)
 //! but not all of APX, so `--print cfg` lists no `apxf` — yet the code
 //! carries APX encodings. So the test also COMPILES a probe for every
@@ -517,7 +517,7 @@ fn code_the_cfg_does_not_report_is_accounted_for() {
             "{cpu} no longer emits APX code — remove it from IMPLIED_FEATURES"
         );
     }
-    // The probe must exercise APX at all: rustc 1.99.1 has CPU targets that
+    // The probe must exercise APX at all: rustc 1.100.0 has CPU targets that
     // emit it, so finding none means the probe or its parser broke.
     assert!(
         !emitting.is_empty(),

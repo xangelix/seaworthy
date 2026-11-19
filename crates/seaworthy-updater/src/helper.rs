@@ -889,7 +889,6 @@ fn succeeded(result: &Result<HelperOutcome, HelperError>) -> bool {
 /// run or a backoff; 1 otherwise, so the unit shows as failed. On Windows
 /// it runs as the helper's service under the Service Control Manager, or
 /// in the foreground when started from a console.
-#[must_use]
 pub fn main(config: HelperConfig) -> ExitCode {
     if std::env::args_os().len() > 1 {
         tracing::warn!("the update helper takes no arguments; ignoring them");

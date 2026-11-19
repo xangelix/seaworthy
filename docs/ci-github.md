@@ -159,7 +159,7 @@ cap them too):
 | `remap-paths` | `true` | remap the source paths rustc writes into the binaries to neutral ones: no build machine path or private repository name ([packaging.md](packaging.md#source-paths)) |
 | `build-env` | (none) | the builds' environment, JSON: `{"*": {"CC": "clang"}, "x86_64-pc-windows-msvc": {...}}` (a triple's entries win; the runner's, loader's and cargo's own variables are refused) |
 | `linux-runner`, `windows-runner`, `macos-runner` | `ubuntu-24.04`, `windows-2025`, `macos-15` | runner labels (GitHub-hosted by default; the macOS one Apple Silicon) |
-| `linux-build-image` | the official `rust:1.99.1-bookworm`, digest-pinned | the Linux builds' image: digest-pinned, glibc at or below the products' floor, a FIPS product's toolchain |
+| `linux-build-image` | the official `rust:1.100.0-bookworm`, digest-pinned | the Linux builds' image: digest-pinned, glibc at or below the products' floor, a FIPS product's toolchain |
 | `release-manifest-algorithm`, `openpgp-key-fingerprint`, `authenticode-timestamp-url`, `azure-*`, `apple-identity` | (none) | the signers' non-secret settings (below) |
 | `artifact-prefix`, `retention-days` | `seaworthy`, `14` | the uploaded artifacts' names and lifetime (on a public repository, who can read them: [below](#deleting-the-artifacts)) |
 
