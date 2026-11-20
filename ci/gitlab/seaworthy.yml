@@ -197,7 +197,7 @@ spec:
   variables:
     # This file's marker: the seaworthy checkout's template must carry the
     # same (tests/ci_template.rs keeps it current).
-    SEAWORTHY_TEMPLATE: "5cd28602f6095c35"
+    SEAWORTHY_TEMPLATE: "f32dca7830861de2"
     SEAWORTHY_WORK: seaworthy
     SEAWORTHY_CONFIG: $[[ inputs.seaworthy-toml ]]
     SEAWORTHY_SIGNING: $[[ inputs.signing-toml ]]
