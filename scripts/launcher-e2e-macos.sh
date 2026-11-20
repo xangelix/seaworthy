@@ -441,7 +441,9 @@ case "$imported" in *_aws_lc_fips_*) ;; *) fail "the FIPS core imports nothing o
 if printf '%s\n' "$defined" | grep -E ' _(aws_lc_|awslc_|ring_core_)'; then
     fail "the FIPS core defines those AWS-LC or ring symbols"
 fi
-if compgen -G "$OUT/fips-core-apple-m1/$TARGET/release/deps/libaws_lc_sys-*.rlib" >/dev/null; then
+# Wherever cargo keeps the rlib under the profile (its build-directory layout is not a stable
+# interface: deps/ before Rust 1.100, build/<package>/<hash>/out/ since).
+if [ -n "$(find "$OUT/fips-core-apple-m1/$TARGET/release" -name 'libaws_lc_sys-*.rlib' -print -quit)" ]; then
     echo "launcher-e2e-macos: info  aws-lc-sys was compiled into the FIPS build, and isn't linked"
 else
     echo "launcher-e2e-macos: info  aws-lc-sys wasn't compiled into the FIPS build"

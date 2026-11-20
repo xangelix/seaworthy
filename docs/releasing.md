@@ -120,7 +120,7 @@ advisory) per [SECURITY.md](../SECURITY.md).
 ## MSRV policy
 
 - The minimum supported Rust version is `workspace.package.rust-version` in `Cargo.toml`
-  (currently 1.98). CI checks it on exactly that version (`x.y.0`) by building every library and
+  (currently 1.100). CI checks it on exactly that version (`x.y.0`) by building every library and
   binary target with all non-FIPS features.
 - The MSRV moves only on purpose: when a language or library feature, or a required dependency,
   needs it. Before 1.0 it may rise in a minor release, never in a patch release. The release

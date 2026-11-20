@@ -1,10 +1,10 @@
 //! The feature table: one row per x86 target-feature name the pinned rustc
-//! (1.99.1) can enable through `-C target-cpu`, with the CPUID bit that
+//! (1.100.0) can enable through `-C target-cpu`, with the CPUID bit that
 //! reports it and the extra conditions it needs before it may be called
 //! present.
 //!
 //! **The vocabulary** is the 74 names `rustc --print cfg` reports, with
-//! `RUSTC_BOOTSTRAP=1`, across all 136 x86 CPUs rustc 1.99.1 knows, plus the
+//! `RUSTC_BOOTSTRAP=1`, across all 136 x86 CPUs rustc 1.100.0 knows, plus the
 //! features a CPU target uses without reporting them ([`IMPLIED_FEATURES`]:
 //! `apxf`). `tests/vocabulary.rs` re-derives both from the toolchain in use
 //! — the second by compiling a probe for every CPU — and fails on any name
@@ -16,7 +16,7 @@
 //! crashes the program with an invalid-opcode fault):
 //!
 //! - [`Reference::StdDetect`] — the standard library's own detector
-//!   (`library/std_detect/src/detect/os/x86.rs` in rust-src 1.99.1), which
+//!   (`library/std_detect/src/detect/os/x86.rs` in rust-src 1.100.0), which
 //!   covers 71 of the 75 names, including the OS-state rules (XCR0) and its
 //!   errata handling.
 //! - [`Reference::Llvm`] — LLVM's X86 host detection, for the four names
@@ -155,7 +155,7 @@ use Reg::{Eax, Ebx, Ecx, Edx};
 /// The extended-function leaf carrying AMD-defined and LAHF/PREFETCHW bits.
 pub const EXTENDED_FEATURES_LEAF: u32 = 0x8000_0001;
 
-/// Every feature name rustc 1.99.1 can enable on x86, in CPUID order: the 74
+/// Every feature name rustc 1.100.0 can enable on x86, in CPUID order: the 74
 /// names `--print cfg` reports for some CPU, plus `apxf`, which two CPU
 /// targets use without `--print cfg` saying so ([`IMPLIED_FEATURES`]).
 pub const FEATURES: [Feature; 75] = [
@@ -318,7 +318,7 @@ pub const FEATURES: [Feature; 75] = [
 ];
 
 /// Features a CPU target makes the compiler USE although `--print cfg`
-/// does not report them — `(cpu, feature)`. rustc 1.99.1 (LLVM 23):
+/// does not report them — `(cpu, feature)`. rustc 1.100.0 (LLVM 23):
 /// `diamondrapids` and `novalake` enable APX's sub-features (NF, NDD, …)
 /// without all of them, so `--print cfg` lists no `apxf`, yet the code
 /// carries APX encodings that fault without APX. `seaworthy-launcher`'s build

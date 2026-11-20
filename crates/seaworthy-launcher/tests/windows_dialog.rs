@@ -34,7 +34,7 @@ use std::ffi::OsString;
 use std::io::Read as _;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -81,14 +81,17 @@ struct Launcher {
 
 impl Launcher {
     fn new(test: &str) -> Self {
-        // target/<profile>/deps/<test>.exe -> target/<profile>/examples/
-        let built = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .join("examples")
-            .join("desktop_launcher.exe");
+        // The example sits in target/<profile>/examples/. Where the test
+        // binary sits under target/<profile> is cargo's build-directory
+        // layout, which is not a stable interface (deps/<test>.exe before
+        // Rust 1.100, build/<package>/<hash>/out/<test>.exe since), so the
+        // nearest directory above it with the example is the profile's.
+        let exe = std::env::current_exe().unwrap();
+        let built = exe
+            .ancestors()
+            .map(|dir| dir.join("examples").join("desktop_launcher.exe"))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| exe.with_file_name("desktop_launcher.exe"));
         assert!(
             built.is_file(),
             "{} is missing: `cargo test` builds the examples; run alone, build it first (cargo build -p seaworthy-launcher --example desktop_launcher)",
